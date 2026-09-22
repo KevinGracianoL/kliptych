@@ -1,10 +1,20 @@
 """Tests de los validadores deterministas del gate."""
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract
-from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, MediaInfo, Piece
+from kliptych.gate import (
+    CheckResult,
+    CheckStatus,
+    Gate,
+    GateResult,
+    GateStatus,
+    MediaInfo,
+    Piece,
+)
 from tests.support import FakeProbe, make_asset_ref, make_contract, make_media, make_piece
 
 
@@ -115,12 +125,19 @@ def test_spelling_lock_checked_in_subtitles(tmp_path: Path) -> None:
     )
 
 
-def test_spelling_lock_without_subtitles_passes_with_reason(tmp_path: Path) -> None:
+def test_spelling_lock_without_subtitles_is_unsupported(tmp_path: Path) -> None:
     contract = make_contract(hard=["subtitles.spelling_lock"], spelling_locks=["MarcaX"])
     piece = make_piece(_artifact(tmp_path), subtitle_text=None)
     check = _check(_result(tmp_path, contract, piece), "subtitles.spelling_lock")
-    assert check.status is CheckStatus.PASS
+    assert check.status is CheckStatus.UNSUPPORTED
     assert "subtítulos" in str(check.evidence["reason"])
+
+
+def test_spelling_lock_without_declared_locks_passes(tmp_path: Path) -> None:
+    contract = make_contract(hard=["subtitles.spelling_lock"], spelling_locks=[])
+    piece = make_piece(_artifact(tmp_path), subtitle_text=None)
+    check = _check(_result(tmp_path, contract, piece), "subtitles.spelling_lock")
+    assert check.status is CheckStatus.PASS
 
 
 def test_duration_bounds_are_enforced(tmp_path: Path) -> None:
@@ -149,6 +166,15 @@ def test_duration_without_bounds_passes(tmp_path: Path) -> None:
     result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
     assert _check(result, "duration.min").status is CheckStatus.PASS
     assert _check(result, "duration.max").status is CheckStatus.PASS
+
+
+def test_unknown_duration_is_unsupported(tmp_path: Path) -> None:
+    contract = make_contract(hard=["duration.min", "duration.max"], min_s=8, max_s=20)
+    media = make_media(duration_s=None)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    assert _check(result, "duration.min").status is CheckStatus.UNSUPPORTED
+    assert _check(result, "duration.max").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED
 
 
 def test_missing_audio_track_fails(tmp_path: Path) -> None:
@@ -182,11 +208,11 @@ def test_required_asset_must_be_registered(tmp_path: Path) -> None:
 
 
 def test_registered_asset_passes_and_tampering_fails(tmp_path: Path) -> None:
-    contract = make_contract(hard=["assets.required"], required_assets=[make_asset_ref("clip-01")])
     clip = tmp_path / "clip.mp4"
     _ = clip.write_bytes(b"video")
     registry = AssetRegistry(tmp_path)
-    _ = registry.register(asset_id="clip-01", kind="video", uri="clip.mp4", origin="brief")
+    ref = registry.register(asset_id="clip-01", kind="video", uri="clip.mp4", origin="brief")
+    contract = make_contract(hard=["assets.required"], required_assets=[ref])
     piece = make_piece(_artifact(tmp_path))
     assert _check(
         _result(tmp_path, contract, piece, registry=registry), "assets.required"
@@ -196,6 +222,87 @@ def test_registered_asset_passes_and_tampering_fails(tmp_path: Path) -> None:
     check = _check(_result(tmp_path, contract, piece, registry=registry), "assets.required")
     assert check.status is CheckStatus.FAIL
     assert check.evidence["tampered"] == ["clip-01"]
+
+
+def test_contract_asset_hash_mismatch_fails(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    _ = clip.write_bytes(b"video")
+    registry = AssetRegistry(tmp_path)
+    _ = registry.register(asset_id="clip-01", kind="video", uri="clip.mp4", origin="brief")
+    wrong = make_asset_ref("clip-01", sha256="a" * 64, size_bytes=999)
+    contract = make_contract(hard=["assets.required"], required_assets=[wrong])
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), registry=registry)
+    check = _check(result, "assets.required")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["mismatched"] == ["clip-01"]
+
+
+def test_unsafe_registry_uri_fails_without_exception(tmp_path: Path) -> None:
+    registry_file = tmp_path / "registry.json"
+    payload = {
+        "schema_version": "1.0",
+        "assets": [
+            {
+                "asset_id": "malo",
+                "kind": "file",
+                "uri": "../fuera.txt",
+                "sha256": "a" * 64,
+                "size_bytes": 1,
+                "mime": "text/plain",
+                "origin": "brief",
+                "license": None,
+                "resolved_at": datetime(2026, 9, 22, tzinfo=UTC).isoformat(),
+            }
+        ],
+    }
+    _ = registry_file.write_text(json.dumps(payload), encoding="utf-8")
+    registry = AssetRegistry.load(registry_file, tmp_path / "workspace")
+    contract = make_contract(hard=["assets.required"], required_assets=[make_asset_ref("malo")])
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), registry=registry)
+    check = _check(result, "assets.required")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["unsafe"]
+    assert result.status is GateStatus.REJECTED
+
+
+def test_campaign_prohibitions_are_enforced(tmp_path: Path) -> None:
+    contract = make_contract(hard=["caption.forbidden"], prohibitions=["sorteo"])
+    piece = make_piece(_artifact(tmp_path), caption="gran SORTEO @marca #marca")
+    check = _check(_result(tmp_path, contract, piece), "caption.forbidden")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["found"] == ["sorteo"]
+
+
+def test_mention_prefix_is_not_a_match(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = make_piece(_artifact(tmp_path), caption="gracias @marcado #marca")
+    check = _check(_result(tmp_path, contract, piece), "caption.required_mention")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["missing"] == ["@marca"]
+
+
+def test_mention_inside_email_is_not_a_match(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = make_piece(_artifact(tmp_path), caption="correo@marca.com y #marca")
+    check = _check(_result(tmp_path, contract, piece), "caption.required_mention")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["missing"] == ["@marca"]
+
+
+def test_mention_match_is_case_insensitive(tmp_path: Path) -> None:
+    contract = make_contract(required_mentions=["@Marca"])
+    piece = make_piece(_artifact(tmp_path), caption="hola @marca #marca")
+    assert _check(_result(tmp_path, contract, piece), "caption.required_mention").status is (
+        CheckStatus.PASS
+    )
+
+
+def test_hashtag_prefix_is_not_a_match(tmp_path: Path) -> None:
+    contract = make_contract(required_hashtags=["#marca"])
+    piece = make_piece(_artifact(tmp_path), caption="vamos #marcado @marca")
+    check = _check(_result(tmp_path, contract, piece), "caption.required_hashtag")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["missing"] == ["#marca"]
 
 
 def test_no_required_assets_passes(tmp_path: Path) -> None:

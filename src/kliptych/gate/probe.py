@@ -107,6 +107,9 @@ class FFprobeProbe:
         except subprocess.TimeoutExpired as error:
             msg = f"ffprobe excedió el timeout de {self._timeout_s} s"
             raise ProbeError(msg) from error
+        except OSError as error:
+            msg = f"no se pudo ejecutar ffprobe ({self._ffprobe}): {error}"
+            raise ProbeError(msg) from error
         if completed.returncode != 0:
             msg = f"ffprobe falló con código {completed.returncode}: {completed.stderr.strip()}"
             raise ProbeError(msg)
@@ -135,10 +138,10 @@ def _parse_probe_output(stdout: str, path: Path) -> MediaInfo:
     )
 
 
-def _parse_duration(raw: str | None) -> float:
+def _parse_duration(raw: str | None) -> float | None:
     if raw is None:
-        return 0.0
+        return None
     try:
         return float(raw)
     except ValueError:
-        return 0.0
+        return None

@@ -17,18 +17,56 @@ ALL_HARD_RULES = (
 )
 
 
-def make_asset_ref(asset_id: str = "clip-01") -> AssetRef:
+def make_asset_ref(
+    asset_id: str = "clip-01",
+    *,
+    sha256: str = "a" * 64,
+    size_bytes: int = 5,
+) -> AssetRef:
     return AssetRef(
         asset_id=asset_id,
         kind="video",
         uri="clip.mp4",
-        sha256="a" * 64,
-        size_bytes=5,
+        sha256=sha256,
+        size_bytes=size_bytes,
         mime="video/mp4",
         origin="brief",
         license=None,
         resolved_at=datetime(2026, 9, 22, tzinfo=UTC),
     )
+
+
+def _active_rule_ids(
+    *,
+    min_s: int | None,
+    max_s: int | None,
+    first_line: str | None,
+    forbidden: Sequence[str],
+    prohibitions: Sequence[str],
+    must_mention: Sequence[str],
+    required_mentions: Sequence[str],
+    required_hashtags: Sequence[str],
+    spelling_locks: Sequence[str],
+    required_assets: Sequence[AssetRef],
+) -> list[str]:
+    active: list[str] = []
+    if min_s is not None:
+        active.append("duration.min")
+    if max_s is not None:
+        active.append("duration.max")
+    if first_line is not None:
+        active.append("caption.first_line")
+    if forbidden or prohibitions:
+        active.append("caption.forbidden")
+    if must_mention or required_mentions:
+        active.append("caption.required_mention")
+    if required_hashtags:
+        active.append("caption.required_hashtag")
+    if spelling_locks:
+        active.append("subtitles.spelling_lock")
+    if required_assets:
+        active.append("assets.required")
+    return active
 
 
 def make_contract(
@@ -37,15 +75,33 @@ def make_contract(
     recommended: Sequence[str] = (),
     manual_review: Sequence[str] = (),
     min_s: int | None = 8,
-    max_s: int | None = 60,
+    max_s: int | None = None,
     required_mentions: Sequence[str] = ("@marca",),
     required_hashtags: Sequence[str] = ("#marca",),
     must_mention: Sequence[str] = (),
     forbidden: Sequence[str] = (),
+    prohibitions: Sequence[str] = (),
     first_line: str | None = None,
     spelling_locks: Sequence[str] = (),
     required_assets: Sequence[AssetRef] = (),
 ) -> Contract:
+    plan = [*hard]
+    classified = {*hard, *recommended, *manual_review}
+    for rule_id in _active_rule_ids(
+        min_s=min_s,
+        max_s=max_s,
+        first_line=first_line,
+        forbidden=forbidden,
+        prohibitions=prohibitions,
+        must_mention=must_mention,
+        required_mentions=required_mentions,
+        required_hashtags=required_hashtags,
+        spelling_locks=spelling_locks,
+        required_assets=required_assets,
+    ):
+        if rule_id not in classified:
+            plan.append(rule_id)
+            classified.add(rule_id)
     return Contract.model_validate(
         {
             "schema_version": "1.0",
@@ -71,9 +127,9 @@ def make_contract(
             "official_audio": None,
             "watermark": {"required": False, "asset_id": None, "visible_full_video": False},
             "spelling_locks": list(spelling_locks),
-            "prohibitions": [],
+            "prohibitions": list(prohibitions),
             "rules": {
-                "hard": list(hard),
+                "hard": plan,
                 "recommended": list(recommended),
                 "manual_review": list(manual_review),
             },
@@ -105,7 +161,7 @@ def make_piece(
 
 def make_media(
     *,
-    duration_s: float = 12.0,
+    duration_s: float | None = 12.0,
     has_video: bool = True,
     has_audio: bool = True,
 ) -> MediaInfo:

@@ -202,3 +202,55 @@ class Contract(ContractBase):
             msg = "audio_rule 'official_required' exige official_audio con al menos una URL"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _declared_restrictions_are_classified(self) -> Self:
+        classified = {*self.rules.hard, *self.rules.recommended, *self.rules.manual_review}
+        missing: set[str] = set()
+        for platform, rules in self.platforms.items():
+            missing.update(
+                f"{platform}.{rule_id}"
+                for rule_id in active_restriction_rules(rules, self)
+                if rule_id not in classified
+            )
+        if missing:
+            msg = (
+                "restricciones declaradas sin regla clasificada en rules: "
+                f"{sorted(missing)}; cada regla debe ser hard, recommended o manual_review"
+            )
+            raise ValueError(msg)
+        return self
+
+
+def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[str]:
+    """Deriva los rule_ids que activa una plataforma según sus restricciones.
+
+    Args:
+        rules: Restricciones declaradas para una plataforma.
+        contract: Contrato completo (para restricciones globales).
+
+    Returns:
+        Los rule_ids del catálogo del gate que la plataforma exige; el
+        contrato debe clasificarlos en ``rules`` para que el gate los
+        evalúe en vez de ignorarlos en silencio.
+    """
+    active: list[str] = []
+    if rules.duration.min_s is not None:
+        active.append("duration.min")
+    if rules.duration.max_s is not None:
+        active.append("duration.max")
+    if rules.caption_rules.first_line is not None:
+        active.append("caption.first_line")
+    if rules.caption_rules.forbidden or contract.prohibitions:
+        active.append("caption.forbidden")
+    if rules.caption_rules.must_mention or rules.required_mentions:
+        active.append("caption.required_mention")
+    if rules.required_hashtags:
+        active.append("caption.required_hashtag")
+    if contract.assets.required:
+        active.append("assets.required")
+    if contract.watermark.required:
+        active.append("watermark.full_video")
+    if contract.spelling_locks:
+        active.append("subtitles.spelling_lock")
+    return active

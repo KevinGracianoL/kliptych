@@ -32,7 +32,7 @@ class RunManifest(_ManifestBase):
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
     brief_sha256: str | None = Field(default=None, pattern=_SHA256)
-    contract_schema_version: str | None = None
+    contract_schema_version: Literal["1.0"] | None = None
     contract_sha256: str | None = Field(default=None, pattern=_SHA256)
     model_version: str | None = None
     prompt_version: str | None = None

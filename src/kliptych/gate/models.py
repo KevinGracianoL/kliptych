@@ -58,10 +58,14 @@ class GateResult(_GateBase):
 
 
 class MediaInfo(_GateBase):
-    """Metadatos del artefacto obtenidos con ffprobe."""
+    """Metadatos del artefacto obtenidos con ffprobe.
+
+    ``duration_s`` es ``None`` cuando ffprobe no reporta una duración
+    medible; el gate debe tratar ese caso como no verificable, nunca como 0.
+    """
 
     format_name: str
-    duration_s: float
+    duration_s: float | None = None
     has_video: bool
     has_audio: bool
     width: int | None = None

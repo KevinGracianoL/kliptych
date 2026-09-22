@@ -4,23 +4,30 @@ Catálogo de reglas que el contrato puede declarar:
 
 - ``artifact.integrity``: el artefacto existe y su hash es calculable.
 - ``artifact.video_stream``: el artefacto tiene pista de video.
-- ``assets.required``: los assets obligatorios están registrados e íntegros.
+- ``assets.required``: los assets obligatorios están registrados, íntegros y
+  coinciden con el hash y tamaño declarados en el contrato.
 - ``audio.present``: el artefacto tiene pista de audio.
 - ``caption.first_line``: el caption abre con la primera línea exigida.
-- ``caption.forbidden``: no aparecen términos prohibidos en el caption.
-- ``caption.required_hashtag``: están los hashtags obligatorios.
-- ``caption.required_mention``: están las menciones obligatorias.
-- ``duration.min`` / ``duration.max``: duración dentro del rango.
-- ``subtitles.spelling_lock``: spelling exacto en subtítulos.
+- ``caption.forbidden``: no aparecen términos prohibidos en el caption
+  (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
+- ``caption.required_hashtag``: están los hashtags obligatorios, con frontera
+  de token y comparación insensible a mayúsculas.
+- ``caption.required_mention``: están las menciones obligatorias, con frontera
+  de token y comparación insensible a mayúsculas.
+- ``duration.min`` / ``duration.max``: duración dentro del rango; si no se
+  pudo medir, el resultado es ``unsupported`` (jamás ``pass``).
+- ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
+  y con locks declarados el resultado es ``unsupported``.
 
 Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 ``unsupported`` (o ``manual_review`` si el contrato las clasificó así).
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from kliptych.assets import AssetNotFoundError, AssetRegistry
+from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
 from kliptych.contract import Contract, Format, PlatformRules
 from kliptych.gate.models import CheckStatus, MediaInfo, Piece
 
@@ -136,6 +143,9 @@ def check_video_stream(context: GateContext) -> CheckOutcome:
 def check_required_mentions(context: GateContext) -> CheckOutcome:
     """Verifica las menciones obligatorias del caption.
 
+    La comparación exige frontera de token (``@marca`` no se satisface con
+    ``@marcado`` ni con ``correo@marca.com``) y es insensible a mayúsculas.
+
     Args:
         context: Contexto resuelto del gate.
 
@@ -147,7 +157,9 @@ def check_required_mentions(context: GateContext) -> CheckOutcome:
         *context.rules.required_mentions,
         *context.rules.caption_rules.must_mention,
     ]
-    missing = [mention for mention in required if mention not in context.piece.caption]
+    missing = [
+        mention for mention in required if not _contains_mention(context.piece.caption, mention)
+    ]
     evidence: dict[str, object] = {"required": required, "missing": missing}
     return CheckOutcome(
         status=CheckStatus.FAIL if missing else CheckStatus.PASS,
@@ -158,19 +170,22 @@ def check_required_mentions(context: GateContext) -> CheckOutcome:
 def check_required_hashtags(context: GateContext) -> CheckOutcome:
     """Verifica los hashtags obligatorios.
 
+    El hashtag cuenta si aparece en el campo ``hashtags`` (igualdad
+    normalizada) o en el caption con frontera de token (``#marca`` no se
+    satisface con ``#marcado``); la comparación es insensible a mayúsculas.
+
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si cada hashtag aparece en el caption o en el campo hashtags
-        (comparación insensible a mayúsculas); FAIL con los faltantes.
+        PASS si cada hashtag aparece; FAIL con los faltantes.
     """
     available = {_normalize_hashtag(tag) for tag in context.piece.hashtags}
-    caption = context.piece.caption.lower()
     missing = [
         tag
         for tag in context.rules.required_hashtags
-        if _normalize_hashtag(tag) not in available and tag.lower() not in caption
+        if _normalize_hashtag(tag) not in available
+        and not _contains_hashtag(context.piece.caption, tag)
     ]
     evidence: dict[str, object] = {
         "required": list(context.rules.required_hashtags),
@@ -189,15 +204,15 @@ def check_forbidden_terms(context: GateContext) -> CheckOutcome:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si no aparece ningún término de ``caption_rules.forbidden``;
-        FAIL con los términos encontrados.
+        PASS si no aparece ningún término de ``caption_rules.forbidden`` ni
+        de las ``prohibitions`` de la campaña; FAIL con los encontrados.
     """
     caption = context.piece.caption.lower()
-    found = [term for term in context.rules.caption_rules.forbidden if term.lower() in caption]
-    evidence: dict[str, object] = {
-        "forbidden": list(context.rules.caption_rules.forbidden),
-        "found": found,
-    }
+    forbidden = list(
+        dict.fromkeys([*context.rules.caption_rules.forbidden, *context.contract.prohibitions])
+    )
+    found = [term for term in forbidden if term.lower() in caption]
+    evidence: dict[str, object] = {"forbidden": forbidden, "found": found}
     return CheckOutcome(
         status=CheckStatus.FAIL if found else CheckStatus.PASS,
         evidence=evidence,
@@ -232,11 +247,14 @@ def check_spelling_locks(context: GateContext) -> CheckOutcome:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si no hay subtítulos o todos los locks aparecen literalmente;
-        FAIL con los locks faltantes.
+        PASS si el contrato no declara locks o todos aparecen literalmente;
+        FAIL con los locks faltantes; UNSUPPORTED si hay locks declarados
+        pero la pieza no trae subtítulos que verificar.
     """
+    if not context.contract.spelling_locks:
+        return _pass(reason="el contrato no declara spelling_locks")
     if context.piece.subtitle_text is None:
-        return _pass(reason="la pieza no tiene subtítulos que revisar")
+        return _unsupported("no hay subtítulos para verificar los spelling locks")
     missing = [
         lock for lock in context.contract.spelling_locks if lock not in context.piece.subtitle_text
     ]
@@ -251,28 +269,44 @@ def check_spelling_locks(context: GateContext) -> CheckOutcome:
 
 
 def check_required_assets(context: GateContext) -> CheckOutcome:
-    """Verifica que los assets obligatorios estén registrados e íntegros.
+    """Verifica los assets obligatorios contra el registro y el contrato.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si todos los assets requeridos existen con hash intacto; FAIL
-        con los ausentes y los manipulados.
+        PASS si cada asset requerido está registrado, su archivo está
+        íntegro y su hash y tamaño coinciden con lo declarado en el
+        contrato; FAIL con los ausentes, divergentes, manipulados o con
+        rutas inseguras.
     """
     missing: list[str] = []
+    mismatched: list[str] = []
     tampered: list[str] = []
+    unsafe: list[str] = []
     for asset in context.contract.assets.required:
         try:
-            _ = context.assets.get(asset.asset_id)
+            registered = context.assets.get(asset.asset_id)
+            intact = context.assets.verify(asset.asset_id)
         except AssetNotFoundError:
             missing.append(asset.asset_id)
             continue
-        if not context.assets.verify(asset.asset_id):
+        except (AssetError, OSError) as error:
+            unsafe.append(f"{asset.asset_id}: {error}")
+            continue
+        if registered.sha256 != asset.sha256 or registered.size_bytes != asset.size_bytes:
+            mismatched.append(asset.asset_id)
+        elif not intact:
             tampered.append(asset.asset_id)
-    evidence: dict[str, object] = {"missing": missing, "tampered": tampered}
+    evidence: dict[str, object] = {
+        "missing": missing,
+        "mismatched": mismatched,
+        "tampered": tampered,
+        "unsafe": unsafe,
+    }
+    failed = bool(missing or mismatched or tampered or unsafe)
     return CheckOutcome(
-        status=CheckStatus.FAIL if missing or tampered else CheckStatus.PASS,
+        status=CheckStatus.FAIL if failed else CheckStatus.PASS,
         evidence=evidence,
     )
 
@@ -298,6 +332,8 @@ def _duration_outcome(context: GateContext, bound: int | None, *, minimum: bool)
     if bound is None:
         return _pass(bound=None)
     duration = context.media.duration_s
+    if duration is None:
+        return _unsupported("no se pudo medir la duración del artefacto")
     within = duration >= bound if minimum else duration <= bound
     label = "min_s" if minimum else "max_s"
     evidence: dict[str, object] = {label: bound, "duration_s": duration}
@@ -305,6 +341,17 @@ def _duration_outcome(context: GateContext, bound: int | None, *, minimum: bool)
         status=CheckStatus.PASS if within else CheckStatus.FAIL,
         evidence=evidence,
     )
+
+
+def _contains_mention(caption: str, mention: str) -> bool:
+    pattern = rf"(?<![\w@]){re.escape(mention)}(?!\w)"
+    return re.search(pattern, caption, flags=re.IGNORECASE) is not None
+
+
+def _contains_hashtag(caption: str, tag: str) -> bool:
+    normalized = _normalize_hashtag(tag)
+    pattern = rf"(?<![\w#])#{re.escape(normalized)}(?!\w)"
+    return re.search(pattern, caption, flags=re.IGNORECASE) is not None
 
 
 def _normalize_hashtag(tag: str) -> str:

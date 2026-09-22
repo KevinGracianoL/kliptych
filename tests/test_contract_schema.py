@@ -53,7 +53,17 @@ def _contract_data(**overrides: object) -> dict[str, object]:
         "spelling_locks": ["MarcaX"],
         "prohibitions": ["música con copyright"],
         "rules": {
-            "hard": ["duration.min", "caption.required_mention"],
+            "hard": [
+                "artifact.integrity",
+                "assets.required",
+                "caption.forbidden",
+                "caption.required_hashtag",
+                "caption.required_mention",
+                "duration.max",
+                "duration.min",
+                "subtitles.spelling_lock",
+                "watermark.full_video",
+            ],
             "recommended": [],
             "manual_review": [],
         },
@@ -108,6 +118,11 @@ def test_rule_cannot_be_classified_twice() -> None:
 def test_rule_ids_must_be_dotted() -> None:
     with pytest.raises(ValidationError, match=r"rules\.hard"):
         _ = _build(rules={"hard": ["duration"], "recommended": [], "manual_review": []})
+
+
+def test_restriction_without_classified_rule_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="clasificada"):
+        _ = _build(rules={"hard": [], "recommended": [], "manual_review": []})
 
 
 def test_slideshow_mode_requires_slideshow_format() -> None:

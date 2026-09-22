@@ -68,8 +68,45 @@ def test_document_without_format_defaults_safely(
     info = FFprobeProbe().probe(_media_file(tmp_path))
     assert info.has_video is False
     assert info.has_audio is False
-    assert info.duration_s == pytest.approx(0.0)
+    assert info.duration_s is None
     assert info.format_name == "desconocido"
+
+
+def test_probe_invokes_ffprobe_with_exact_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _completed(json.dumps({}))
+
+    monkeypatch.setattr("kliptych.gate.probe.subprocess.run", run)
+    target = _media_file(tmp_path)
+    _ = FFprobeProbe(ffprobe="ffprobe").probe(target)
+    assert calls == [
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(target),
+        ]
+    ]
+
+
+def test_unexpected_os_error_becomes_probe_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise PermissionError(13, "permiso denegado")
+
+    monkeypatch.setattr("kliptych.gate.probe.subprocess.run", run)
+    with pytest.raises(ProbeError, match="no se pudo ejecutar ffprobe"):
+        _ = FFprobeProbe().probe(_media_file(tmp_path))
 
 
 def test_invalid_json_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

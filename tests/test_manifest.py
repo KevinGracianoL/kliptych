@@ -92,6 +92,11 @@ def test_manifest_rejects_unknown_fields() -> None:
         _ = _manifest(promesa="subir por API")
 
 
+def test_manifest_schema_version_is_locked() -> None:
+    with pytest.raises(ValidationError, match="contract_schema_version"):
+        _ = _manifest(contract_schema_version="2.0")
+
+
 def test_manifest_requires_timezone_aware_start() -> None:
     naive = datetime.fromisoformat("2026-09-22T10:00:00")
     with pytest.raises(ValidationError, match="started_at"):
