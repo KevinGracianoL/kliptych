@@ -101,13 +101,14 @@ class AssetRegistry:
     ) -> AssetRef:
         """Registra un asset resolviendo ruta, hash, tamaño y MIME.
 
-        La ruta debe quedar dentro de la raíz del workspace; una ruta que
-        escape produce ``UnsafeAssetPathError``.
+        La ruta debe ser relativa a la raíz del workspace; una ruta absoluta,
+        con drive o UNC se rechaza sin tocar el filesystem (``Path.resolve``
+        sobre UNC dispara DNS/SMB en Windows).
 
         Args:
             asset_id: Identificador único dentro del workspace.
             kind: Tipo de asset (video, image, audio, file, ...).
-            uri: Ruta relativa a la raíz (o absoluta dentro de ella).
+            uri: Ruta relativa a la raíz del workspace.
             origin: Procedencia declarada del asset.
             license: Licencia declarada, si existe.
 
@@ -186,6 +187,22 @@ class AssetRegistry:
             return False
         return path.stat().st_size == ref.size_bytes and sha256_file(path) == ref.sha256
 
+    def canonical_uri(self, uri: str) -> str:
+        """Devuelve la forma canónica relativa de una uri de asset.
+
+        Una uri no relativa o que escape de la raíz produce
+        ``UnsafeAssetPathError``.
+
+        Args:
+            uri: Ruta relativa a la raíz del workspace.
+
+        Returns:
+            La ruta relativa en formato POSIX, resuelta y normalizada igual
+            que la uri almacenada por :meth:`register`.
+        """
+        path = self._resolve(uri)
+        return path.relative_to(self._root).as_posix()
+
     def save(self, path: Path) -> None:
         """Escribe el registro como JSON versionado.
 
@@ -218,7 +235,11 @@ class AssetRegistry:
         return cls(root, assets)
 
     def _resolve(self, uri: str) -> Path:
-        resolved = (self._root / Path(uri)).resolve()
+        candidate = Path(uri)
+        if candidate.is_absolute() or candidate.drive or uri.startswith(("\\\\", "//")):
+            msg = f"la uri del asset debe ser relativa a la raíz del workspace: {uri}"
+            raise UnsafeAssetPathError(msg)
+        resolved = (self._root / candidate).resolve()
         if not resolved.is_relative_to(self._root):
             msg = f"ruta de asset fuera de la raíz del workspace: {uri}"
             raise UnsafeAssetPathError(msg)
