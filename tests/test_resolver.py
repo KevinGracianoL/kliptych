@@ -610,6 +610,28 @@ def test_base_rule_cannot_be_downgraded_to_recommended(tmp_path: Path) -> None:
     assert result.contract is not None
     assert "artifact.integrity" in result.contract.rules.hard
     assert "artifact.integrity" not in result.contract.rules.recommended
+    assert "rules.artifact.integrity" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
+
+
+def test_base_rule_cannot_be_downgraded_to_manual_review(tmp_path: Path) -> None:
+    draft = make_draft(
+        rules={
+            "hard": candidate(
+                [
+                    "duration.min",
+                    "caption.required_hashtag",
+                    "caption.required_mention",
+                ]
+            ),
+            "recommended": candidate([]),
+            "manual_review": candidate(["artifact.integrity"]),
+        }
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "artifact.integrity" in result.contract.rules.hard
+    assert "artifact.integrity" not in result.contract.rules.manual_review
+    assert "rules.artifact.integrity" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
 
 
 def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:

@@ -13,8 +13,10 @@ Política de resolución:
   (fail-closed: se declaró, se exige) y se reporta como ``rule_defaulted``.
 - Las reglas base del gate (``artifact.integrity`` siempre,
   ``artifact.video_stream`` para formato video y ``audio.present`` cuando alguna
-  plataforma exige audio) se siembran como ``hard`` si el draft no las clasificó:
-  el brief (§5.2/5.4) las considera checks del núcleo, no reglas de campaña.
+  plataforma exige audio) se fuerzan como ``hard``: el brief (§5.2/5.4) las
+  considera checks del núcleo, no reglas de campaña, y un draft no puede
+  degradarlas. Si el draft las clasificaba en otra categoría, se reporta
+  ``rule_defaulted``.
 - Los assets obligatorios se resuelven contra el ``AssetRegistry``; si no se
   pueden registrar, el resultado es ``MANUAL_REVIEW``. Un asset opcional que no
   se puede resolver se descarta y se reporta (no bloquea).
@@ -650,8 +652,22 @@ def _resolve_rules(
             hard.append(rule_id)
         if rule_id in recommended:
             recommended.remove(rule_id)
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.RULE_DEFAULTED,
+                    field=f"rules.{rule_id}",
+                    detail="regla base reclasificada como hard (fail-closed)",
+                )
+            )
         if rule_id in manual_review:
             manual_review.remove(rule_id)
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.RULE_DEFAULTED,
+                    field=f"rules.{rule_id}",
+                    detail="regla base reclasificada como hard (fail-closed)",
+                )
+            )
     for platform, platform_rules in context.platforms.items():
         for rule_id in active_restriction_rules(platform_rules, context.global_restrictions):
             if rule_id not in classified:
