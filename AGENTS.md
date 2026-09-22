@@ -9,6 +9,9 @@ trabajen en este repo. El contexto completo del proyecto vive en
 - Todo cambio entra por rama + PR con CI verde; `main` no recibe pushes
   directos (hook local en `.githooks/pre-push`, activar con
   `git config core.hooksPath .githooks`).
+- Los PR se abren siempre en estado **ready for review**, nunca como draft: si
+  el trabajo no está listo, no se abre el PR; al abrirlo queda listo para la
+  validación del owner.
 - Diseñar todo, implementar por fases A→F en orden, sin saltar. Cada fase deja
   algo ejecutable.
 - Nada se marca como implementado si no tiene corrida end-to-end. No vale solo
