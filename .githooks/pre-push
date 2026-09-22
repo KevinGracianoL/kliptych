@@ -1,0 +1,14 @@
+#!/bin/sh
+# Bloquea pushes directos a main: todo cambio entra por rama + PR con CI verde.
+# Activar con: git config core.hooksPath .githooks
+
+protected="refs/heads/main"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$remote_ref" = "$protected" ]; then
+        echo "kliptych: push directo a main bloqueado; usa una rama y un PR." >&2
+        exit 1
+    fi
+done
+
+exit 0

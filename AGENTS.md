@@ -6,6 +6,9 @@ trabajen en este repo. El contexto completo del proyecto vive en
 
 ## Contrato de trabajo
 
+- Todo cambio entra por rama + PR con CI verde; `main` no recibe pushes
+  directos (hook local en `.githooks/pre-push`, activar con
+  `git config core.hooksPath .githooks`).
 - Diseñar todo, implementar por fases A→F en orden, sin saltar. Cada fase deja
   algo ejecutable.
 - Nada se marca como implementado si no tiene corrida end-to-end. No vale solo

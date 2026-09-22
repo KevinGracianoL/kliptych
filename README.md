@@ -62,6 +62,10 @@ uv run pytest
 
 Doble cero en CI antes de mergear: lint + type + test, en Linux y Windows.
 
+Todo cambio entra por rama + PR con CI verde; `main` no recibe pushes directos
+(hook local en `.githooks/pre-push`; activar una vez con
+`git config core.hooksPath .githooks`).
+
 ## Política de datos
 
 - `campaigns/private/` y `runs/` nunca se commitean.
