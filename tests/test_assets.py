@@ -125,6 +125,12 @@ def test_canonical_uri_rejects_traversal(tmp_path: Path) -> None:
         _ = registry.canonical_uri("../fuera.txt")
 
 
+def test_register_rejects_nul_byte_in_uri(tmp_path: Path) -> None:
+    registry = AssetRegistry(tmp_path)
+    with pytest.raises(UnsafeAssetPathError, match="nulo"):
+        _ = registry.register(asset_id="a", kind="file", uri="clip\x00.mp4", origin="brief")
+
+
 def test_duplicate_asset_id_is_rejected(tmp_path: Path) -> None:
     _ = _write(tmp_path, "clip.mp4")
     registry = AssetRegistry(tmp_path)

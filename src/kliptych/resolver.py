@@ -646,9 +646,12 @@ def _resolve_rules(
     if any(rules.audio_rule is not AudioRule.ANY for rules in context.platforms.values()):
         base_rules.append("audio.present")
     for rule_id in base_rules:
-        if rule_id not in classified:
-            classified.add(rule_id)
+        if rule_id not in hard:
             hard.append(rule_id)
+        if rule_id in recommended:
+            recommended.remove(rule_id)
+        if rule_id in manual_review:
+            manual_review.remove(rule_id)
     for platform, platform_rules in context.platforms.items():
         for rule_id in active_restriction_rules(platform_rules, context.global_restrictions):
             if rule_id not in classified:

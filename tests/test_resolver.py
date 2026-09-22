@@ -575,11 +575,81 @@ def test_prohibitions_default_to_hard_and_gate_rejects(tmp_path: Path) -> None:
     assert _check(gate_result, "caption.forbidden").status is CheckStatus.FAIL
 
 
-def test_spelling_locks_default_to_hard(tmp_path: Path) -> None:
+def test_spelling_locks_default_to_hard_and_gate_rejects(tmp_path: Path) -> None:
     draft = make_draft(spelling_locks=candidate(["MarcaX"]), rules=None)
     result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
     assert result.contract is not None
     assert "subtitles.spelling_lock" in result.contract.rules.hard
+    artifact = tmp_path / "piece.mp4"
+    _ = artifact.write_bytes(b"video")
+    gate = Gate(FakeProbe(info=make_media()))
+    gate_result = gate.run(
+        contract=result.contract,
+        piece=make_piece(artifact, subtitle_text="bienvenidos a maracax"),
+        assets=AssetRegistry(tmp_path),
+    )
+    assert gate_result.status is GateStatus.REJECTED
+    assert _check(gate_result, "subtitles.spelling_lock").status is CheckStatus.FAIL
+
+
+def test_base_rule_cannot_be_downgraded_to_recommended(tmp_path: Path) -> None:
+    draft = make_draft(
+        rules={
+            "hard": candidate(
+                [
+                    "duration.min",
+                    "caption.required_hashtag",
+                    "caption.required_mention",
+                ]
+            ),
+            "recommended": candidate(["artifact.integrity"]),
+            "manual_review": candidate([]),
+        }
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "artifact.integrity" in result.contract.rules.hard
+    assert "artifact.integrity" not in result.contract.rules.recommended
+
+
+def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
+    draft = make_draft(
+        platforms={
+            "tiktok": {
+                "duration": {"min_s": candidate(8)},
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+                "audio_rule": candidate("no_trending"),
+            },
+            "instagram_reels": {"duration": {"min_s": candidate(8)}},
+        },
+        rules=None,
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "audio.present" in result.contract.rules.hard
+    artifact = tmp_path / "piece.mp4"
+    _ = artifact.write_bytes(b"video")
+    gate = Gate(FakeProbe(info=make_media(has_audio=False)))
+    gate_result = gate.run(
+        contract=result.contract,
+        piece=make_piece(artifact, caption="libre", platform=Platform.INSTAGRAM_REELS),
+        assets=AssetRegistry(tmp_path),
+    )
+    assert gate_result.status is GateStatus.PASSED
+    assert _check(gate_result, "audio.present").status is CheckStatus.PASS
+
+
+def test_nul_uri_on_registered_asset_is_rejected(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"video")
+    registry = AssetRegistry(tmp_path)
+    _ = registry.register(asset_id="clip-01", kind="video", uri="clip.mp4", origin="brief")
+    draft = make_draft(
+        assets={"required": [make_asset_draft(uri="clip.mp4\x00evil")], "optional": []}
+    )
+    result = resolve_contract(draft, registry=registry)
+    assert result.status is ResolutionStatus.MANUAL_REVIEW
+    assert _issue_fields(result, IssueCode.UNRESOLVED_ASSET) == ["assets.required[0]"]
 
 
 def test_absent_assets_resolve_to_empty_bundle(tmp_path: Path) -> None:

@@ -235,6 +235,9 @@ class AssetRegistry:
         return cls(root, assets)
 
     def _resolve(self, uri: str) -> Path:
+        if "\x00" in uri:
+            msg = f"la uri del asset contiene un byte nulo: {uri!r}"
+            raise UnsafeAssetPathError(msg)
         candidate = Path(uri)
         if candidate.is_absolute() or candidate.drive or uri.startswith(("\\\\", "//")):
             msg = f"la uri del asset debe ser relativa a la raíz del workspace: {uri}"

@@ -90,6 +90,7 @@ def make_contract(
     required_assets: Sequence[AssetRef] = (),
     watermark_required: bool = False,
     watermark_visible_full_video: bool = False,
+    audio_rule: str = "own_clip",
 ) -> Contract:
     plan = [*hard]
     classified = {*hard, *recommended, *manual_review}
@@ -124,7 +125,7 @@ def make_contract(
                         "first_line": first_line,
                         "forbidden": list(forbidden),
                     },
-                    "audio_rule": "own_clip",
+                    "audio_rule": audio_rule,
                     "required_hashtags": list(required_hashtags),
                     "required_mentions": list(required_mentions),
                     "attribution": {"type": "none", "value": None},
