@@ -309,3 +309,16 @@ def test_no_required_assets_passes(tmp_path: Path) -> None:
     contract = make_contract(hard=["assets.required"])
     result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
     assert _check(result, "assets.required").status is CheckStatus.PASS
+
+
+def test_partial_watermark_gate_passes(tmp_path: Path) -> None:
+    contract = make_contract(watermark_required=True, watermark_visible_full_video=False)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
+    assert result.status is GateStatus.PASSED
+
+
+def test_full_video_watermark_is_unsupported(tmp_path: Path) -> None:
+    contract = make_contract(watermark_required=True, watermark_visible_full_video=True)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
+    assert _check(result, "watermark.full_video").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED

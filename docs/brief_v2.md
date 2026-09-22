@@ -200,6 +200,13 @@ Notas de diseño:
 - Si hay conflicto entre plataformas, se resuelve por plataforma; si el
   conflicto es interno (dos reglas duras incompatibles), el contrato se marca
   en conflicto y va a MANUAL_REVIEW.
+- Nota de implementación (schema v1.0): `required_hashtags`, `required_mentions`
+  y `caption_rules.must_mention` exigen el prefijo `#`/`@` respectivamente; el
+  gate compara con frontera de token e ignora mayúsculas. Cada restricción
+  declarada en la plataforma debe estar clasificada en `rules` (hard,
+  recommended o manual_review); si no, el contrato no valida. `audio_rule`,
+  `attribution` y `link_rules.link_in_bio` todavía no tienen rule_id en el
+  catálogo del gate (fases C/D) y no exigen clasificación aún.
 
 Los 5 ejemplos ya analizados sirven como TEST FIXTURES del extractor.
 Como el repo es privado, también se permiten fixtures reales anonimizados

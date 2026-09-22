@@ -32,7 +32,7 @@ class DurationRange(ContractBase):
 class CaptionRules(ContractBase):
     """Reglas de caption para una plataforma."""
 
-    must_mention: list[str] = Field(default_factory=list)
+    must_mention: list[_MENTION] = Field(default_factory=list)
     first_line: str | None = None
     forbidden: list[str] = Field(default_factory=list)
 

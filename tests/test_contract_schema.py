@@ -131,6 +131,17 @@ def test_mention_without_at_prefix_is_rejected() -> None:
         _ = _build(platforms={"tiktok": _platform(required_mentions=["marca"])})
 
 
+def test_must_mention_without_at_prefix_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="must_mention"):
+        _ = _build(
+            platforms={
+                "tiktok": _platform(
+                    caption_rules={"must_mention": ["marca"], "first_line": None, "forbidden": []}
+                )
+            }
+        )
+
+
 def test_hashtag_without_hash_prefix_is_rejected() -> None:
     with pytest.raises(ValidationError, match="required_hashtags"):
         _ = _build(platforms={"tiktok": _platform(required_hashtags=["marca"])})
