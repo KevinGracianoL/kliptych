@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kliptych.contract import AssetRef, Contract, Platform
+from kliptych.contract import AssetRef, Contract, ContractDraft, Platform
 from kliptych.gate import MediaInfo, Piece, ProbeError
 
 ALL_HARD_RULES = (
@@ -199,3 +199,66 @@ class FakeProbe:
             raise self.error
         assert self.info is not None
         return self.info
+
+
+def candidate(value: object, quote: str = "cita del brief") -> dict[str, object]:
+    return {
+        "value": value,
+        "evidence": {"quote": quote, "start": 0, "end": len(quote), "location": "brief.md#l1"},
+        "confidence": "explicit",
+    }
+
+
+def conflict_candidate(quote: str = "el brief se contradice") -> dict[str, object]:
+    return {
+        "evidence": {"quote": quote, "start": 0, "end": len(quote), "location": "brief.md#l2"},
+        "confidence": "conflict",
+    }
+
+
+def make_draft(**overrides: object) -> ContractDraft:
+    data: dict[str, object] = {
+        "schema_version": "1.0",
+        "campaign_id": candidate("camp-01"),
+        "format": candidate("video"),
+        "mode": candidate("given_clips"),
+        "platforms": {
+            "tiktok": {
+                "duration": {"min_s": candidate(8)},
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+            }
+        },
+        "languages": {"source": candidate("es"), "caption": candidate("es")},
+        "watermark": {
+            "required": candidate(value=False),
+            "visible_full_video": candidate(value=False),
+        },
+        "rules": {
+            "hard": candidate(
+                [
+                    "duration.min",
+                    "caption.required_hashtag",
+                    "caption.required_mention",
+                ]
+            ),
+            "recommended": candidate([]),
+            "manual_review": candidate([]),
+        },
+        "assets": {"required": [], "optional": []},
+    }
+    data.update(overrides)
+    return ContractDraft.model_validate(data)
+
+
+def make_asset_draft(
+    *,
+    asset_id: str = "clip-01",
+    uri: str = "clip.mp4",
+) -> dict[str, object]:
+    return {
+        "asset_id": candidate(asset_id),
+        "kind": candidate("video"),
+        "uri": candidate(uri),
+        "origin": candidate("brief"),
+    }
