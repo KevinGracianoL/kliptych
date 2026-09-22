@@ -44,3 +44,11 @@ class AttributionType(StrEnum):
     TAG = "tag"
     URL = "url"
     NONE = "none"
+
+
+class RuleStrength(StrEnum):
+    """Fuerza con la que el contrato clasifica cada regla."""
+
+    HARD = "hard"
+    RECOMMENDED = "recommended"
+    MANUAL_REVIEW = "manual_review"

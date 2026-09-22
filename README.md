@@ -39,7 +39,7 @@ corrida end-to-end; este README se actualiza solo con evidencia real.
 - [x] Contrato pydantic v1.0 con evidencia por campo.
 - [x] Asset registry con sha256/MIME/origen/licencia.
 - [ ] Run manifest reproducible.
-- [ ] Gate core determinista.
+- [x] Gate core determinista fail-closed.
 - [ ] Ingestores de briefs (Google Docs, Notion, .docx, PDF, texto).
 - [ ] Interfaz `CampaignModel` + primer backend con fixtures grabados.
 - [ ] Exportador de paquetes de entrega.

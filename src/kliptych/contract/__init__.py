@@ -15,7 +15,14 @@ from kliptych.contract.draft import (
     RuleSetDraft,
     WatermarkDraft,
 )
-from kliptych.contract.enums import AttributionType, AudioRule, Format, Mode, Platform
+from kliptych.contract.enums import (
+    AttributionType,
+    AudioRule,
+    Format,
+    Mode,
+    Platform,
+    RuleStrength,
+)
 from kliptych.contract.evidence import Confidence, FieldCandidate, SourceEvidence
 from kliptych.contract.schema import (
     AnalyticsProofRequired,
@@ -69,6 +76,7 @@ __all__ = [
     "PlatformRules",
     "RuleSet",
     "RuleSetDraft",
+    "RuleStrength",
     "SourceEvidence",
     "Watermark",
     "WatermarkDraft",

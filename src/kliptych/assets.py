@@ -2,7 +2,6 @@
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from hashlib import sha256
 from mimetypes import guess_type
 from pathlib import Path
 from types import MappingProxyType
@@ -11,8 +10,8 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from kliptych.contract import AssetRef
+from kliptych.hashing import sha256_file
 
-_CHUNK_SIZE = 1024 * 1024
 _FALLBACK_MIME = "application/octet-stream"
 
 # MIME determinista para los formatos del dominio: `mimetypes` depende del
@@ -59,14 +58,6 @@ class RegistryDocument(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     assets: list[AssetRef] = Field(default_factory=list)
-
-
-def _hash_file(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _detect_mime(path: Path) -> str:
@@ -138,7 +129,7 @@ class AssetRegistry:
             asset_id=asset_id,
             kind=kind,
             uri=path.relative_to(self._root).as_posix(),
-            sha256=_hash_file(path),
+            sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
             mime=_detect_mime(path),
             origin=origin,
@@ -193,7 +184,7 @@ class AssetRegistry:
         path = self.path_for(asset_id)
         if not path.is_file():
             return False
-        return path.stat().st_size == ref.size_bytes and _hash_file(path) == ref.sha256
+        return path.stat().st_size == ref.size_bytes and sha256_file(path) == ref.sha256
 
     def save(self, path: Path) -> None:
         """Escribe el registro como JSON versionado.

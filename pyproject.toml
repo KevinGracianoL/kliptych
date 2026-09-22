@@ -44,9 +44,28 @@ ignore = [
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
 ]
+"src/kliptych/gate/models.py" = [
+    "hardcoded-password-string", # falso positivo: PASS/FAIL son estados del gate
+]
+"src/kliptych/gate/probe.py" = [
+    # ffprobe se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
+"tests/test_gate_probe.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # fixtures sintéticos.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
 "tests/**" = [
     "assert",                       # los tests usan assert por diseño
     "magic-value-comparison",       # los tests comparan contra literales
+    "too-many-arguments",           # los builders de fixtures son keyword-only
+    "undocumented-public-method",   # sin docstring de método en tests
+    "unused-method-argument",       # los fakes ignoran argumentos por diseño
     "undocumented-public-module",   # sin docstring de módulo en tests
     "undocumented-public-class",    # sin docstring de clase en tests
     "undocumented-public-function", # sin docstring de función en tests
