@@ -36,7 +36,7 @@ Fase A (núcleo) en construcción. Nada se considera implementado si no tiene un
 corrida end-to-end; este README se actualiza solo con evidencia real.
 
 - [x] Bootstrap: uv + Python 3.13, ruff, basedpyright, pytest y CI.
-- [ ] Contrato pydantic v1.0 con evidencia por campo.
+- [x] Contrato pydantic v1.0 con evidencia por campo.
 - [ ] Asset registry con sha256/MIME/origen/licencia.
 - [ ] Run manifest reproducible.
 - [ ] Gate core determinista.
