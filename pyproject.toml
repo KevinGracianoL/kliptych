@@ -41,8 +41,16 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"src/kliptych/__main__.py" = [
+    "print", # la CLI imprime JSON y ayuda en stdout
+]
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
+]
+"src/kliptych/environment.py" = [
+    # herramientas del sistema invocadas con lista de argumentos y shell=False
+    "suspicious-subprocess-import",
+    "subprocess-without-shell-equals-true",
 ]
 "src/kliptych/gate/models.py" = [
     "hardcoded-password-string", # falso positivo: PASS/FAIL son estados del gate
@@ -65,6 +73,7 @@ ignore = [
     "magic-value-comparison",       # los tests comparan contra literales
     "too-many-arguments",           # los builders de fixtures son keyword-only
     "undocumented-public-method",   # sin docstring de método en tests
+    "undocumented-public-init",     # sin docstring de __init__ en tests
     "unused-method-argument",       # los fakes ignoran argumentos por diseño
     "undocumented-public-module",   # sin docstring de módulo en tests
     "undocumented-public-class",    # sin docstring de clase en tests
