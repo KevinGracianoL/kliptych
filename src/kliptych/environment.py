@@ -58,6 +58,7 @@ class SubprocessRunner:
                 list(argv),
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=timeout_s,
                 check=False,
             )
@@ -65,8 +66,8 @@ class SubprocessRunner:
             return CommandResult(ok=False, stderr=str(error))
         return CommandResult(
             ok=completed.returncode == 0,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
         )
 
 

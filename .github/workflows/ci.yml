@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Todo comando uv debe fallar si el lockfile quedó desactualizado.
+  UV_LOCKED: "1"
+
 jobs:
   gate:
     name: lint + type + test (${{ matrix.os }})
@@ -24,8 +28,16 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
       - name: Format check
         run: uv run ruff format --check .
@@ -38,3 +50,13 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+
+      - name: Integration tests must not skip
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest -m integration -q --no-cov | tee integration.log
+          if grep -q "skipped" integration.log; then
+            echo "::error::Los tests de integración se saltaron en CI"
+            exit 1
+          fi

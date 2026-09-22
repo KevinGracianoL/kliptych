@@ -1,7 +1,9 @@
 """Tests de la detección de entorno."""
 
+import locale
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +122,28 @@ def test_subprocess_runner_timeout() -> None:
         timeout_s=0.2,
     )
     assert result.ok is False
+
+
+def _undecodable_byte() -> bytes | None:
+    encoding = locale.getencoding()
+    for value in range(256):
+        try:
+            _ = bytes([value]).decode(encoding)
+        except UnicodeDecodeError:
+            return bytes([value])
+    return None
+
+
+def test_subprocess_runner_survives_undecodable_output(tmp_path: Path) -> None:
+    bad = _undecodable_byte()
+    if bad is None:
+        pytest.skip("el codec local decodifica todos los bytes")
+    script = tmp_path / "emit_bad_byte.py"
+    line = b"sys.stdout.buffer.write(b'hola \\x" + f"{bad[0]:02x}".encode() + b" fin')\n"
+    _ = script.write_bytes(b"import sys\n" + line)
+    result = SubprocessRunner().run([sys.executable, str(script)])
+    assert result.ok is True
+    assert "\ufffd" in result.stdout
 
 
 @pytest.mark.integration
