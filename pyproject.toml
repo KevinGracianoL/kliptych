@@ -41,6 +41,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"src/kliptych/assets.py" = [
+    "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
+]
 "tests/**" = [
     "assert",                       # los tests usan assert por diseño
     "magic-value-comparison",       # los tests comparan contra literales

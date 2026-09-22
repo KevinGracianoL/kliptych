@@ -37,7 +37,7 @@ corrida end-to-end; este README se actualiza solo con evidencia real.
 
 - [x] Bootstrap: uv + Python 3.13, ruff, basedpyright, pytest y CI.
 - [x] Contrato pydantic v1.0 con evidencia por campo.
-- [ ] Asset registry con sha256/MIME/origen/licencia.
+- [x] Asset registry con sha256/MIME/origen/licencia.
 - [ ] Run manifest reproducible.
 - [ ] Gate core determinista.
 - [ ] Ingestores de briefs (Google Docs, Notion, .docx, PDF, texto).
