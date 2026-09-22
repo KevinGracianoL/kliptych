@@ -11,6 +11,10 @@ Política de resolución:
   restricciones, por eso no se reportan como issues.
 - Una restricción activa sin clasificar en ``rules`` se clasifica como ``hard``
   (fail-closed: se declaró, se exige) y se reporta como ``rule_defaulted``.
+- Las reglas base del gate (``artifact.integrity`` siempre,
+  ``artifact.video_stream`` para formato video y ``audio.present`` cuando alguna
+  plataforma exige audio) se siembran como ``hard`` si el draft no las clasificó:
+  el brief (§5.2/5.4) las considera checks del núcleo, no reglas de campaña.
 - Los assets obligatorios se resuelven contra el ``AssetRegistry``; si no se
   pueden registrar, el resultado es ``MANUAL_REVIEW``. Un asset opcional que no
   se puede resolver se descarta y se reporta (no bloquea).
@@ -115,6 +119,7 @@ class ResolutionResult(ContractBase):
 class _RuleContext:
     platforms: dict[Platform, PlatformRules]
     global_restrictions: GlobalRestrictions
+    format_: Format
 
 
 class _ConfidenceCarrier(Protocol):
@@ -183,6 +188,7 @@ def _build_contract(
         draft,
         context=_RuleContext(
             platforms=platforms,
+            format_=format_,
             global_restrictions=GlobalRestrictions(
                 watermark_required=watermark.required,
                 watermark_visible_full_video=watermark.visible_full_video,
@@ -248,12 +254,16 @@ def _required_value[T](
     return None
 
 
+def _is_conflict(candidate: _ConfidenceCarrier | None) -> bool:
+    return candidate is not None and candidate.confidence is Confidence.CONFLICT
+
+
 def _note_conflict(
     candidate: _ConfidenceCarrier | None,
     field: str,
     issues: list[ResolutionIssue],
 ) -> None:
-    if candidate is not None and candidate.confidence is Confidence.CONFLICT:
+    if _is_conflict(candidate):
         issues.append(
             ResolutionIssue(
                 code=IssueCode.CONFLICT,
@@ -421,7 +431,7 @@ def _resolve_attribution(
     attribution_type = _value(draft.type)
     value = _value(draft.value)
     if attribution_type is None:
-        if value:
+        if value and not _is_conflict(draft.type):
             issues.append(
                 ResolutionIssue(
                     code=IssueCode.MISSING_REQUIRED,
@@ -433,13 +443,14 @@ def _resolve_attribution(
     if attribution_type is AttributionType.NONE:
         return Attribution(type=AttributionType.NONE)
     if not value:
-        issues.append(
-            ResolutionIssue(
-                code=IssueCode.MISSING_REQUIRED,
-                field=f"{prefix}.attribution.value",
-                detail=f"atribución '{attribution_type}' sin value",
+        if not _is_conflict(draft.value):
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field=f"{prefix}.attribution.value",
+                    detail=f"atribución '{attribution_type}' sin value",
+                )
             )
-        )
         return Attribution(type=AttributionType.NONE)
     return Attribution(type=attribution_type, value=value)
 
@@ -552,22 +563,44 @@ def _resolve_asset(
     *,
     dropped_code: IssueCode | None,
 ) -> AssetRef | None:
-    asset_id = _value(draft.asset_id)
-    kind = _value(draft.kind)
-    uri = _value(draft.uri)
-    origin = _value(draft.origin)
+    asset_id = _value(draft.asset_id) or None
+    kind = _value(draft.kind) or None
+    uri = _value(draft.uri) or None
+    origin = _value(draft.origin) or None
     if asset_id is None or kind is None or uri is None or origin is None:
-        issues.append(
-            ResolutionIssue(
-                code=IssueCode.MISSING_REQUIRED,
-                field=field,
-                detail="asset sin asset_id/kind/uri/origin",
+        missing = [
+            name
+            for name, value, draft_candidate in (
+                ("asset_id", asset_id, draft.asset_id),
+                ("kind", kind, draft.kind),
+                ("uri", uri, draft.uri),
+                ("origin", origin, draft.origin),
             )
-        )
+            if value is None and not _is_conflict(draft_candidate)
+        ]
+        if missing:
+            issues.append(
+                ResolutionIssue(
+                    code=dropped_code or IssueCode.MISSING_REQUIRED,
+                    field=field,
+                    detail=f"asset sin campos: {', '.join(missing)}",
+                )
+            )
         return None
     if asset_id in registry.assets:
         existing = registry.get(asset_id)
-        if existing.uri == _normalize_uri(uri):
+        try:
+            canonical = registry.canonical_uri(uri)
+        except (AssetError, OSError, ValidationError) as error:
+            issues.append(
+                ResolutionIssue(
+                    code=dropped_code or IssueCode.UNRESOLVED_ASSET,
+                    field=field,
+                    detail=str(error),
+                )
+            )
+            return None
+        if existing.uri == canonical:
             return existing
         issues.append(
             ResolutionIssue(
@@ -585,7 +618,7 @@ def _resolve_asset(
             origin=origin,
             license=_value(draft.license),
         )
-    except (AssetError, OSError) as error:
+    except (AssetError, OSError, ValidationError) as error:
         issues.append(
             ResolutionIssue(
                 code=dropped_code or IssueCode.UNRESOLVED_ASSET,
@@ -607,6 +640,15 @@ def _resolve_rules(
     recommended = _values(draft_rules.recommended) if draft_rules is not None else []
     manual_review = _values(draft_rules.manual_review) if draft_rules is not None else []
     classified = {*hard, *recommended, *manual_review}
+    base_rules = ["artifact.integrity"]
+    if context.format_ is Format.VIDEO:
+        base_rules.append("artifact.video_stream")
+    if any(rules.audio_rule is not AudioRule.ANY for rules in context.platforms.values()):
+        base_rules.append("audio.present")
+    for rule_id in base_rules:
+        if rule_id not in classified:
+            classified.add(rule_id)
+            hard.append(rule_id)
     for platform, platform_rules in context.platforms.items():
         for rule_id in active_restriction_rules(platform_rules, context.global_restrictions):
             if rule_id not in classified:
@@ -630,25 +672,33 @@ def _resolve_geo_target(
     issues: list[ResolutionIssue],
 ) -> GeoTarget | None:
     geo = draft.geo_target
-    country = _value(geo.country) if geo is not None else None
-    min_pct = _value(geo.min_pct) if geo is not None else None
+    if geo is None:
+        return None
+    country = _value(geo.country)
+    min_pct = _value(geo.min_pct)
     if country is None and min_pct is None:
         return None
-    if country is None or min_pct is None:
+    missing = [
+        name
+        for name, value, draft_candidate in (
+            ("country", country, geo.country),
+            ("min_pct", min_pct, geo.min_pct),
+        )
+        if value is None and not _is_conflict(draft_candidate)
+    ]
+    if missing:
         issues.append(
             ResolutionIssue(
                 code=IssueCode.MISSING_REQUIRED,
                 field="geo_target",
-                detail="geo_target incompleto: hacen falta country y min_pct",
+                detail=f"geo_target incompleto: faltan {', '.join(missing)}",
             )
         )
+        return None
+    if country is None or min_pct is None:
         return None
     return GeoTarget(country=country, min_pct=min_pct)
 
 
 def _has_blocking(issues: Sequence[ResolutionIssue]) -> bool:
     return any(issue.code in _BLOCKING_CODES for issue in issues)
-
-
-def _normalize_uri(uri: str) -> str:
-    return uri.removeprefix("./").replace("\\", "/")
