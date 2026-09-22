@@ -1,5 +1,7 @@
 """Tests de hashing determinista."""
 
+from hashlib import sha256
+
 from kliptych.hashing import sha256_canonical_json, sha256_text
 
 
@@ -15,6 +17,7 @@ def test_canonical_json_hash_changes_with_content() -> None:
     assert sha256_canonical_json(first) != sha256_canonical_json(second)
 
 
-def test_text_hash_matches_utf8_bytes() -> None:
-    assert sha256_text("hola") == sha256_text("hola")
-    assert sha256_text("hola") != sha256_text("holá")
+def test_text_hash_uses_utf8_encoding() -> None:
+    assert sha256_text("hola") == sha256(b"hola").hexdigest()
+    assert sha256_text("holá") == sha256("holá".encode()).hexdigest()
+    assert sha256_text("holá") != sha256("holá".encode("latin-1")).hexdigest()

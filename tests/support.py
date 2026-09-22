@@ -48,6 +48,8 @@ def _active_rule_ids(
     required_hashtags: Sequence[str],
     spelling_locks: Sequence[str],
     required_assets: Sequence[AssetRef],
+    watermark_required: bool,
+    watermark_visible_full_video: bool,
 ) -> list[str]:
     active: list[str] = []
     if min_s is not None:
@@ -66,6 +68,8 @@ def _active_rule_ids(
         active.append("subtitles.spelling_lock")
     if required_assets:
         active.append("assets.required")
+    if watermark_required and watermark_visible_full_video:
+        active.append("watermark.full_video")
     return active
 
 
@@ -84,6 +88,8 @@ def make_contract(
     first_line: str | None = None,
     spelling_locks: Sequence[str] = (),
     required_assets: Sequence[AssetRef] = (),
+    watermark_required: bool = False,
+    watermark_visible_full_video: bool = False,
 ) -> Contract:
     plan = [*hard]
     classified = {*hard, *recommended, *manual_review}
@@ -98,6 +104,8 @@ def make_contract(
         required_hashtags=required_hashtags,
         spelling_locks=spelling_locks,
         required_assets=required_assets,
+        watermark_required=watermark_required,
+        watermark_visible_full_video=watermark_visible_full_video,
     ):
         if rule_id not in classified:
             plan.append(rule_id)
@@ -125,7 +133,11 @@ def make_contract(
             },
             "languages": {"source": "es", "subtitles": None, "caption": "es", "voice": None},
             "official_audio": None,
-            "watermark": {"required": False, "asset_id": None, "visible_full_video": False},
+            "watermark": {
+                "required": watermark_required,
+                "asset_id": "wm-marca" if watermark_required else None,
+                "visible_full_video": watermark_visible_full_video,
+            },
             "spelling_locks": list(spelling_locks),
             "prohibitions": list(prohibitions),
             "rules": {

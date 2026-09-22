@@ -11,6 +11,8 @@ ENFORCEMENT = "post_publication_manual"
 _RULE_ID = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")]
 _SHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _MIME = Annotated[str, StringConstraints(pattern=r"^[a-z]+/[a-z0-9][a-z0-9.+-]*$")]
+_MENTION = Annotated[str, StringConstraints(pattern=r"^@\S+$")]
+_HASHTAG = Annotated[str, StringConstraints(pattern=r"^#\S+$")]
 
 
 class DurationRange(ContractBase):
@@ -61,8 +63,8 @@ class PlatformRules(ContractBase):
     duration: DurationRange = Field(default_factory=DurationRange)
     caption_rules: CaptionRules = Field(default_factory=CaptionRules)
     audio_rule: AudioRule = AudioRule.ANY
-    required_hashtags: list[str] = Field(default_factory=list)
-    required_mentions: list[str] = Field(default_factory=list)
+    required_hashtags: list[_HASHTAG] = Field(default_factory=list)
+    required_mentions: list[_MENTION] = Field(default_factory=list)
     attribution: Attribution = Field(default_factory=lambda: Attribution(type=AttributionType.NONE))
     link_rules: LinkRules = Field(default_factory=LinkRules)
 
@@ -233,6 +235,12 @@ def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[s
         Los rule_ids del catálogo del gate que la plataforma exige; el
         contrato debe clasificarlos en ``rules`` para que el gate los
         evalúe en vez de ignorarlos en silencio.
+
+    Nota:
+        ``audio_rule``, ``attribution`` y ``link_rules.link_in_bio`` aún no
+        tienen rule_id en el catálogo del gate (fases C/D); hasta que lo
+        tengan, el contrato puede declararlos sin clasificación y el gate no
+        los evalúa.
     """
     active: list[str] = []
     if rules.duration.min_s is not None:
@@ -249,7 +257,7 @@ def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[s
         active.append("caption.required_hashtag")
     if contract.assets.required:
         active.append("assets.required")
-    if contract.watermark.required:
+    if contract.watermark.required and contract.watermark.visible_full_video:
         active.append("watermark.full_video")
     if contract.spelling_locks:
         active.append("subtitles.spelling_lock")

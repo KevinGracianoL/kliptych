@@ -1,6 +1,7 @@
 """Tests del contrato validado (schema v1.0)."""
 
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -123,6 +124,37 @@ def test_rule_ids_must_be_dotted() -> None:
 def test_restriction_without_classified_rule_is_rejected() -> None:
     with pytest.raises(ValidationError, match="clasificada"):
         _ = _build(rules={"hard": [], "recommended": [], "manual_review": []})
+
+
+def test_mention_without_at_prefix_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="required_mentions"):
+        _ = _build(platforms={"tiktok": _platform(required_mentions=["marca"])})
+
+
+def test_hashtag_without_hash_prefix_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="required_hashtags"):
+        _ = _build(platforms={"tiktok": _platform(required_hashtags=["marca"])})
+
+
+def test_partial_watermark_does_not_require_full_video_rule() -> None:
+    data = _contract_data()
+    data["watermark"] = {"required": True, "asset_id": "wm-marca", "visible_full_video": False}
+    rules = cast("dict[str, object]", data["rules"])
+    hard = cast("list[str]", rules["hard"])
+    rules["hard"] = [rule for rule in hard if rule != "watermark.full_video"]
+    contract = Contract.model_validate(data)
+    assert contract.watermark.required is True
+    assert contract.watermark.visible_full_video is False
+
+
+def test_full_video_watermark_requires_classified_rule() -> None:
+    data = _contract_data()
+    data["watermark"] = {"required": True, "asset_id": "wm-marca", "visible_full_video": True}
+    rules = cast("dict[str, object]", data["rules"])
+    hard = cast("list[str]", rules["hard"])
+    rules["hard"] = [rule for rule in hard if rule != "watermark.full_video"]
+    with pytest.raises(ValidationError, match=r"watermark\.full_video"):
+        _ = Contract.model_validate(data)
 
 
 def test_slideshow_mode_requires_slideshow_format() -> None:
