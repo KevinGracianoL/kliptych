@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Kliptych data policy (brief §13): material real de campaña y corridas locales
+# NUNCA se commitean.
+runs/
+campaigns/private/
+
+# Credenciales, cookies y sesiones
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+cookies*.txt
+*_cookies.txt
+*.session
+*.token
+
+# No se ignoran extensiones de medios globalmente: assets/samples/ y los
+# fixtures sintéticos de tests sí van a Git. El material real de campaña vive
+# SIEMPRE en campaigns/private/, que ya está ignorado arriba.
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini

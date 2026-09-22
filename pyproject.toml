@@ -1,0 +1,76 @@
+[project]
+name = "kliptych"
+version = "0.1.0"
+description = "Pipeline headless que convierte briefs de campaña en paquetes de entrega validados por un gate fail-closed."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "Kevin Graciano" }]
+dependencies = ["pydantic>=2.11,<3"]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.29",
+    "pytest>=8.3",
+    "pytest-cov>=6",
+    "ruff>=0.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kliptych"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+preview = true
+select = ["ALL"]
+# Ignorados por conflicto real con el formatter o por no aplicar a un repo privado.
+ignore = [
+    "missing-trailing-comma",             # conflicto con ruff format
+    "single-line-implicit-string-concatenation", # conflicto con ruff format
+    "incorrect-blank-line-before-class",  # conflicto con D211
+    "multi-line-summary-second-line",     # conflicto con D212
+    "missing-copyright-notice",           # la licencia vive en pyproject, sin boilerplate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "assert",                       # los tests usan assert por diseño
+    "magic-value-comparison",       # los tests comparan contra literales
+    "undocumented-public-module",   # sin docstring de módulo en tests
+    "undocumented-public-class",    # sin docstring de clase en tests
+    "undocumented-public-function", # sin docstring de función en tests
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config --cov=kliptych --cov-report=term-missing --cov-fail-under=90"
+markers = [
+    "integration: requiere herramientas externas (ffmpeg/ffprobe) presentes en la máquina",
+]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
