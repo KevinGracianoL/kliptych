@@ -6,7 +6,9 @@ intacto y una publicación exitosa no conserva piezas de corridas anteriores.
 El reemplazo son dos renombres de directorio, así que existe una ventana breve
 en la que el destino no está visible para lectores concurrentes y una
 interrupción dura del proceso puede dejar un ``*.backup-*``/``*.staging-*``
-huérfano. Dentro del paquete, cada pieza vive en ``<campaña>/<plataforma>/``
+huérfano. La limpieza del backup es best-effort: con archivos bloqueados puede
+quedar un ``*.backup-*`` residual con el paquete anterior. Dentro del paquete,
+cada pieza vive en ``<campaña>/<plataforma>/``
 junto a su metadata final, el reporte del gate y un ``delivery_report.json``
 con el resumen y los recordatorios post-publicación (geo, views para payout,
 analytics y revisión manual).
@@ -19,6 +21,7 @@ una pieza cuyo gate no apruebe no se copia.
 import re
 import shutil
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -433,7 +436,10 @@ def _publish(staging: Path, destination: Path) -> None:
                 raise ExportError(msg) from error
         raise
     if backup is not None:
-        _remove_tree(backup)
+        # La limpieza del backup es best-effort: si un archivo transitivamente
+        # bloqueado impide borrarlo, el paquete ya quedó publicado.
+        with suppress(OSError):
+            _remove_tree(backup)
 
 
 def _remove_tree(path: Path) -> None:

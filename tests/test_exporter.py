@@ -1,6 +1,8 @@
 """Tests del exportador de paquetes de entrega (solo piezas que pasan el gate)."""
 
 import json
+import subprocess
+import sys
 from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
@@ -162,8 +164,35 @@ def test_restore_failure_reports_backup_location(
         return original_rename(self, target)
 
     monkeypatch.setattr(Path, "rename", failing_rename)
-    with pytest.raises(ExportError, match="paquete previo quedó en"):
+    with pytest.raises(ExportError, match="paquete previo quedó en") as excinfo:
         _ = _export(tmp_path, destination=destination)
+    backups = list(tmp_path.glob("delivery.backup-*"))
+    assert len(backups) == 1
+    assert backups[0].name in str(excinfo.value)
+    assert (backups[0] / _CAMPAIGN / "tiktok" / "piece-01.mp4").exists()
+    assert not list(tmp_path.glob("delivery.staging-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions solo en Windows")
+def test_junction_destination_is_replaced_without_residue(tmp_path: Path) -> None:
+    target = tmp_path / "linked"
+    destination = tmp_path / "delivery"
+    target.mkdir()
+    marker = target / "marker.txt"
+    _ = marker.write_bytes(b"contenido previo")
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(destination), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip("no se pudo crear el junction")
+
+    _ = _export(tmp_path, destination=destination)
+    assert (destination / _CAMPAIGN / "tiktok" / "piece-01.mp4").exists()
+    assert not destination.is_junction()
+    assert marker.read_bytes() == b"contenido previo"
+    assert not list(tmp_path.glob("delivery.backup-*"))
     assert not list(tmp_path.glob("delivery.staging-*"))
 
 
