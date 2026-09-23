@@ -14,34 +14,10 @@ from pydantic import Field
 
 from kliptych.contract import ContractDraft
 from kliptych.contract.base import ContractBase
-from kliptych.hashing import sha256_text
+from kliptych.hashing import brief_key
 from kliptych.runtime.model import ModelUnavailableError
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
-
-
-def normalize_brief(brief: str) -> str:
-    """Normaliza un brief para hashearlo de forma estable.
-
-    Args:
-        brief: Texto crudo del brief.
-
-    Returns:
-        El brief con saltos de línea LF (CRLF y CR incluidos).
-    """
-    return brief.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def brief_key(brief: str) -> str:
-    """Calcula la clave sha256 de un brief normalizado.
-
-    Args:
-        brief: Texto crudo del brief.
-
-    Returns:
-        El digest sha256 en hexadecimal.
-    """
-    return sha256_text(normalize_brief(brief))
 
 
 class RecordedDocument(ContractBase):

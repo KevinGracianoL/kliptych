@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = "LicenseRef-Proprietary"
 authors = [{ name = "Kevin Graciano" }]
-dependencies = ["pydantic>=2.11,<3"]
+dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 
 [dependency-groups]
 dev = [
@@ -62,6 +62,15 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"src/kliptych/ingest.py" = [
+    # DOCX local elegido por el operador (nunca entrada del LLM/red): el XML
+    # se parsea con la stdlib, sin resolver entidades externas.
+    "suspicious-xml-etree-import",
+    "suspicious-xml-element-tree-usage",
+    # Frontera de parsers externos (pypdf/zipfile): cualquier falla builtin no
+    # documentada se traduce de inmediato a IngestError conservando la causa.
+    "blind-except",
+]
 "src/kliptych/runtime/transport.py" = [
     # petición al endpoint configurado por el operador; el esquema http/https
     # se valida antes de construirla y no hay redirecciones.
@@ -78,6 +87,14 @@ ignore = [
     # fixtures sintéticos.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_ingest.py" = [
+    # La CLI real se ejecuta en subproceso para verificar que stderr queda
+    # limpio (solo JSON) ante fallos del parser.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    # user_password/owner_password son parámetros reales de pypdf, no secretos.
+    "hardcoded-password-func-arg",
 ]
 "tests/test_transport.py" = [
     # firma fija del handler HTTP estándar (do_POST/log_message)

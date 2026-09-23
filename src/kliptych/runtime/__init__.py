@@ -1,5 +1,6 @@
 """Runtime LLM de Kliptych: interfaz, backend OpenAI-compatible y grabaciones."""
 
+from kliptych.hashing import brief_key, normalize_brief
 from kliptych.runtime.model import (
     CampaignModel,
     ModelError,
@@ -17,8 +18,6 @@ from kliptych.runtime.openai_compatible import (
 from kliptych.runtime.recorded import (
     RecordedDocument,
     RecordedModel,
-    brief_key,
-    normalize_brief,
     record_response,
 )
 from kliptych.runtime.transport import (

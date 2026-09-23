@@ -44,7 +44,8 @@ corrida end-to-end; este README se actualiza solo con evidencia real.
 - [x] Gate core determinista fail-closed.
 - [x] Interfaz `CampaignModel` + primer backend (OpenAI-compatible) con fixtures grabados.
 - [x] Exportador de paquetes de entrega (solo piezas que pasan el gate) con recordatorios post-publicación.
-- [ ] Ingestores de briefs (Google Docs, Notion, .docx, PDF, texto).
+- [x] Ingesta de briefs locales (texto/markdown, PDF, DOCX) con hash normalizado y CLI `kliptych ingest`.
+- [x] Google Docs y Notion por exportación manual: archivo exportado o texto pegado (`kliptych ingest -`); sin OAuth ni APIs (issue #5).
 
 Fases siguientes: B (walking skeleton `given_clips`), C (motor de video largo),
 D (modos especiales), E (clasificación de campañas), F (operación/API/GUI).
@@ -76,6 +77,13 @@ KLIPTYCH_LLM_MODEL=<modelo>
 
 Los tests y las demos nunca llaman modelos reales: reproducen respuestas
 grabadas con `RecordedModel` desde `campaigns/fixtures/*/recorded/`.
+
+### Ingesta de briefs
+
+`kliptych ingest <ruta>` acepta texto/markdown, PDF y DOCX exportados
+localmente; `kliptych ingest -` lee un brief pegado por stdin. Google Docs y
+Notion se integran exportando el documento o pegando el texto: el pipeline es
+100% local, sin OAuth, tokens ni APIs en la nube (issue #5).
 
 Todo cambio entra por rama + PR con CI verde; `main` no recibe pushes directos
 (hook local en `.githooks/pre-push`; activar una vez con

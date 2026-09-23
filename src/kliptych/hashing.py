@@ -48,6 +48,30 @@ def sha256_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
+def normalize_brief(brief: str) -> str:
+    """Normaliza un brief para hashearlo de forma estable.
+
+    Args:
+        brief: Texto crudo del brief.
+
+    Returns:
+        El brief con saltos de línea LF (CRLF y CR incluidos).
+    """
+    return brief.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def brief_key(brief: str) -> str:
+    """Calcula la clave sha256 de un brief normalizado.
+
+    Args:
+        brief: Texto crudo del brief.
+
+    Returns:
+        El digest sha256 en hexadecimal.
+    """
+    return sha256_text(normalize_brief(brief))
+
+
 def sha256_canonical_json(payload: Mapping[str, object]) -> str:
     """Calcula el sha256 de un JSON canónico: claves ordenadas y sin espacios.
 
