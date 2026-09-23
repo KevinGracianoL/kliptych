@@ -91,6 +91,27 @@ class StartRawServer(Protocol):
     def __call__(self, payload: bytes, *, shutdown_write: bool = False) -> str: ...
 
 
+def _read_full_request(connection: socket.socket) -> bytes:
+    connection.settimeout(2.0)
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(65536)
+        if not chunk:
+            return request
+        request += chunk
+    head, _, body = request.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":", 1)[1].strip())
+    while len(body) < length:
+        chunk = connection.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return request
+
+
 @pytest.fixture
 def start_raw_server() -> Iterator[StartRawServer]:
     sockets: list[socket.socket] = []
@@ -106,7 +127,7 @@ def start_raw_server() -> Iterator[StartRawServer]:
                 accepted = server.accept()
                 connection = accepted[0]
                 with connection:
-                    _request: bytes = connection.recv(65536)
+                    _request = _read_full_request(connection)
                     connection.sendall(payload)
                     if shutdown_write:
                         connection.shutdown(socket.SHUT_WR)

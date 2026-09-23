@@ -169,12 +169,25 @@ def test_output_errors_do_not_leak_model_content() -> None:
     transport = FakeTransport(responses=[_chat_response(content)])
     with pytest.raises(ModelOutputError) as excinfo:
         _ = _model(transport, max_attempts=1).extract_contract("brief")
-    rendered = [str(excinfo.value)]
-    cause = excinfo.value.__cause__
+    assert not _rendered_chain_contains(excinfo.value, canary)
+
+
+def test_malformed_completion_does_not_leak_model_content() -> None:
+    canary = "CANARIO123"
+    body = ('{"choices": {"' + canary + '": {}}}').encode("utf-8")
+    transport = FakeTransport(responses=[HttpResponse(status=200, body=body)])
+    with pytest.raises(ModelOutputError) as excinfo:
+        _ = _model(transport, max_attempts=1).extract_contract("brief")
+    assert not _rendered_chain_contains(excinfo.value, canary)
+
+
+def _rendered_chain_contains(error: BaseException, needle: str) -> bool:
+    cause: BaseException | None = error
     while cause is not None:
-        rendered.append(str(cause))
+        if needle in str(cause):
+            return True
         cause = cause.__cause__
-    assert all(canary not in text for text in rendered)
+    return False
 
 
 def test_invalid_json_output_raises_output_error() -> None:

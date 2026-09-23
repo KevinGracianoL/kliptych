@@ -63,18 +63,22 @@ class HttpTransport(Protocol):
     ) -> HttpResponse:
         """Envía un JSON por POST y devuelve la respuesta.
 
+        ``timeout_s`` acota cada operación de socket y además es el deadline
+        total de la lectura del cuerpo.
+
         Args:
             url: URL absoluta http/https del endpoint.
             headers: Cabeceras adicionales de la petición.
             payload: Cuerpo JSON serializable.
-            timeout_s: Timeout máximo de la petición, en segundos.
+            timeout_s: Timeout de conexión/operaciones y deadline del cuerpo.
 
         Returns:
             La respuesta con su estado y cuerpo.
 
         Raises:
-            HttpError: Si la conexión falla, el esquema no es http/https o la
-                respuesta excede el límite de tamaño.
+            HttpError: Si la conexión falla, el esquema no es http/https, la
+                respuesta excede el límite de tamaño, el deadline vence o el
+                cuerpo queda incompleto.
         """
         ...
 
