@@ -44,6 +44,27 @@ un gate. Se arregla el código.
 - Toda afirmación de rendimiento/VRAM/compatibilidad requiere medición en el
   hardware objetivo (comando + resultado), nunca estimaciones.
 
+## Roles de agentes
+
+- **LongCat 2.0** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta.
+- **DeepSeek V4.1 Flash (programmer)** es el agente de implementación: ejecuta tareas de código delegadas por el orquestador.
+- El orquestador no implementa código directamente; delega al programmer y verifica los resultados.
+
+## Higiene de ramas
+
+- Toda rama local y remota debe ser eliminada inmediatamente después de que su Pull Request haya sido mergeado a main.
+
+## Reglas inquebrantables para módulos de descarga (C2)
+
+1. **Subprocess**: lista de argumentos, nunca `shell=True` con interpolación.
+2. **Aislamiento de red**: tests con fixtures locales, cero internet en CI.
+3. **Límites**: timeout explícito + cota dura de bytes post-descarga.
+4. **Alcance**: el PR de descarga NO incluye transcripción ni ensamblado; termina en la descarga del artefacto.
+
+## Skill invocation
+
+- La skill `evidence-driven-review` se invoca **una sola vez** sobre el PR completo (snapshot base/head), nunca commit por commit ni fase por fase.
+
 ## Proceso de revisión
 
 Al terminar un PR y con el CI verde, el owner pide la revisión: se invoca la
