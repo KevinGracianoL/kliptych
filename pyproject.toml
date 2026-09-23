@@ -8,6 +8,12 @@ license = "LicenseRef-Proprietary"
 authors = [{ name = "Kevin Graciano" }]
 dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 
+[project.optional-dependencies]
+# Herramientas pesadas de descarga/transcripción, fuera de las dependencias
+# base para mantener mínimo el runtime. yt-dlp también se instala como
+# binario en CI.
+transcription = ["yt-dlp>=2025.1.1"]
+
 [project.scripts]
 kliptych = "kliptych.__main__:main"
 
@@ -62,6 +68,16 @@ ignore = [
     "suspicious-subprocess-import",
     "subprocess-without-shell-equals-true",
 ]
+"src/kliptych/download.py" = [
+    # yt-dlp/streamlink/chat-downloader se invocan con lista de argumentos y
+    # shell=False; el binario es configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # download_video/download_stream/download_chat delegan en _run_download, que
+    # es quien lanza DownloadError; la sección Raises documenta el contrato.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/gate/models.py" = [
     "hardcoded-password-string", # falso positivo: PASS/FAIL son estados del gate
 ]
@@ -107,6 +123,20 @@ ignore = [
     # fixtures sintéticos.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_download.py" = [
+    # subprocess se usa solo para TimeoutExpired y para el runner real con
+    # sys.executable; sin red y con lista de argumentos.
+    "suspicious-subprocess-import",
+]
+"tests/test_download_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # clip local; el handler HTTP usa la firma fija de la stdlib.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    "invalid-function-name",
+    "builtin-argument-shadowing",
 ]
 "tests/test_exporter.py" = [
     # mklink se invoca con lista de argumentos y shell=False para crear un junction.
