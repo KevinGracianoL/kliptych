@@ -90,6 +90,7 @@ def test_extract_contract_returns_validated_draft() -> None:
     assert payload["temperature"] == 0
     assert payload["response_format"] == {"type": "json_object"}
     assert "brief de prueba" in json.dumps(payload["messages"], ensure_ascii=False)
+    assert cast("float", call["timeout_s"]) == pytest.approx(5.0)
 
 
 def test_extract_contract_strips_code_fences() -> None:
@@ -119,6 +120,14 @@ def test_retry_on_transport_error_then_success() -> None:
     assert len(transport.calls) == 2
 
 
+def test_retry_on_rate_limit_then_success() -> None:
+    transport = FakeTransport(
+        responses=[HttpResponse(status=429, body=b""), _chat_response(_draft_json())]
+    )
+    assert _model(transport).extract_contract("brief") == make_draft()
+    assert len(transport.calls) == 2
+
+
 def test_client_error_is_not_retried() -> None:
     transport = FakeTransport(responses=[HttpResponse(status=401, body=b"")])
     with pytest.raises(ModelUnavailableError, match="401"):
@@ -137,6 +146,22 @@ def test_exhausted_server_errors_raise_unavailable() -> None:
     with pytest.raises(ModelUnavailableError, match="intentos"):
         _ = _model(transport).extract_contract("brief")
     assert len(transport.calls) == 3
+
+
+def test_mixed_failure_sequence_reports_last_attempt() -> None:
+    transport = FakeTransport(responses=[_chat_response("no soy json"), HttpError("boom")])
+    with pytest.raises(ModelUnavailableError, match="intentos") as excinfo:
+        _ = _model(transport, max_attempts=2).extract_contract("brief")
+    assert isinstance(excinfo.value.__cause__, HttpError)
+    assert len(transport.calls) == 2
+
+
+def test_output_error_keeps_cause_chain() -> None:
+    transport = FakeTransport(responses=[_chat_response("no soy json")])
+    with pytest.raises(ModelOutputError, match="intentos") as excinfo:
+        _ = _model(transport, max_attempts=1).extract_contract("brief")
+    assert isinstance(excinfo.value.__cause__, ModelOutputError)
+    assert excinfo.value.__cause__.__cause__ is not None
 
 
 def test_invalid_json_output_raises_output_error() -> None:
@@ -202,16 +227,71 @@ def test_replay_normalizes_line_endings(tmp_path: Path) -> None:
     assert model.extract_contract("linea 1\r\nlinea 2\r\n") == make_draft()
 
 
+def test_replay_normalizes_lone_carriage_return(tmp_path: Path) -> None:
+    directory = tmp_path / "recorded"
+    _ = record_response(
+        "linea 1\rlinea 2\r",
+        make_draft(),
+        prompt_version=PROMPT_VERSION,
+        directory=directory,
+    )
+    model = RecordedModel.from_directory(directory)
+    assert model.extract_contract("linea 1\nlinea 2\n") == make_draft()
+
+
+def test_from_directory_rejects_stale_prompt_version(tmp_path: Path) -> None:
+    directory = tmp_path / "recorded"
+    _ = record_response(
+        "brief viejo",
+        make_draft(),
+        prompt_version="extract-v0",
+        directory=directory,
+    )
+    with pytest.raises(ModelUnavailableError, match="obsoleto"):
+        _ = RecordedModel.from_directory(directory, expected_prompt_version=PROMPT_VERSION)
+
+
 def test_replay_missing_brief_raises() -> None:
     model = RecordedModel()
     with pytest.raises(ModelUnavailableError, match="sin respuesta grabada"):
         _ = model.extract_contract("brief desconocido")
 
 
-def test_fixture_prompt_version_is_current() -> None:
+def test_all_fixture_recordings_use_current_prompt() -> None:
+    fixture_root = Path(__file__).resolve().parents[1] / "campaigns" / "fixtures"
+    directories = sorted(fixture_root.glob("*/recorded"))
+    assert directories
+    for directory in directories:
+        _ = RecordedModel.from_directory(directory, expected_prompt_version=PROMPT_VERSION)
+
+
+def _iter_evidence(payload: object) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    if isinstance(payload, dict):
+        mapping = cast("dict[str, object]", payload)
+        evidence = mapping.get("evidence")
+        if isinstance(evidence, dict):
+            found.append(cast("dict[str, object]", evidence))
+        for value in mapping.values():
+            found.extend(_iter_evidence(value))
+    elif isinstance(payload, list):
+        for item in cast("list[object]", payload):
+            found.extend(_iter_evidence(item))
+    return found
+
+
+def test_fixture_evidence_is_grounded_in_brief() -> None:
+    brief = (_FIXTURES / "brief.md").read_text(encoding="utf-8")
     model = RecordedModel.from_directory(_FIXTURES / "recorded")
-    versions = {document.prompt_version for document in model.documents.values()}
-    assert versions == {PROMPT_VERSION}
+    draft = model.extract_contract(brief)
+    payload = cast("dict[str, object]", draft.model_dump(mode="json"))
+    entries = _iter_evidence(payload)
+    assert entries
+    for evidence in entries:
+        quote = cast("str", evidence["quote"])
+        start = cast("int", evidence["start"])
+        end = cast("int", evidence["end"])
+        assert brief[start:end] == quote
 
 
 def test_fixture_brief_flows_to_the_gate(tmp_path: Path) -> None:
@@ -285,11 +365,15 @@ def test_malformed_completion_body_raises_output_error() -> None:
         _ = _model(transport, max_attempts=1).extract_contract("brief")
 
 
-def test_backoff_sleeps_between_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backoff_grows_exponentially_between_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr("kliptych.runtime.openai_compatible.time.sleep", sleeps.append)
     transport = FakeTransport(
-        responses=[HttpResponse(status=500, body=b""), _chat_response(_draft_json())]
+        responses=[
+            HttpResponse(status=500, body=b""),
+            HttpResponse(status=500, body=b""),
+            _chat_response(_draft_json()),
+        ]
     )
     model = OpenAIChatModel(
         base_url="https://llm.example/v1",
@@ -299,4 +383,24 @@ def test_backoff_sleeps_between_attempts(monkeypatch: pytest.MonkeyPatch) -> Non
         policy=RetryPolicy(max_attempts=3, backoff_s=0.5, timeout_s=5.0),
     )
     assert model.extract_contract("brief") == make_draft()
-    assert sleeps == [0.5]
+    assert sleeps == [0.5, 1.0]
+
+
+def test_from_env_wires_url_key_transport_and_policy() -> None:
+    transport = FakeTransport(responses=[_chat_response(_draft_json())])
+    policy = RetryPolicy(max_attempts=1, backoff_s=0.0, timeout_s=7.5)
+    model = OpenAIChatModel.from_env(
+        {
+            "KLIPTYCH_LLM_BASE_URL": "https://llm.example/v1",
+            "KLIPTYCH_LLM_API_KEY": "clave-canario",
+            "KLIPTYCH_LLM_MODEL": "model-test",
+        },
+        transport=transport,
+        policy=policy,
+    )
+    assert model.extract_contract("brief") == make_draft()
+    call = transport.calls[0]
+    assert call["url"] == "https://llm.example/v1/chat/completions"
+    headers = cast("dict[str, str]", call["headers"])
+    assert headers["Authorization"] == "Bearer clave-canario"
+    assert cast("float", call["timeout_s"]) == pytest.approx(7.5)

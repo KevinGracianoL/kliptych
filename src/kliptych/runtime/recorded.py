@@ -27,9 +27,9 @@ def normalize_brief(brief: str) -> str:
         brief: Texto crudo del brief.
 
     Returns:
-        El brief con saltos de línea LF.
+        El brief con saltos de línea LF (CRLF y CR incluidos).
     """
-    return brief.replace("\r\n", "\n")
+    return brief.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def brief_key(brief: str) -> str:
@@ -83,19 +83,41 @@ class RecordedModel:
         return self._documents
 
     @classmethod
-    def from_directory(cls, directory: Path) -> "RecordedModel":
+    def from_directory(
+        cls,
+        directory: Path,
+        *,
+        expected_prompt_version: str | None = None,
+    ) -> "RecordedModel":
         """Carga todos los documentos ``*.json`` de un directorio.
 
         Args:
             directory: Directorio con las respuestas grabadas.
+            expected_prompt_version: Si se indica, exige que todas las
+                grabaciones se hayan hecho con esa versión del prompt.
 
         Returns:
             El modelo con los documentos cargados.
+
+        Raises:
+            ModelUnavailableError: Si alguna grabación usa otra versión del
+                prompt que la esperada.
         """
         documents = [
             RecordedDocument.model_validate_json(path.read_text(encoding="utf-8"))
             for path in sorted(directory.glob("*.json"))
         ]
+        if expected_prompt_version is not None:
+            stale = sorted(
+                {
+                    document.prompt_version
+                    for document in documents
+                    if document.prompt_version != expected_prompt_version
+                }
+            )
+            if stale:
+                msg = f"grabaciones con prompt obsoleto: {', '.join(stale)}"
+                raise ModelUnavailableError(msg)
         return cls(documents)
 
     def extract_contract(self, brief: str) -> ContractDraft:

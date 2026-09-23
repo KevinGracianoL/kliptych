@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ContractBase(BaseModel):
-    """Configuración común: campos extra prohibidos y modelos inmutables."""
+    """Configuración común: campos extra prohibidos, inmutables y sin input en errores."""
 
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
