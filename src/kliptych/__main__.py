@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from pydantic import ValidationError
+
 from kliptych import __version__
 from kliptych.assembler import AssembleError
 from kliptych.config import Settings
@@ -23,6 +25,7 @@ from kliptych.runtime import (
     PROMPT_VERSION,
     CampaignModel,
     ModelError,
+    ModelUnavailableError,
     OpenAIChatModel,
     RecordedModel,
 )
@@ -117,6 +120,7 @@ def _run_command(args: argparse.Namespace) -> int:
             model_version=model_version,
             prompt_version=PROMPT_VERSION,
             caption_prompt_version=CAPTION_PROMPT_VERSION,
+            brief_path=Path(brief_path),
         )
         result = run_given_clips(model=model, settings=settings, request=request)
     except (IngestError, ModelError, PipelineError, AssembleError, ExportError) as error:
@@ -128,11 +132,18 @@ def _run_command(args: argparse.Namespace) -> int:
 
 def _build_model(recorded: str | None) -> tuple[CampaignModel, str]:
     if recorded is not None:
-        model = RecordedModel.from_directory(
-            Path(recorded),
-            expected_prompt_version=PROMPT_VERSION,
-            expected_caption_prompt_version=CAPTION_PROMPT_VERSION,
-        )
+        try:
+            model = RecordedModel.from_directory(
+                Path(recorded),
+                expected_prompt_version=PROMPT_VERSION,
+                expected_caption_prompt_version=CAPTION_PROMPT_VERSION,
+            )
+        except ValidationError:
+            msg = f"grabaciones inválidas en {recorded}: error de validación"
+            raise ModelUnavailableError(msg) from None
+        except ValueError:
+            msg = f"grabaciones inválidas en {recorded}: contenido duplicado o ilegible"
+            raise ModelUnavailableError(msg) from None
         return model, RecordedModel.model_version
     backend = OpenAIChatModel.from_env()
     return backend, backend.model_version

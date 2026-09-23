@@ -49,8 +49,14 @@ def _manifest(**overrides: object) -> RunManifest:
         "model_version": "recorded-v1",
         "prompt_version": "extract-v1",
         "caption_prompt_version": "caption-v1",
-        "render_arguments": ("-c:v", "h264_nvenc"),
-        "outputs": (OutputHash(path="piece.mp4", sha256="d" * 64, size_bytes=10),),
+        "outputs": (
+            OutputHash(
+                path="piece.mp4",
+                sha256="d" * 64,
+                size_bytes=10,
+                render_arguments=("-c:v", "h264_nvenc"),
+            ),
+        ),
         "gates": (_gate_result(),),
     }
     defaults.update(overrides)
@@ -63,6 +69,7 @@ def test_write_and_read_manifest_round_trip(tmp_path: Path) -> None:
     assert path.name == "run_manifest.json"
     restored = read_manifest(path)
     assert restored == manifest
+    assert restored.manifest_version == "1.1"
 
 
 def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
@@ -82,6 +89,7 @@ def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
     outputs = payload["outputs"]
     assert isinstance(outputs, list)
     assert outputs[0]["sha256"] == "d" * 64
+    assert outputs[0]["render_arguments"] == ["-c:v", "h264_nvenc"]
 
 
 def test_output_hash_requires_full_digest() -> None:

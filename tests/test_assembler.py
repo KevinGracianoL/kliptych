@@ -405,6 +405,7 @@ def test_assembles_vertical_artifact(tmp_path: Path) -> None:
 )
 def test_watermark_visible_in_top_right_box(tmp_path: Path) -> None:
     assert _FFMPEG is not None
+    assert _FFPROBE is not None
     clip = _generate_clip(tmp_path / "clip.mp4", width=320, height=240, duration=1.0)
     watermark = _generate_watermark(tmp_path / "wm.png")
     plain = tmp_path / "plain.mp4"
@@ -420,6 +421,8 @@ def test_watermark_visible_in_top_right_box(tmp_path: Path) -> None:
     marked_frame = _gray_frame(marked, width=1080, height=1920)
     assert _box_mean(plain_frame, **box) < 50
     assert _box_mean(marked_frame, **box) > 200
+    marked_info = FFprobeProbe(ffprobe=_FFPROBE).probe(marked)
+    assert marked_info.has_audio is True
 
 
 @pytest.mark.integration

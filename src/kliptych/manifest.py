@@ -17,17 +17,18 @@ class _ManifestBase(BaseModel):
 
 
 class OutputHash(_ManifestBase):
-    """Hash y tamaño de un artefacto de salida de la corrida."""
+    """Hash, tamaño y receta de render de un artefacto de salida."""
 
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=_SHA256)
     size_bytes: int = Field(ge=0)
+    render_arguments: tuple[str, ...] = ()
 
 
 class RunManifest(_ManifestBase):
     """Registro reproducible de una corrida completa."""
 
-    manifest_version: Literal["1.0"] = "1.0"
+    manifest_version: Literal["1.1"] = "1.1"
     run_id: str = Field(min_length=1)
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
@@ -39,7 +40,6 @@ class RunManifest(_ManifestBase):
     caption_prompt_version: str | None = None
     whisper_version: str | None = None
     ffmpeg_version: str | None = None
-    render_arguments: tuple[str, ...] = ()
     environment: EnvironmentReport
     assets: tuple[AssetRef, ...] = ()
     outputs: tuple[OutputHash, ...] = ()

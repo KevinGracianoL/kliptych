@@ -96,6 +96,7 @@ class RunRequest:
     assembler: PieceAssembler | None = None
     gate: Gate | None = None
     registry: AssetRegistry | None = None
+    brief_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,7 @@ class _RunContext:
     identifier: str
     started_at: datetime
     run_dir: Path
+    settings: Settings
     registry: AssetRegistry
     model: CampaignModel
     engine: Gate
@@ -141,6 +143,7 @@ def run_given_clips(
         identifier=identifier,
         started_at=started_at,
         run_dir=settings.runs_dir / identifier,
+        settings=settings,
         registry=registry,
         model=model,
         engine=Gate(FFprobeProbe()) if request.gate is None else request.gate,
@@ -150,24 +153,83 @@ def run_given_clips(
         return _unresolved(context, resolution)
     contract = resolution.contract
     if contract.mode is not Mode.GIVEN_CLIPS:
-        return _unsupported_mode(context, contract)
+        return _halted(
+            context,
+            contract,
+            outcome=RunOutcome.UNSUPPORTED,
+            issue=ResolutionIssue(
+                code=IssueCode.MODE_NOT_IMPLEMENTED,
+                field="mode",
+                detail=f"modo no implementado en el pipeline: {contract.mode.value}",
+            ),
+        )
+    unsafe = _unsafe_scope_assets(context, contract)
+    if unsafe:
+        return _halted(
+            context,
+            contract,
+            outcome=RunOutcome.MANUAL_REVIEW,
+            issue=ResolutionIssue(
+                code=IssueCode.UNSAFE_ASSET_SCOPE,
+                field="assets.required",
+                detail=(
+                    "assets fuera del alcance permitido (private/ o runs/): "
+                    + ", ".join(str(path) for path in unsafe)
+                ),
+            ),
+        )
     return _resolved(context, contract)
 
 
-def _unsupported_mode(context: _RunContext, contract: Contract) -> RunResult:
-    issue = ResolutionIssue(
-        code=IssueCode.MODE_NOT_IMPLEMENTED,
-        field="mode",
-        detail=f"modo no implementado en el pipeline: {contract.mode.value}",
-    )
-    manifest_path = _write_manifest(context)
+def _halted(
+    context: _RunContext,
+    contract: Contract,
+    *,
+    outcome: RunOutcome,
+    issue: ResolutionIssue,
+) -> RunResult:
+    manifest_path = _write_manifest(context, contract=contract)
     return RunResult(
         run_id=context.identifier,
-        outcome=RunOutcome.UNSUPPORTED,
+        outcome=outcome,
         resolution_status=ResolutionStatus.RESOLVED,
+        contract_sha256=contract_digest(contract),
         issues=(issue,),
         manifest_path=str(manifest_path),
     )
+
+
+def _unsafe_scope_assets(context: _RunContext, contract: Contract) -> list[Path]:
+    private = context.settings.private_campaigns_dir.resolve()
+    runs = context.settings.runs_dir.resolve()
+    allowed = _allowed_private_root(context, private)
+    unsafe: list[Path] = []
+    for asset in contract.assets.required:
+        path = context.registry.path_for(asset.asset_id).resolve()
+        if _outside_scope(path, private=private, runs=runs, allowed=allowed):
+            unsafe.append(path)
+    watermark = _watermark_path(contract, context.registry)
+    if watermark is not None:
+        resolved = watermark.resolve()
+        if _outside_scope(resolved, private=private, runs=runs, allowed=allowed):
+            unsafe.append(resolved)
+    return unsafe
+
+
+def _allowed_private_root(context: _RunContext, private: Path) -> Path | None:
+    brief_path = context.request.brief_path
+    if brief_path is None:
+        return None
+    resolved = brief_path.resolve()
+    return resolved.parent if resolved.is_relative_to(private) else None
+
+
+def _outside_scope(path: Path, *, private: Path, runs: Path, allowed: Path | None) -> bool:
+    if path.is_relative_to(runs):
+        return True
+    if not path.is_relative_to(private):
+        return False
+    return allowed is None or not path.is_relative_to(allowed)
 
 
 def _unresolved(context: _RunContext, resolution: ResolutionResult) -> RunResult:
@@ -187,17 +249,11 @@ def _unresolved(context: _RunContext, resolution: ResolutionResult) -> RunResult
 
 
 def _resolved(context: _RunContext, contract: Contract) -> RunResult:
-    pieces, gates, render_arguments, outputs = _assemble_pieces(context, contract)
+    pieces, gates, outputs = _assemble_pieces(context, contract)
     if not pieces:
         msg = "el contrato no declara clips de video para ensamblar"
         raise PipelineError(msg)
-    manifest_path = _write_manifest(
-        context,
-        contract=contract,
-        outputs=outputs,
-        gates=gates,
-        render_arguments=render_arguments,
-    )
+    manifest_path = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
     delivery = export_delivery(
         contract=contract,
         pieces=pieces,
@@ -219,10 +275,9 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
-) -> tuple[list[Piece], list[GateResult], list[str], list[OutputHash]]:
+) -> tuple[list[Piece], list[GateResult], list[OutputHash]]:
     pieces: list[Piece] = []
     gates: list[GateResult] = []
-    render_arguments: list[str] = []
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
@@ -248,21 +303,19 @@ def _assemble_pieces(
             gates.append(
                 context.engine.run(contract=contract, piece=piece, assets=context.registry)
             )
-            render_arguments.extend(
-                context.builder.render_arguments(
-                    clip=clip,
-                    destination=artifact,
-                    watermark=watermark,
-                )
-            )
             outputs.append(
                 OutputHash(
                     path=artifact.relative_to(context.run_dir).as_posix(),
                     sha256=sha256_file(artifact),
                     size_bytes=artifact.stat().st_size,
+                    render_arguments=context.builder.render_arguments(
+                        clip=clip,
+                        destination=artifact,
+                        watermark=watermark,
+                    ),
                 )
             )
-    return pieces, gates, render_arguments, outputs
+    return pieces, gates, outputs
 
 
 def _watermark_path(contract: Contract, registry: AssetRegistry) -> Path | None:
@@ -281,7 +334,6 @@ def _write_manifest(
     contract: Contract | None = None,
     outputs: Sequence[OutputHash] = (),
     gates: Sequence[GateResult] = (),
-    render_arguments: Sequence[str] = (),
 ) -> Path:
     request = context.request
     manifest = RunManifest(
@@ -295,7 +347,6 @@ def _write_manifest(
         prompt_version=request.prompt_version,
         caption_prompt_version=request.caption_prompt_version,
         ffmpeg_version=request.environment.ffmpeg_version,
-        render_arguments=tuple(render_arguments),
         environment=request.environment,
         assets=tuple(context.registry.assets.values()),
         outputs=tuple(outputs),

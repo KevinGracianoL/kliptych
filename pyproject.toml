@@ -92,8 +92,9 @@ ignore = [
     "docstring-extraneous-exception",
 ]
 "src/kliptych/runtime/recorded.py" = [
-    # write_caption delega la validación de plataforma en
-    # ensure_platform_declared; la sección Raises documenta el contrato público.
+    # write_caption delega el payload y la validación de plataforma en
+    # caption_prompt_payload (vía _caption_key), que lanza ModelInputError; la
+    # sección Raises documenta el contrato público.
     "docstring-extraneous-exception",
 ]
 "src/kliptych/runtime/transport.py" = [

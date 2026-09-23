@@ -32,7 +32,7 @@ NO ENTRA (no se promete en ningún doc):
 
 ## Estado
 
-Fases A (núcleo) y B (walking skeleton `given_clips`) en construcción. Nada se
+Fases A (núcleo) y B (walking skeleton `given_clips`) completas. Nada se
 considera implementado si no tiene una corrida end-to-end; este README se
 actualiza solo con evidencia real.
 
@@ -121,10 +121,12 @@ uv run kliptych run campaigns/fixtures/given-clips-rejected/brief.md \
 ```
 
 El paquete rechazado solo contiene `delivery_report.json` con el gate completo
-de la pieza; `runs/` no se commitea (política de datos). El CI cubre además los
-rechazos por hashtag faltante, duración fuera de rango, audio ausente, término
-prohibido, spelling sin subtítulos y watermark sin validador
-(`tests/test_pipeline.py`).
+de la pieza; `runs/` no se commitea (política de datos). Los assets bajo
+`campaigns/private/` solo se aceptan desde el brief de la propia campaña;
+material de otra campaña o de `runs/` se rechaza en el pipeline (fail-closed).
+El CI cubre además los rechazos por hashtag faltante, duración fuera de rango,
+audio ausente, término prohibido, spelling sin subtítulos y watermark sin
+validador (`tests/test_pipeline.py`).
 
 ## Desarrollo
 

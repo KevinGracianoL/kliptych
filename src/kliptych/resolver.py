@@ -81,6 +81,7 @@ class IssueCode(StrEnum):
     RULE_DEFAULTED = "rule_defaulted"
     INVALID_CONTRACT = "invalid_contract"
     MODE_NOT_IMPLEMENTED = "mode_not_implemented"
+    UNSAFE_ASSET_SCOPE = "unsafe_asset_scope"
 
 
 _BLOCKING_CODES = frozenset(
@@ -632,6 +633,23 @@ def _resolve_asset(
         return None
 
 
+def _base_rules(context: _RuleContext) -> list[str]:
+    rules = ["artifact.integrity"]
+    if context.format_ is Format.VIDEO:
+        rules.append("artifact.video_stream")
+    if any(platform.audio_rule is not AudioRule.ANY for platform in context.platforms.values()):
+        rules.append("audio.present")
+    if context.global_restrictions.has_required_assets:
+        rules.append("assets.required")
+    if context.global_restrictions.watermark_required:
+        rules.append(
+            "watermark.full_video"
+            if context.global_restrictions.watermark_visible_full_video
+            else "watermark.present"
+        )
+    return rules
+
+
 def _resolve_rules(
     draft: ContractDraft,
     *,
@@ -643,11 +661,7 @@ def _resolve_rules(
     recommended = _values(draft_rules.recommended) if draft_rules is not None else []
     manual_review = _values(draft_rules.manual_review) if draft_rules is not None else []
     classified = {*hard, *recommended, *manual_review}
-    base_rules = ["artifact.integrity"]
-    if context.format_ is Format.VIDEO:
-        base_rules.append("artifact.video_stream")
-    if any(rules.audio_rule is not AudioRule.ANY for rules in context.platforms.values()):
-        base_rules.append("audio.present")
+    base_rules = _base_rules(context)
     for rule_id in base_rules:
         if rule_id not in hard:
             hard.append(rule_id)
@@ -657,7 +671,7 @@ def _resolve_rules(
                 ResolutionIssue(
                     code=IssueCode.RULE_DEFAULTED,
                     field=f"rules.{rule_id}",
-                    detail="regla base reclasificada como hard (fail-closed)",
+                    detail="regla obligatoria reclasificada como hard (fail-closed)",
                 )
             )
         if rule_id in manual_review:
@@ -666,14 +680,15 @@ def _resolve_rules(
                 ResolutionIssue(
                     code=IssueCode.RULE_DEFAULTED,
                     field=f"rules.{rule_id}",
-                    detail="regla base reclasificada como hard (fail-closed)",
+                    detail="regla obligatoria reclasificada como hard (fail-closed)",
                 )
             )
     for platform, platform_rules in context.platforms.items():
         for rule_id in active_restriction_rules(platform_rules, context.global_restrictions):
             if rule_id not in classified:
                 classified.add(rule_id)
-                hard.append(rule_id)
+                if rule_id not in hard:
+                    hard.append(rule_id)
                 issues.append(
                     ResolutionIssue(
                         code=IssueCode.RULE_DEFAULTED,
