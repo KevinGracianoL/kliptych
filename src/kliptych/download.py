@@ -48,7 +48,7 @@ _BLOCKED_NETWORKS = (
 )
 
 _YTDLP_SIDECAR_SUFFIXES = (".part", ".ytdl")
-_YTDLP_FRAGMENT_PATTERNS = (".part-Frag*", ".f*")
+_YTDLP_FRAGMENT_PATTERNS = (".part-Frag*", ".f[0-9]*")
 
 
 class DownloadError(Exception):
@@ -457,6 +457,9 @@ def _validate_url(url: str) -> None:
     except ValueError:
         return
     if any(address in network for network in _BLOCKED_NETWORKS):
+        msg = f"URL hacia una dirección local o privada no permitida: {host}"
+        raise DownloadError(msg)
+    if address.is_loopback or address.is_private:
         msg = f"URL hacia una dirección local o privada no permitida: {host}"
         raise DownloadError(msg)
 
