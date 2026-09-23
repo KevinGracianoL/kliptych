@@ -36,12 +36,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          function Test-Ffmpeg {
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            return [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
+          }
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             choco install ffmpeg --no-progress -y
-            if ($LASTEXITCODE -eq 0) { exit 0 }
-            Write-Host "choco intento $attempt falló; reintentando en 15 s"
+            if (Test-Ffmpeg) { exit 0 }
+            Write-Host "choco intento $attempt no dejó ffmpeg; reintentando en 15 s"
             Start-Sleep -Seconds 15
           }
+          winget install --id Gyan.FFmpeg -e --disable-interactivity --accept-source-agreements --accept-package-agreements
+          if (Test-Ffmpeg) { exit 0 }
+          Write-Host "::error::ffmpeg no quedó instalado en Windows"
           exit 1
 
       - name: Sync dependencies
