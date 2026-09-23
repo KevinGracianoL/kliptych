@@ -1,32 +1,40 @@
-"""Backend OpenAI-compatible para extracción de contrato.
+"""Backend OpenAI-compatible para extracción de contrato y redacción de captions.
 
 Política de fallback: no hay fallback silencioso. Si el backend no responde
 tras los reintentos, o rechaza la petición, se lanza ``ModelUnavailableError``
 y el orquestador decide degradar y registrarlo en el manifiesto. Si la salida
-no es un ``ContractDraft`` válido tras los reintentos, se lanza
-``ModelOutputError``. El prompt está versionado (``PROMPT_VERSION``) y el
-nombre del modelo se registra por separado en el manifiesto.
+no es válida tras los reintentos, se lanza ``ModelOutputError``. Los prompts
+están versionados (``PROMPT_VERSION`` y ``CAPTION_PROMPT_VERSION``) y el nombre
+del modelo se registra por separado en el manifiesto.
 """
 
+import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from kliptych.contract import ContractDraft
-from kliptych.runtime.model import ModelOutputError, ModelUnavailableError
+from kliptych.contract import Contract, ContractDraft
+from kliptych.runtime.model import (
+    Caption,
+    ModelOutputError,
+    ModelUnavailableError,
+    PieceContext,
+    ensure_platform_declared,
+)
 from kliptych.runtime.transport import HttpError, HttpTransport, UrllibTransport
 
 PROMPT_VERSION = "extract-v1"
+CAPTION_PROMPT_VERSION = "caption-v1"
 ENV_BASE_URL = "KLIPTYCH_LLM_BASE_URL"
 ENV_API_KEY = "KLIPTYCH_LLM_API_KEY"
 ENV_MODEL = "KLIPTYCH_LLM_MODEL"
 
-_SYSTEM_PROMPT = (
+_EXTRACT_SYSTEM_PROMPT = (
     "Eres el extractor de contratos de Kliptych. Recibes el brief de una "
     "campaña y devuelves ÚNICAMENTE un JSON válido con la forma del "
     "ContractDraft: cada campo es "
@@ -35,6 +43,15 @@ _SYSTEM_PROMPT = (
     '"conflict"}. Reglas: si un campo no tiene cita textual, usa "missing" '
     'sin value ni evidence; si el brief se contradice, usa "conflict" con '
     "la cita; nunca inventes valores ni campos fuera del esquema."
+)
+
+_CAPTION_SYSTEM_PROMPT = (
+    "Eres el redactor de captions de Kliptych. Recibes un JSON con el contrato "
+    "de una pieza y devuelves ÚNICAMENTE un JSON con la forma "
+    '{"caption": str, "hashtags": [str]}. Reglas: incluye las menciones '
+    "obligatorias en el caption; los hashtags obligatorios van en el campo "
+    "hashtags con el prefijo #; respeta el idioma del caption, las "
+    "prohibiciones y los spelling locks; no inventes datos ni menciones."
 )
 
 
@@ -69,6 +86,7 @@ class OpenAIChatModel:
     """Primer backend del runtime: chat completions compatible con OpenAI."""
 
     prompt_version: ClassVar[str] = PROMPT_VERSION
+    caption_prompt_version: ClassVar[str] = CAPTION_PROMPT_VERSION
 
     def __init__(
         self,
@@ -152,7 +170,42 @@ class OpenAIChatModel:
             ModelOutputError: Si la salida no es un draft válido tras agotar
                 los intentos.
         """
-        payload = self._request_payload(brief)
+        return self._complete(
+            system_prompt=_EXTRACT_SYSTEM_PROMPT,
+            user_content=brief,
+            parse=_parse_draft,
+        )
+
+    def write_caption(self, contract: Contract, piece: PieceContext) -> Caption:
+        """Redacta el caption de una pieza según el contrato.
+
+        Args:
+            contract: Contrato validado de la campaña.
+            piece: Identidad de la pieza (id y plataforma).
+
+        Returns:
+            El caption con sus hashtags, validado estructuralmente.
+
+        Raises:
+            ModelInputError: Si el contrato no declara la plataforma de la pieza.
+            ModelUnavailableError: Si el backend falla tras agotar los intentos.
+            ModelOutputError: Si la salida no es un caption válido tras agotar
+                los intentos.
+        """
+        return self._complete(
+            system_prompt=_CAPTION_SYSTEM_PROMPT,
+            user_content=_caption_user_content(contract, piece),
+            parse=_parse_caption,
+        )
+
+    def _complete[T](
+        self,
+        *,
+        system_prompt: str,
+        user_content: str,
+        parse: Callable[[bytes], T],
+    ) -> T:
+        payload = self._request_payload(system_prompt, user_content)
         url = f"{self._base_url.rstrip('/')}/chat/completions"
         last_transport_error: Exception | None = None
         last_output_error: Exception | None = None
@@ -182,7 +235,7 @@ class OpenAIChatModel:
                 msg = f"el backend rechazó la petición (HTTP {response.status})"
                 raise ModelUnavailableError(msg)
             try:
-                return _parse_draft(response.body)
+                return parse(response.body)
             except ModelOutputError as error:
                 last_output_error = error
                 continue
@@ -192,12 +245,12 @@ class OpenAIChatModel:
         msg = f"el backend no respondió tras {self._policy.max_attempts} intentos"
         raise ModelUnavailableError(msg) from last_transport_error
 
-    def _request_payload(self, brief: str) -> dict[str, object]:
+    def _request_payload(self, system_prompt: str, user_content: str) -> dict[str, object]:
         return {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": brief},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
             "temperature": 0,
             "response_format": {"type": "json_object"},
@@ -207,6 +260,23 @@ class OpenAIChatModel:
         delay = self._policy.backoff_s * (2.0 ** (step - 1))
         if delay > 0:
             time.sleep(delay)
+
+
+def _caption_user_content(contract: Contract, piece: PieceContext) -> str:
+    ensure_platform_declared(contract, piece)
+    platform_rules = contract.platforms[piece.platform]
+    payload: dict[str, object] = {
+        "campaign_id": contract.campaign_id,
+        "platform": piece.platform.value,
+        "piece_id": piece.piece_id,
+        "languages": contract.languages.model_dump(mode="json"),
+        "caption_rules": platform_rules.caption_rules.model_dump(mode="json"),
+        "required_mentions": list(platform_rules.required_mentions),
+        "required_hashtags": list(platform_rules.required_hashtags),
+        "prohibitions": list(contract.prohibitions),
+        "spelling_locks": list(contract.spelling_locks),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def _parse_draft(body: bytes) -> ContractDraft:
@@ -225,6 +295,35 @@ def _parse_draft(body: bytes) -> ContractDraft:
     Raises:
         ModelOutputError: Si la respuesta no contiene un draft válido.
     """
+    content = _completion_content(body)
+    try:
+        return ContractDraft.model_validate_json(_strip_code_fences(content))
+    except ValidationError:
+        msg = "el contenido no es un ContractDraft válido"
+        raise ModelOutputError(msg) from None
+
+
+def _parse_caption(body: bytes) -> Caption:
+    """Parsea el completion del backend sin encadenar contenido del modelo.
+
+    Args:
+        body: Cuerpo JSON del completion devuelto por el backend.
+
+    Returns:
+        El caption validado estructuralmente.
+
+    Raises:
+        ModelOutputError: Si la respuesta no contiene un caption válido.
+    """
+    content = _completion_content(body)
+    try:
+        return Caption.model_validate_json(_strip_code_fences(content))
+    except ValidationError:
+        msg = "el contenido no es un Caption válido"
+        raise ModelOutputError(msg) from None
+
+
+def _completion_content(body: bytes) -> str:
     try:
         completion = _ChatCompletion.model_validate_json(body)
     except ValidationError:
@@ -237,11 +336,7 @@ def _parse_draft(body: bytes) -> ContractDraft:
     if not content:
         msg = "respuesta sin contenido de mensaje"
         raise ModelOutputError(msg)
-    try:
-        return ContractDraft.model_validate_json(_strip_code_fences(content))
-    except ValidationError:
-        msg = "el contenido no es un ContractDraft válido"
-        raise ModelOutputError(msg) from None
+    return content
 
 
 def _strip_code_fences(content: str) -> str:

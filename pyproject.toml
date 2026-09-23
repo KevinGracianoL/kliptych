@@ -78,6 +78,16 @@ ignore = [
     # documentada se traduce de inmediato a IngestError conservando la causa.
     "blind-except",
 ]
+"src/kliptych/runtime/openai_compatible.py" = [
+    # extract_contract/write_caption delegan en _complete, que es quien lanza
+    # los errores; la sección Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
+"src/kliptych/runtime/recorded.py" = [
+    # write_caption delega la validación de plataforma en
+    # ensure_platform_declared; la sección Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/runtime/transport.py" = [
     # petición al endpoint configurado por el operador; el esquema http/https
     # se valida antes de construirla y no hay redirecciones.

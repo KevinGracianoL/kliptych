@@ -206,20 +206,21 @@ def check_required_hashtags(context: GateContext) -> CheckOutcome:
 
 
 def check_forbidden_terms(context: GateContext) -> CheckOutcome:
-    """Verifica que no aparezcan términos prohibidos en el caption.
+    """Verifica que no aparezcan términos prohibidos en caption ni hashtags.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
         PASS si no aparece ningún término de ``caption_rules.forbidden`` ni
-        de las ``prohibitions`` de la campaña; FAIL con los encontrados.
+        de las ``prohibitions`` de la campaña en el caption ni en los
+        hashtags; FAIL con los encontrados.
     """
-    caption = context.piece.caption.lower()
+    haystack = "\n".join((context.piece.caption, *context.piece.hashtags)).lower()
     forbidden = list(
         dict.fromkeys([*context.rules.caption_rules.forbidden, *context.contract.prohibitions])
     )
-    found = [term for term in forbidden if term.lower() in caption]
+    found = [term for term in forbidden if term.lower() in haystack]
     evidence: dict[str, object] = {"forbidden": forbidden, "found": found}
     return CheckOutcome(
         status=CheckStatus.FAIL if found else CheckStatus.PASS,

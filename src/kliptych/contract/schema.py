@@ -12,7 +12,7 @@ _RULE_ID = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a
 _SHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _MIME = Annotated[str, StringConstraints(pattern=r"^[a-z]+/[a-z0-9][a-z0-9.+-]*$")]
 _MENTION = Annotated[str, StringConstraints(pattern=r"^@\S+$")]
-_HASHTAG = Annotated[str, StringConstraints(pattern=r"^#\S+$")]
+Hashtag = Annotated[str, StringConstraints(pattern=r"^#\S+$")]
 
 
 class DurationRange(ContractBase):
@@ -63,7 +63,7 @@ class PlatformRules(ContractBase):
     duration: DurationRange = Field(default_factory=DurationRange)
     caption_rules: CaptionRules = Field(default_factory=CaptionRules)
     audio_rule: AudioRule = AudioRule.ANY
-    required_hashtags: list[_HASHTAG] = Field(default_factory=list)
+    required_hashtags: list[Hashtag] = Field(default_factory=list)
     required_mentions: list[_MENTION] = Field(default_factory=list)
     attribution: Attribution = Field(default_factory=lambda: Attribution(type=AttributionType.NONE))
     link_rules: LinkRules = Field(default_factory=LinkRules)
