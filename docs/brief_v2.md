@@ -425,7 +425,8 @@ FASE A — Núcleo
 - contrato pydantic v1.0 + ContractDraft con evidencia + validación
 - asset registry con sha256/MIME/origen/licencia
 - run_manifest.json
-- ingestores de briefs (Google Docs, Notion, .docx, PDF, texto)
+- ingestores de briefs locales (.docx, PDF, texto/markdown) y texto pegado;
+  Google Docs y Notion por exportación manual, sin OAuth ni APIs (issue #5)
 - interfaz CampaignModel + UN backend + fixtures grabados
 - exportador común (estructura de carpetas por campaña/plataforma)
 - gate común (checks deterministas base)

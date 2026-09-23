@@ -1,4 +1,8 @@
-"""Punto de entrada de línea de comandos de Kliptych."""
+r"""Punto de entrada de línea de comandos de Kliptych.
+
+La salida JSON es ASCII-safe (escapes ``\uXXXX``): así stdout y stderr se
+pueden redirigir a otro proceso sin depender del codepage de la consola.
+"""
 
 import argparse
 import json
@@ -9,7 +13,7 @@ from typing import cast
 
 from kliptych import __version__
 from kliptych.environment import SubprocessRunner, detect_environment
-from kliptych.ingest import IngestError, ingest_file, ingest_text
+from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -38,18 +42,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = cast("str | None", getattr(args, "command", None))
     if command == "env":
         report = detect_environment(SubprocessRunner())
-        print(json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False))
+        print(json.dumps(report.model_dump(mode="json"), indent=2))
         return 0
     if command == "ingest":
         brief_path = cast("str", getattr(args, "path", ""))
         try:
             brief = (
-                ingest_text(sys.stdin.read(), source="<stdin>")
+                ingest_bytes(sys.stdin.buffer.read(MAX_BRIEF_BYTES + 1), source="<stdin>")
                 if brief_path == "-"
                 else ingest_file(Path(brief_path))
             )
         except IngestError as error:
-            print(json.dumps({"error": str(error)}, indent=2, ensure_ascii=False), file=sys.stderr)
+            print(json.dumps({"error": str(error)}, indent=2), file=sys.stderr)
             return 1
         print(
             json.dumps(
@@ -58,9 +62,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "media_type": brief.media_type,
                     "sha256": brief.sha256,
                     "chars": len(brief.text),
+                    "text": brief.text,
                 },
                 indent=2,
-                ensure_ascii=False,
             )
         )
         return 0
