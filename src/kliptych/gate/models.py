@@ -75,7 +75,7 @@ class MediaInfo(_GateBase):
 class Piece(_GateBase):
     """Pieza lista para validar: el artefacto final más sus textos."""
 
-    piece_id: str = Field(min_length=1)
+    piece_id: str = Field(min_length=1, max_length=64)
     platform: Platform
     caption: str
     hashtags: tuple[str, ...] = ()

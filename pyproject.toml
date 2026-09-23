@@ -67,6 +67,12 @@ ignore = [
     # se valida antes de construirla y no hay redirecciones.
     "suspicious-url-open-usage",
 ]
+"tests/test_exporter.py" = [
+    # mklink se invoca con lista de argumentos y shell=False para crear un junction.
+    "subprocess-without-shell-equals-true",
+    "start-process-with-partial-path",
+    "suspicious-subprocess-import",
+]
 "tests/test_gate_probe.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
     # fixtures sintéticos.

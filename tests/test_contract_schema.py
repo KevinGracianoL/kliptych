@@ -126,6 +126,11 @@ def test_restriction_without_classified_rule_is_rejected() -> None:
         _ = _build(rules={"hard": [], "recommended": [], "manual_review": []})
 
 
+def test_campaign_id_length_is_bounded() -> None:
+    with pytest.raises(ValidationError, match="campaign_id"):
+        _ = _build(campaign_id="a" * 65)
+
+
 def test_mention_without_at_prefix_is_rejected() -> None:
     with pytest.raises(ValidationError, match="required_mentions"):
         _ = _build(platforms={"tiktok": _platform(required_mentions=["marca"])})

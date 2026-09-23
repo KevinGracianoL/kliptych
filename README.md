@@ -43,8 +43,8 @@ corrida end-to-end; este README se actualiza solo con evidencia real.
 - [x] Detección de entorno (ffmpeg/NVENC/GPU) y CLI `kliptych env`.
 - [x] Gate core determinista fail-closed.
 - [x] Interfaz `CampaignModel` + primer backend (OpenAI-compatible) con fixtures grabados.
+- [x] Exportador de paquetes de entrega (solo piezas que pasan el gate) con recordatorios post-publicación.
 - [ ] Ingestores de briefs (Google Docs, Notion, .docx, PDF, texto).
-- [ ] Exportador de paquetes de entrega.
 
 Fases siguientes: B (walking skeleton `given_clips`), C (motor de video largo),
 D (modos especiales), E (clasificación de campañas), F (operación/API/GUI).

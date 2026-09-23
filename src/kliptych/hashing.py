@@ -24,6 +24,18 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    """Calcula el sha256 de un bloque de bytes.
+
+    Args:
+        data: Contenido a hashear.
+
+    Returns:
+        El digest sha256 en hexadecimal.
+    """
+    return sha256(data).hexdigest()
+
+
 def sha256_text(text: str) -> str:
     """Calcula el sha256 de un texto codificado en UTF-8.
 
