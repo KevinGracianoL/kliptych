@@ -88,14 +88,14 @@ def start_server() -> Iterator[StartServer]:
 
 
 class StartRawServer(Protocol):
-    def __call__(self, payload: bytes) -> str: ...
+    def __call__(self, payload: bytes, *, shutdown_write: bool = False) -> str: ...
 
 
 @pytest.fixture
 def start_raw_server() -> Iterator[StartRawServer]:
     sockets: list[socket.socket] = []
 
-    def start(payload: bytes) -> str:
+    def start(payload: bytes, *, shutdown_write: bool = False) -> str:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
         server.listen(1)
@@ -108,6 +108,8 @@ def start_raw_server() -> Iterator[StartRawServer]:
                 with connection:
                     _request: bytes = connection.recv(65536)
                     connection.sendall(payload)
+                    if shutdown_write:
+                        connection.shutdown(socket.SHUT_WR)
 
         threading.Thread(target=accept_once, daemon=True).start()
         host = cast("str", server.getsockname()[0])
@@ -177,6 +179,16 @@ def test_post_json_wraps_connection_errors() -> None:
 def test_post_json_wraps_malformed_http_responses(start_raw_server: StartRawServer) -> None:
     url = start_raw_server(b"NOT-HTTP GARBAGE\r\n\r\n")
     with pytest.raises(HttpError, match="conexión"):
+        _ = UrllibTransport().post_json(url, headers={}, payload={}, timeout_s=5.0)
+
+
+def test_post_json_rejects_truncated_body(start_raw_server: StartRawServer) -> None:
+    payload = (
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: application/json\r\n\r\n"
+        b'{"ok": true}'
+    )
+    url = start_raw_server(payload, shutdown_write=True)
+    with pytest.raises(HttpError, match="incompleta"):
         _ = UrllibTransport().post_json(url, headers={}, payload={}, timeout_s=5.0)
 
 

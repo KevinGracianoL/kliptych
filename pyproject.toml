@@ -63,8 +63,8 @@ ignore = [
     "start-process-with-partial-path",
 ]
 "src/kliptych/runtime/transport.py" = [
-    # urlopen sobre el endpoint configurado por el operador; el esquema se
-    # valida a http/https antes de la llamada.
+    # petición al endpoint configurado por el operador; el esquema http/https
+    # se valida antes de construirla y no hay redirecciones.
     "suspicious-url-open-usage",
 ]
 "tests/test_gate_probe.py" = [

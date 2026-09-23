@@ -85,7 +85,7 @@ def test_draft_round_trips_through_json() -> None:
 
 
 def test_validation_errors_hide_input_values() -> None:
-    canary = "CANARIO-PII-123"
+    canary = "CANARIO123"
     with pytest.raises(ValidationError) as excinfo:
         _ = ContractDraft.model_validate(
             {"campaign_id": {"value": canary, "confidence": "explicit"}}

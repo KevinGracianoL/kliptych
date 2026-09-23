@@ -210,11 +210,26 @@ class OpenAIChatModel:
 
 
 def _parse_draft(body: bytes) -> ContractDraft:
+    """Parsea el completion del backend sin encadenar contenido del modelo.
+
+    Los errores de pydantic se lanzan con ``from None``: su representación
+    puede incluir fragmentos del brief recibido y la política del repo evita
+    filtrarlos a trazas o logs.
+
+    Args:
+        body: Cuerpo JSON del completion devuelto por el backend.
+
+    Returns:
+        El draft validado estructuralmente.
+
+    Raises:
+        ModelOutputError: Si la respuesta no contiene un draft válido.
+    """
     try:
         completion = _ChatCompletion.model_validate_json(body)
-    except ValidationError as error:
+    except ValidationError:
         msg = "respuesta sin choices válidos"
-        raise ModelOutputError(msg) from error
+        raise ModelOutputError(msg) from None
     if not completion.choices:
         msg = "respuesta sin choices"
         raise ModelOutputError(msg)
@@ -224,9 +239,9 @@ def _parse_draft(body: bytes) -> ContractDraft:
         raise ModelOutputError(msg)
     try:
         return ContractDraft.model_validate_json(_strip_code_fences(content))
-    except ValidationError as error:
+    except ValidationError:
         msg = "el contenido no es un ContractDraft válido"
-        raise ModelOutputError(msg) from error
+        raise ModelOutputError(msg) from None
 
 
 def _strip_code_fences(content: str) -> str:

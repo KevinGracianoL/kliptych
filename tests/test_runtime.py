@@ -161,7 +161,20 @@ def test_output_error_keeps_cause_chain() -> None:
     with pytest.raises(ModelOutputError, match="intentos") as excinfo:
         _ = _model(transport, max_attempts=1).extract_contract("brief")
     assert isinstance(excinfo.value.__cause__, ModelOutputError)
-    assert excinfo.value.__cause__.__cause__ is not None
+
+
+def test_output_errors_do_not_leak_model_content() -> None:
+    canary = "CANARIO123"
+    content = json.dumps({"platforms": {canary: {}}})
+    transport = FakeTransport(responses=[_chat_response(content)])
+    with pytest.raises(ModelOutputError) as excinfo:
+        _ = _model(transport, max_attempts=1).extract_contract("brief")
+    rendered = [str(excinfo.value)]
+    cause = excinfo.value.__cause__
+    while cause is not None:
+        rendered.append(str(cause))
+        cause = cause.__cause__
+    assert all(canary not in text for text in rendered)
 
 
 def test_invalid_json_output_raises_output_error() -> None:
@@ -262,7 +275,8 @@ def test_all_fixture_recordings_use_current_prompt() -> None:
     directories = sorted(fixture_root.glob("*/recorded"))
     assert directories
     for directory in directories:
-        _ = RecordedModel.from_directory(directory, expected_prompt_version=PROMPT_VERSION)
+        model = RecordedModel.from_directory(directory, expected_prompt_version=PROMPT_VERSION)
+        assert model.documents
 
 
 def _iter_evidence(payload: object) -> list[dict[str, object]]:
