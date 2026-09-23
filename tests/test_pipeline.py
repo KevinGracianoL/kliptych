@@ -60,7 +60,7 @@ def _json(path: Path) -> dict[str, object]:
     return cast("dict[str, object]", json.loads(path.read_text(encoding="utf-8")))
 
 
-def _generate_sample(root: Path) -> Path:
+def _generate_sample(root: Path, *, duration: int = 9, audio: bool = True) -> Path:
     assert _FFMPEG is not None
     path = root / "assets" / "samples" / "given-clips-sample.mp4"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,22 +72,20 @@ def _generate_sample(root: Path) -> Path:
         "-f",
         "lavfi",
         "-i",
-        "color=c=blue:s=320x240:d=9",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=9",
-        "-shortest",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        str(path),
+        f"color=c=blue:s=320x240:d={duration}",
     ]
+    if audio:
+        argv += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration}",
+            "-shortest",
+        ]
+    argv += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if audio:
+        argv += ["-c:a", "aac"]
+    argv += ["-movflags", "+faststart", str(path)]
     _ = subprocess.run(argv, capture_output=True, check=True, timeout=120)
     return path
 
@@ -172,7 +170,7 @@ def _caption() -> Caption:
 
 def _platform_draft() -> dict[str, object]:
     return {
-        "duration": {"min_s": candidate(8)},
+        "duration": {"min_s": candidate(8), "max_s": candidate(60)},
         "required_hashtags": candidate(["#marca"]),
         "required_mentions": candidate(["@marca"]),
     }
@@ -238,22 +236,52 @@ def test_pipeline_exports_pass_package(tmp_path: Path) -> None:
     assert manifest["render_arguments"] == list(recipe)
 
 
-@pytest.mark.integration
-@_NEEDS_FFMPEG
-def test_pipeline_blocks_rejected_caption(tmp_path: Path) -> None:
-    _ = _generate_sample(tmp_path)
-    result = _run("given-clips-rejected", tmp_path)
-    assert result.outcome is RunOutcome.BLOCKED
+def _assert_rejected_check(result: RunResult, check_id: str, *, status: str = "fail") -> None:
     assert result.delivery is not None
-    assert result.delivery.status is ExportStatus.BLOCKED
     rejected = result.delivery.rejected[0]
-    assert rejected.piece_id == "clip-01"
-    assert "caption.required_mention" in rejected.reason
-    package = Path(cast("str", result.package_path))
-    assert not (package / "demo-given-clips" / "tiktok" / "clip-01.mp4").exists()
+    assert check_id in rejected.reason
     manifest = _json(Path(result.manifest_path))
     gates = cast("list[dict[str, object]]", manifest["gates"])
-    assert gates[0]["status"] == "rejected"
+    checks = cast("list[dict[str, object]]", gates[0]["checks"])
+    matched = [check for check in checks if check["id"] == check_id]
+    assert matched
+    assert matched[0]["status"] == status
+    package = Path(cast("str", result.package_path))
+    assert not (package / "demo-given-clips" / "tiktok" / "clip-01.mp4").exists()
+
+
+@pytest.mark.integration
+@_NEEDS_FFMPEG
+@pytest.mark.parametrize(
+    ("fixture", "check_id"),
+    [
+        ("given-clips-rejected", "caption.required_mention"),
+        ("given-clips-rejected-hashtag", "caption.required_hashtag"),
+    ],
+)
+def test_pipeline_blocks_rejected_caption(tmp_path: Path, fixture: str, check_id: str) -> None:
+    _ = _generate_sample(tmp_path)
+    result = _run(fixture, tmp_path)
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, check_id)
+
+
+@pytest.mark.integration
+@_NEEDS_FFMPEG
+def test_pipeline_blocks_short_artifact(tmp_path: Path) -> None:
+    _ = _generate_sample(tmp_path, duration=3)
+    result = _run("given-clips", tmp_path)
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, "duration.min")
+
+
+@pytest.mark.integration
+@_NEEDS_FFMPEG
+def test_pipeline_blocks_artifact_without_audio(tmp_path: Path) -> None:
+    _ = _generate_sample(tmp_path, audio=False)
+    result = _run("given-clips", tmp_path)
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, "audio.present")
 
 
 def test_pipeline_requires_video_assets(tmp_path: Path) -> None:
@@ -476,6 +504,70 @@ def test_pipeline_watermark_falls_back_when_asset_missing(tmp_path: Path) -> Non
         request=request,
     )
     assert assembler.watermarks == [None]
+
+
+def test_pipeline_blocks_duration_above_max(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    request = _unit_request(
+        tmp_path,
+        brief="brief con duración excesiva",
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media(duration_s=120.0))),
+    )
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, "duration.max")
+
+
+def test_pipeline_blocks_forbidden_term(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        prohibitions=candidate(["sorteo"]),
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    request = _unit_request(
+        tmp_path,
+        brief="brief con término prohibido",
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+    )
+    caption = Caption(caption="gran sorteo @marca #marca", hashtags=("#marca",))
+    result = run_given_clips(
+        model=_StaticModel(draft, caption),
+        settings=Settings.from_root(tmp_path),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, "caption.forbidden")
+
+
+def test_pipeline_blocks_spelling_without_subtitles(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        spelling_locks=candidate(["MarcaX"]),
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    request = _unit_request(
+        tmp_path,
+        brief="brief con spelling lock",
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+    )
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.BLOCKED
+    _assert_rejected_check(result, "subtitles.spelling_lock", status="unsupported")
 
 
 def test_cli_run_missing_brief_exits_1_with_json_stderr(

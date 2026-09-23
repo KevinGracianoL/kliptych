@@ -48,10 +48,10 @@ actualiza solo con evidencia real.
 - [x] Ingesta de briefs locales (texto/markdown, PDF, DOCX) con hash normalizado y CLI `kliptych ingest`.
 - [x] Google Docs y Notion por exportación manual: archivo exportado o texto pegado (`kliptych ingest -`); sin OAuth ni APIs (issue #5).
 - [x] Walking skeleton `given_clips` end-to-end: brief → contrato → ensamblado vertical → caption → gate → paquete, con CLI `kliptych run` y demo PASS/REJECTED.
+- [x] Fixtures rotos en CI: caption sin mención, hashtag faltante, duración fuera de rango, audio ausente, término prohibido, spelling sin subtítulos y watermark sin validador son rechazados por el gate (segmento fuera de límites: Fase C).
 
-Fases siguientes: cerrar los fixtures rotos restantes de la Fase B (brief §5.5),
-C (motor de video largo), D (modos especiales), E (clasificación de campañas),
-F (operación/API/GUI).
+Fases siguientes: C (motor de video largo), D (modos especiales), E
+(clasificación de campañas), F (operación/API/GUI).
 
 ## Demo del walking skeleton (`given_clips`)
 
@@ -121,7 +121,10 @@ uv run kliptych run campaigns/fixtures/given-clips-rejected/brief.md \
 ```
 
 El paquete rechazado solo contiene `delivery_report.json` con el gate completo
-de la pieza; `runs/` no se commitea (política de datos).
+de la pieza; `runs/` no se commitea (política de datos). El CI cubre además los
+rechazos por hashtag faltante, duración fuera de rango, audio ausente, término
+prohibido, spelling sin subtítulos y watermark sin validador
+(`tests/test_pipeline.py`).
 
 ## Desarrollo
 
