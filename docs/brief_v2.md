@@ -204,9 +204,13 @@ Notas de diseño:
   y `caption_rules.must_mention` exigen el prefijo `#`/`@` respectivamente; el
   gate compara con frontera de token e ignora mayúsculas. Cada restricción
   declarada en la plataforma debe estar clasificada en `rules` (hard,
-  recommended o manual_review); si no, el contrato no valida. `audio_rule`,
-  `attribution` y `link_rules.link_in_bio` todavía no tienen rule_id en el
-  catálogo del gate (fases C/D) y no exigen clasificación aún.
+  recommended o manual_review); si no, el contrato no valida. Un watermark
+  exigido se clasifica como `watermark.full_video` (si debe cubrir todo el
+  video) o `watermark.present` (cobertura parcial); ninguno tiene validador
+  mecánico aún (fase B), así que el gate los marca `UNSUPPORTED` hasta
+  entonces. `audio_rule`, `attribution` y `link_rules.link_in_bio` todavía no
+  tienen rule_id en el catálogo del gate (fases C/D) y no exigen clasificación
+  aún.
 
 Los 5 ejemplos ya analizados sirven como TEST FIXTURES del extractor.
 Como el repo es privado, también se permiten fixtures reales anonimizados

@@ -68,9 +68,25 @@ def _active_rule_ids(
         active.append("subtitles.spelling_lock")
     if required_assets:
         active.append("assets.required")
-    if watermark_required and watermark_visible_full_video:
-        active.append("watermark.full_video")
+    watermark_rule = _watermark_rule_id(
+        watermark_required=watermark_required,
+        watermark_visible_full_video=watermark_visible_full_video,
+    )
+    if watermark_rule is not None:
+        active.append(watermark_rule)
     return active
+
+
+def _watermark_rule_id(
+    *,
+    watermark_required: bool,
+    watermark_visible_full_video: bool,
+) -> str | None:
+    if not watermark_required:
+        return None
+    if watermark_visible_full_video:
+        return "watermark.full_video"
+    return "watermark.present"
 
 
 def make_contract(

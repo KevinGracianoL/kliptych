@@ -257,10 +257,12 @@ def active_restriction_rules(
         evalúe en vez de ignorarlos en silencio.
 
     Nota:
-        ``audio_rule``, ``attribution`` y ``link_rules.link_in_bio`` aún no
-        tienen rule_id en el catálogo del gate (fases C/D); hasta que lo
-        tengan, el contrato puede declararlos sin clasificación y el gate no
-        los evalúa.
+        ``watermark.present`` cubre el watermark exigido sin cobertura total y
+        aún no tiene validador mecánico (fase B): clasificado en ``rules``, el
+        gate lo marca ``unsupported``.  ``audio_rule``, ``attribution`` y
+        ``link_rules.link_in_bio`` tampoco tienen rule_id en el catálogo del
+        gate (fases C/D); hasta que lo tengan, el contrato puede declararlos
+        sin clasificación y el gate no los evalúa.
     """
     active: list[str] = []
     if rules.duration.min_s is not None:
@@ -277,8 +279,17 @@ def active_restriction_rules(
         active.append("caption.required_hashtag")
     if global_restrictions.has_required_assets:
         active.append("assets.required")
-    if global_restrictions.watermark_required and global_restrictions.watermark_visible_full_video:
-        active.append("watermark.full_video")
+    watermark_rule = _watermark_rule(global_restrictions)
+    if watermark_rule is not None:
+        active.append(watermark_rule)
     if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
     return active
+
+
+def _watermark_rule(global_restrictions: GlobalRestrictions) -> str | None:
+    if not global_restrictions.watermark_required:
+        return None
+    if global_restrictions.watermark_visible_full_video:
+        return "watermark.full_video"
+    return "watermark.present"

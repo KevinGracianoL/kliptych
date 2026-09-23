@@ -18,6 +18,9 @@ Catálogo de reglas que el contrato puede declarar:
   pudo medir, el resultado es ``unsupported`` (jamás ``pass``).
 - ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
   y con locks declarados el resultado es ``unsupported``.
+- ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
+  todo el video o en alguna parte; sin validador mecánico todavía (fase B), el
+  motor las marca ``unsupported``.
 
 Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 ``unsupported`` (o ``manual_review`` si el contrato las clasificó así).

@@ -674,6 +674,30 @@ def test_nul_uri_on_registered_asset_is_rejected(tmp_path: Path) -> None:
     assert _issue_fields(result, IssueCode.UNRESOLVED_ASSET) == ["assets.required[0]"]
 
 
+def test_partial_watermark_blocks_until_validator_exists(tmp_path: Path) -> None:
+    draft = make_draft(
+        watermark={
+            "required": candidate(value=True),
+            "visible_full_video": candidate(value=False),
+        },
+        rules=None,
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "watermark.present" in result.contract.rules.hard
+    assert "watermark.full_video" not in result.contract.rules.hard
+    artifact = tmp_path / "piece.mp4"
+    _ = artifact.write_bytes(b"video")
+    gate = Gate(FakeProbe(info=make_media()))
+    gate_result = gate.run(
+        contract=result.contract,
+        piece=make_piece(artifact, caption="mira @marca #marca"),
+        assets=AssetRegistry(tmp_path),
+    )
+    assert gate_result.status is GateStatus.UNSUPPORTED
+    assert _check(gate_result, "watermark.present").status is CheckStatus.UNSUPPORTED
+
+
 def test_absent_assets_resolve_to_empty_bundle(tmp_path: Path) -> None:
     result = resolve_contract(make_draft(assets=None), registry=AssetRegistry(tmp_path))
     assert result.status is ResolutionStatus.RESOLVED
