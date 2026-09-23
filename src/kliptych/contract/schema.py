@@ -2,17 +2,19 @@
 
 from typing import Annotated, Literal, Self
 
-from pydantic import AwareDatetime, Field, StringConstraints, model_validator
+from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
 from kliptych.contract.base import ContractBase
 from kliptych.contract.enums import AttributionType, AudioRule, Format, Mode, Platform
+from kliptych.hashing import sha256_canonical_json
+from kliptych.naming import is_safe_segment
 
 ENFORCEMENT = "post_publication_manual"
 _RULE_ID = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")]
 _SHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _MIME = Annotated[str, StringConstraints(pattern=r"^[a-z]+/[a-z0-9][a-z0-9.+-]*$")]
 _MENTION = Annotated[str, StringConstraints(pattern=r"^@\S+$")]
-_HASHTAG = Annotated[str, StringConstraints(pattern=r"^#\S+$")]
+Hashtag = Annotated[str, StringConstraints(pattern=r"^#\S+$")]
 
 
 class DurationRange(ContractBase):
@@ -63,7 +65,7 @@ class PlatformRules(ContractBase):
     duration: DurationRange = Field(default_factory=DurationRange)
     caption_rules: CaptionRules = Field(default_factory=CaptionRules)
     audio_rule: AudioRule = AudioRule.ANY
-    required_hashtags: list[_HASHTAG] = Field(default_factory=list)
+    required_hashtags: list[Hashtag] = Field(default_factory=list)
     required_mentions: list[_MENTION] = Field(default_factory=list)
     attribution: Attribution = Field(default_factory=lambda: Attribution(type=AttributionType.NONE))
     link_rules: LinkRules = Field(default_factory=LinkRules)
@@ -99,6 +101,14 @@ class Watermark(ContractBase):
     asset_id: str | None = None
     visible_full_video: bool
 
+    @field_validator("asset_id")
+    @classmethod
+    def _asset_id_is_safe(cls, asset_id: str | None) -> str | None:
+        if asset_id is not None and not is_safe_segment(asset_id):
+            msg = "asset_id no es un segmento de ruta seguro"
+            raise ValueError(msg)
+        return asset_id
+
 
 class RuleSet(ContractBase):
     """Clasificación de cada regla como hard, recommended o manual_review."""
@@ -129,6 +139,14 @@ class AssetRef(ContractBase):
     origin: str = Field(min_length=1)
     license: str | None = None
     resolved_at: AwareDatetime
+
+    @field_validator("asset_id")
+    @classmethod
+    def _asset_id_is_safe(cls, asset_id: str) -> str:
+        if not is_safe_segment(asset_id):
+            msg = "asset_id no es un segmento de ruta seguro"
+            raise ValueError(msg)
+        return asset_id
 
 
 class AssetBundle(ContractBase):
@@ -239,6 +257,33 @@ class Contract(ContractBase):
             )
             raise ValueError(msg)
         return self
+
+
+# `resolved_at` es procedencia de la resolución (reloj), no identidad del
+# contrato lógico: excluirlo mantiene el digest estable entre corridas.
+_VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
+    "assets": {
+        "required": {"__all__": {"resolved_at"}},
+        "optional": {"__all__": {"resolved_at"}},
+    }
+}
+
+
+def contract_digest(contract: Contract) -> str:
+    """Calcula el hash canónico del contrato lógico.
+
+    Excluye metadatos volátiles de resolución (``resolved_at`` de los assets):
+    el mismo contrato resuelto dos veces produce el mismo digest.
+
+    Args:
+        contract: Contrato validado.
+
+    Returns:
+        El digest sha256 en hexadecimal.
+    """
+    return sha256_canonical_json(
+        contract.model_dump(mode="json", exclude=_VOLATILE_RESOLUTION_FIELDS)
+    )
 
 
 def active_restriction_rules(

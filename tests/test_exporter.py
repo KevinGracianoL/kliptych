@@ -18,6 +18,7 @@ from kliptych.contract import (
     GeoTarget,
     MinViewsForPayout,
     Platform,
+    contract_digest,
 )
 from kliptych.exporter import (
     DeliveryReport,
@@ -34,7 +35,6 @@ from kliptych.gate import (
     GateStatus,
     Piece,
 )
-from kliptych.hashing import sha256_canonical_json
 from kliptych.resolver import resolve_contract
 from kliptych.runtime import RecordedModel
 from tests.support import (
@@ -43,6 +43,7 @@ from tests.support import (
     make_contract,
     make_media,
     make_piece,
+    write_fixture_clip,
 )
 
 _CAMPAIGN = "camp-test"
@@ -228,7 +229,7 @@ def test_rejected_piece_is_not_exported_and_keeps_full_gate_result(tmp_path: Pat
     rejected = report.rejected[0]
     assert rejected.gate_status is GateStatus.REJECTED
     assert "caption.required_mention" in rejected.reason
-    assert rejected.gate.contract_sha256 == sha256_canonical_json(contract.model_dump(mode="json"))
+    assert rejected.gate.contract_sha256 == contract_digest(contract)
     assert rejected.gate.artifact_sha256 == sha256(b"video").hexdigest()
     assert any(check.id == "caption.required_mention" for check in rejected.gate.checks)
     assert not (destination / _CAMPAIGN).exists()
@@ -528,6 +529,7 @@ def test_recorded_fixture_flows_to_delivery(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "campaigns" / "fixtures" / "given-clips"
     brief = (fixtures / "brief.md").read_text(encoding="utf-8")
     draft = RecordedModel.from_directory(fixtures / "recorded").extract_contract(brief)
+    _ = write_fixture_clip(tmp_path)
     registry = AssetRegistry(tmp_path)
     resolution = resolve_contract(draft, registry=registry)
     assert resolution.contract is not None

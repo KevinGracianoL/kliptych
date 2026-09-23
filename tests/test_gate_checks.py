@@ -94,6 +94,18 @@ def test_forbidden_term_absent_passes(tmp_path: Path) -> None:
     )
 
 
+def test_forbidden_term_in_hashtags_fails(tmp_path: Path) -> None:
+    contract = make_contract(hard=["caption.forbidden"], prohibitions=["estafa"])
+    piece = make_piece(
+        _artifact(tmp_path),
+        caption="mira @marca #marca",
+        hashtags=("#marca", "#estafa"),
+    )
+    check = _check(_result(tmp_path, contract, piece), "caption.forbidden")
+    assert check.status is CheckStatus.FAIL
+    assert check.evidence["found"] == ["estafa"]
+
+
 def test_first_line_must_open_the_caption(tmp_path: Path) -> None:
     contract = make_contract(hard=["caption.first_line"], first_line="Escribe al 555-1234")
     good = make_piece(_artifact(tmp_path), caption="Escribe al 555-1234 y gana @marca #marca")

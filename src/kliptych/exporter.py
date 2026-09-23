@@ -48,36 +48,9 @@ from kliptych.gate import (
     Piece,
 )
 from kliptych.hashing import sha256_bytes
+from kliptych.naming import is_safe_segment
 
-_SAFE_SEGMENT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
-_MAX_SEGMENT_LENGTH = 64
-_RESERVED_NAMES = frozenset(
-    {
-        "aux",
-        "com1",
-        "com2",
-        "com3",
-        "com4",
-        "com5",
-        "com6",
-        "com7",
-        "com8",
-        "com9",
-        "con",
-        "lpt1",
-        "lpt2",
-        "lpt3",
-        "lpt4",
-        "lpt5",
-        "lpt6",
-        "lpt7",
-        "lpt8",
-        "lpt9",
-        "nul",
-        "prn",
-    }
-)
 _SUMMARY_NAME = "delivery_report.json"
 
 
@@ -227,7 +200,10 @@ def export_delivery(
         msg = f"campaign_id reservado por el exportador: {contract.campaign_id!r}"
         raise ExportError(msg)
     segments = [_safe_segment(piece.piece_id, field="piece_id") for piece in pieces]
-    if len(set(segments)) != len(segments):
+    identities = [
+        (piece.platform.value, segment) for piece, segment in zip(pieces, segments, strict=True)
+    ]
+    if len(set(identities)) != len(identities):
         msg = "piece_id duplicado en el paquete de entrega"
         raise ExportError(msg)
     undeclared = sorted(
@@ -313,13 +289,7 @@ def _validate_output_names(plans: Sequence[_PiecePlan]) -> None:
 
 
 def _safe_segment(value: str, *, field: str) -> str:
-    invalid = (
-        len(value) > _MAX_SEGMENT_LENGTH
-        or value in {".", ".."}
-        or not _SAFE_SEGMENT.fullmatch(value)
-        or value.split(".", 1)[0].casefold() in _RESERVED_NAMES
-    )
-    if invalid:
+    if not is_safe_segment(value):
         msg = f"{field} no es un identificador seguro para el paquete: {value!r}"
         raise ExportError(msg)
     return value

@@ -34,6 +34,7 @@ from kliptych.contract.schema import (
     DurationRange,
     GeoTarget,
     GlobalRestrictions,
+    Hashtag,
     Languages,
     LinkRules,
     MinViewsForPayout,
@@ -42,6 +43,7 @@ from kliptych.contract.schema import (
     RuleSet,
     Watermark,
     active_restriction_rules,
+    contract_digest,
 )
 
 __all__ = [
@@ -66,6 +68,7 @@ __all__ = [
     "GeoTarget",
     "GeoTargetDraft",
     "GlobalRestrictions",
+    "Hashtag",
     "Languages",
     "LanguagesDraft",
     "LinkRules",
@@ -84,4 +87,5 @@ __all__ = [
     "Watermark",
     "WatermarkDraft",
     "active_restriction_rules",
+    "contract_digest",
 ]

@@ -1,6 +1,10 @@
 """Tests de la CLI."""
 
 import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -12,6 +16,20 @@ from kliptych.environment import EnvironmentReport
 
 def _parse(text: str) -> dict[str, object]:
     return cast("dict[str, object]", json.loads(text))
+
+
+def test_console_script_is_installed() -> None:
+    script = shutil.which("kliptych", path=str(Path(sys.executable).parent))
+    assert script is not None
+    completed = subprocess.run(
+        [script, "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == __version__
 
 
 def test_main_without_args_prints_help(capsys: pytest.CaptureFixture[str]) -> None:

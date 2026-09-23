@@ -194,6 +194,57 @@ def test_required_asset_is_registered(tmp_path: Path) -> None:
     assert "assets.required" in result.contract.rules.hard
 
 
+def test_required_watermark_rule_is_forced_hard(tmp_path: Path) -> None:
+    draft = make_draft(
+        watermark={
+            "required": candidate(value=True),
+            "visible_full_video": candidate(value=True),
+        },
+        rules={
+            "hard": candidate(["duration.min", "caption.required_hashtag"]),
+            "recommended": candidate(["watermark.full_video"]),
+            "manual_review": candidate([]),
+        },
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert "watermark.full_video" in result.contract.rules.hard
+    assert "watermark.full_video" not in result.contract.rules.recommended
+    assert "rules.watermark.full_video" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
+
+
+def test_unclassified_watermark_reports_rule_defaulted(tmp_path: Path) -> None:
+    draft = make_draft(
+        watermark={
+            "required": candidate(value=True),
+            "visible_full_video": candidate(value=True),
+        },
+        rules=None,
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "watermark.full_video" in result.contract.rules.hard
+    assert "rules.watermark.full_video" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
+
+
+def test_required_assets_rule_is_forced_hard(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"video")
+    draft = make_draft(
+        assets={"required": [make_asset_draft()], "optional": []},
+        rules={
+            "hard": candidate(["duration.min", "caption.required_hashtag"]),
+            "recommended": candidate(["assets.required"]),
+            "manual_review": candidate([]),
+        },
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    assert "assets.required" in result.contract.rules.hard
+    assert "assets.required" not in result.contract.rules.recommended
+    assert "rules.assets.required" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
+
+
 def test_unresolved_required_asset_goes_to_manual_review(tmp_path: Path) -> None:
     draft = make_draft(assets={"required": [make_asset_draft(uri="nope.mp4")], "optional": []})
     result = resolve_contract(draft, registry=AssetRegistry(tmp_path))

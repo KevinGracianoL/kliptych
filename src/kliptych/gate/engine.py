@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Contract, RuleStrength
+from kliptych.contract import Contract, RuleStrength, contract_digest
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -15,7 +15,7 @@ from kliptych.gate.models import (
     Piece,
 )
 from kliptych.gate.probe import MediaProbe, ProbeError
-from kliptych.hashing import sha256_canonical_json, sha256_file
+from kliptych.hashing import sha256_file
 
 
 class GateError(Exception):
@@ -82,7 +82,7 @@ class Gate:
             status=_derive_status(outcomes),
             checks=tuple(check for _, check in outcomes),
             artifact_sha256=artifact_sha256,
-            contract_sha256=sha256_canonical_json(contract.model_dump(mode="json")),
+            contract_sha256=contract_digest(contract),
         )
 
     def _run_rule(self, rule_id: str, strength: RuleStrength, context: GateContext) -> CheckResult:

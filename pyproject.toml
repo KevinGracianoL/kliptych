@@ -8,6 +8,9 @@ license = "LicenseRef-Proprietary"
 authors = [{ name = "Kevin Graciano" }]
 dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 
+[project.scripts]
+kliptych = "kliptych.__main__:main"
+
 [dependency-groups]
 dev = [
     "basedpyright>=1.29",
@@ -47,6 +50,13 @@ ignore = [
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
 ]
+"src/kliptych/assembler.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
@@ -71,10 +81,32 @@ ignore = [
     # documentada se traduce de inmediato a IngestError conservando la causa.
     "blind-except",
 ]
+"src/kliptych/pipeline.py" = [
+    # run_given_clips delega el ensamblado y la exportación; PipelineError se
+    # lanza en el helper _resolved y la sección Raises documenta el contrato.
+    "docstring-extraneous-exception",
+]
+"src/kliptych/runtime/openai_compatible.py" = [
+    # extract_contract/write_caption delegan en _complete, que es quien lanza
+    # los errores; la sección Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
+"src/kliptych/runtime/recorded.py" = [
+    # write_caption delega el payload y la validación de plataforma en
+    # caption_prompt_payload (vía _caption_key), que lanza ModelInputError; la
+    # sección Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/runtime/transport.py" = [
     # petición al endpoint configurado por el operador; el esquema http/https
     # se valida antes de construirla y no hay redirecciones.
     "suspicious-url-open-usage",
+]
+"tests/test_assembler.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # fixtures sintéticos.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/test_exporter.py" = [
     # mklink se invoca con lista de argumentos y shell=False para crear un junction.
@@ -95,6 +127,18 @@ ignore = [
     "suspicious-subprocess-import",
     # user_password/owner_password son parámetros reales de pypdf, no secretos.
     "hardcoded-password-func-arg",
+]
+"tests/test_main.py" = [
+    # El entry point instalado se ejecuta en subproceso para verificar que el
+    # comando documentado en el README existe.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_pipeline.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # el clip sintético de la demo.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/test_transport.py" = [
     # firma fija del handler HTTP estándar (do_POST/log_message)

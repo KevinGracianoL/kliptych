@@ -3,27 +3,44 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
 from kliptych.assets import AssetRegistry
+from kliptych.contract import Platform
 from kliptych.gate import CheckStatus, Gate, GateStatus
 from kliptych.resolver import ResolutionStatus, resolve_contract
 from kliptych.runtime import (
+    CAPTION_PROMPT_VERSION,
     PROMPT_VERSION,
+    Caption,
     HttpError,
     HttpResponse,
+    ModelInputError,
     ModelOutputError,
     ModelUnavailableError,
     OpenAIChatModel,
+    PieceContext,
     RecordedModel,
     RetryPolicy,
+    record_caption,
     record_response,
 )
-from tests.support import FakeProbe, make_draft, make_media, make_piece
+from tests.support import (
+    FakeProbe,
+    make_asset_draft,
+    make_asset_ref,
+    make_contract,
+    make_draft,
+    make_media,
+    make_piece,
+    write_fixture_clip,
+)
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "campaigns" / "fixtures" / "given-clips"
 
@@ -288,7 +305,11 @@ def test_all_fixture_recordings_use_current_prompt() -> None:
     directories = sorted(fixture_root.glob("*/recorded"))
     assert directories
     for directory in directories:
-        model = RecordedModel.from_directory(directory, expected_prompt_version=PROMPT_VERSION)
+        model = RecordedModel.from_directory(
+            directory,
+            expected_prompt_version=PROMPT_VERSION,
+            expected_caption_prompt_version=CAPTION_PROMPT_VERSION,
+        )
         assert model.documents
 
 
@@ -325,6 +346,7 @@ def test_fixture_brief_flows_to_the_gate(tmp_path: Path) -> None:
     brief = (_FIXTURES / "brief.md").read_text(encoding="utf-8")
     model = RecordedModel.from_directory(_FIXTURES / "recorded")
     draft = model.extract_contract(brief)
+    _ = write_fixture_clip(tmp_path)
     registry = AssetRegistry(tmp_path)
     result = resolve_contract(draft, registry=registry)
     assert result.status is ResolutionStatus.RESOLVED
@@ -431,3 +453,289 @@ def test_from_env_wires_url_key_transport_and_policy() -> None:
     headers = cast("dict[str, str]", call["headers"])
     assert headers["Authorization"] == "Bearer clave-canario"
     assert cast("float", call["timeout_s"]) == pytest.approx(7.5)
+
+
+def _caption_json(
+    caption: str = "Mira @marca #marca",
+    hashtags: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {"caption": caption, "hashtags": ["#marca"] if hashtags is None else hashtags}
+    )
+
+
+def _caption_piece(
+    piece_id: str = "piece-01", platform: Platform = Platform.TIKTOK
+) -> PieceContext:
+    return PieceContext(piece_id=piece_id, platform=platform)
+
+
+def _caption_user_content(transport: FakeTransport, index: int = 0) -> str:
+    payload = cast("dict[str, object]", transport.calls[index]["payload"])
+    return json.dumps(payload["messages"], ensure_ascii=False)
+
+
+def test_caption_rejects_blank_text() -> None:
+    with pytest.raises(ValidationError, match="caption"):
+        _ = Caption(caption="")
+
+
+@pytest.mark.parametrize(
+    "hashtag", ["marca", "#marca extra", "#marca\n#otro", "# marca", "#marca "]
+)
+def test_caption_rejects_invalid_hashtag(hashtag: str) -> None:
+    with pytest.raises(ValidationError, match="hashtags"):
+        _ = Caption(caption="hola", hashtags=(hashtag,))
+
+
+@pytest.mark.parametrize("hashtag", ["#marca", "#Marca", "#a", "#marca_2026"])
+def test_caption_accepts_token_hashtags(hashtag: str) -> None:
+    caption = Caption(caption="hola", hashtags=(hashtag,))
+    assert caption.hashtags == (hashtag,)
+
+
+def test_write_caption_returns_validated_caption() -> None:
+    transport = FakeTransport(responses=[_chat_response(_caption_json())])
+    caption = _model(transport).write_caption(make_contract(), _caption_piece())
+    assert caption == Caption(caption="Mira @marca #marca", hashtags=("#marca",))
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["url"] == "https://llm.example/v1/chat/completions"
+    payload = cast("dict[str, object]", call["payload"])
+    assert payload["model"] == "model-test"
+    assert payload["temperature"] == 0
+    assert payload["response_format"] == {"type": "json_object"}
+    content = _caption_user_content(transport)
+    assert "redactor de captions" in content
+    assert "@marca" in content
+    assert "#marca" in content
+
+
+def test_write_caption_does_not_send_asset_uris() -> None:
+    contract = make_contract(required_assets=[make_asset_ref()])
+    transport = FakeTransport(responses=[_chat_response(_caption_json())])
+    _ = _model(transport).write_caption(contract, _caption_piece())
+    content = _caption_user_content(transport)
+    assert "clip.mp4" not in content
+    assert "assets" not in content
+
+
+def test_write_caption_pins_curated_payload_fields() -> None:
+    contract = make_contract(
+        required_mentions=("@marca",),
+        required_hashtags=("#marca",),
+        must_mention=("@marca",),
+        forbidden=("estafa",),
+        prohibitions=("no prometer resultados",),
+        spelling_locks=("MarcaX",),
+        first_line="Hola",
+    )
+    transport = FakeTransport(responses=[_chat_response(_caption_json())])
+    _ = _model(transport).write_caption(contract, _caption_piece())
+    payload = cast("dict[str, object]", transport.calls[0]["payload"])
+    messages = cast("list[dict[str, str]]", payload["messages"])
+    sent = cast("dict[str, object]", json.loads(messages[1]["content"]))
+    assert sent == {
+        "campaign_id": "camp-test",
+        "platform": "tiktok",
+        "piece_id": "piece-01",
+        "languages": {"source": "es", "subtitles": None, "caption": "es", "voice": None},
+        "caption_rules": {
+            "must_mention": ["@marca"],
+            "first_line": "Hola",
+            "forbidden": ["estafa"],
+        },
+        "required_mentions": ["@marca"],
+        "required_hashtags": ["#marca"],
+        "prohibitions": ["no prometer resultados"],
+        "spelling_locks": ["MarcaX"],
+    }
+
+
+def test_write_caption_strips_code_fences() -> None:
+    content = f"```json\n{_caption_json()}\n```"
+    transport = FakeTransport(responses=[_chat_response(content)])
+    caption = _model(transport).write_caption(make_contract(), _caption_piece())
+    assert caption.caption == "Mira @marca #marca"
+
+
+def test_write_caption_retries_invalid_output_then_success() -> None:
+    transport = FakeTransport(
+        responses=[_chat_response("no soy json"), _chat_response(_caption_json())]
+    )
+    caption = _model(transport).write_caption(make_contract(), _caption_piece())
+    assert caption.caption == "Mira @marca #marca"
+    assert len(transport.calls) == 2
+
+
+def test_write_caption_output_errors_do_not_leak_model_content() -> None:
+    canary = "CANARIO123"
+    content = json.dumps({"caption": "hola", "hashtags": [canary]})
+    transport = FakeTransport(responses=[_chat_response(content)])
+    with pytest.raises(ModelOutputError, match="Caption") as excinfo:
+        _ = _model(transport, max_attempts=1).write_caption(make_contract(), _caption_piece())
+    assert not _rendered_chain_contains(excinfo.value, canary)
+
+
+def test_write_caption_rejects_undeclared_platform() -> None:
+    piece = _caption_piece(platform=Platform.INSTAGRAM_REELS)
+    transport = FakeTransport(responses=[])
+    with pytest.raises(ModelInputError, match="instagram_reels"):
+        _ = _model(transport).write_caption(make_contract(), piece)
+    assert transport.calls == []
+
+
+def test_recorded_write_caption_rejects_undeclared_platform() -> None:
+    contract = make_contract()
+    piece = _caption_piece(platform=Platform.INSTAGRAM_REELS)
+    model = RecordedModel()
+    with pytest.raises(ModelInputError, match="instagram_reels"):
+        _ = model.write_caption(contract, piece)
+
+
+def test_record_caption_rejects_undeclared_platform(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = _caption_piece(platform=Platform.INSTAGRAM_REELS)
+    with pytest.raises(ModelInputError, match="instagram_reels"):
+        _ = record_caption(
+            contract,
+            piece,
+            Caption(caption="caption para x", hashtags=("#marca",)),
+            prompt_version=CAPTION_PROMPT_VERSION,
+            directory=tmp_path / "recorded",
+        )
+
+
+def test_model_exposes_caption_prompt_version() -> None:
+    model = _model(FakeTransport(responses=[]))
+    assert model.caption_prompt_version == CAPTION_PROMPT_VERSION
+
+
+def test_record_and_replay_caption_round_trip(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = _caption_piece()
+    expected = Caption(caption="Mira @marca", hashtags=("#marca",))
+    directory = tmp_path / "recorded"
+    path = record_caption(
+        contract,
+        piece,
+        expected,
+        prompt_version=CAPTION_PROMPT_VERSION,
+        directory=directory,
+    )
+    assert path.parent == directory
+    assert path.name.endswith(".caption.json")
+    model = RecordedModel.from_directory(directory)
+    assert model.write_caption(contract, piece) == expected
+
+
+def test_caption_replay_is_stable_across_fresh_registries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(assets={"required": [make_asset_draft()], "optional": []})
+    first = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert first.contract is not None
+
+    def _frozen_now(_tz: object = None) -> datetime:
+        return datetime(2026, 9, 22, tzinfo=UTC)
+
+    monkeypatch.setattr("kliptych.assets.datetime", SimpleNamespace(now=_frozen_now))
+    second = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert second.contract is not None
+    assert first.contract != second.contract
+    piece = _caption_piece()
+    expected = Caption(caption="Mira @marca", hashtags=("#marca",))
+    directory = tmp_path / "recorded"
+    _ = record_caption(
+        first.contract,
+        piece,
+        expected,
+        prompt_version=CAPTION_PROMPT_VERSION,
+        directory=directory,
+    )
+    model = RecordedModel.from_directory(directory)
+    assert model.write_caption(second.contract, piece) == expected
+
+
+def test_caption_fixture_load_does_not_echo_content(tmp_path: Path) -> None:
+    canary = "CANARIO-1234"
+    directory = tmp_path / "recorded"
+    directory.mkdir()
+    payload = {
+        "prompt_sha256": "a" * 64,
+        "platform": "tiktok",
+        "piece_id": "piece-01",
+        "prompt_version": CAPTION_PROMPT_VERSION,
+        "caption": {"caption": "hola", "hashtags": [canary]},
+    }
+    _ = (directory / "malo.caption.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValidationError) as excinfo:
+        _ = RecordedModel.from_directory(directory)
+    assert not _rendered_chain_contains(excinfo.value, canary)
+
+
+def test_replay_caption_missing_raises() -> None:
+    model = RecordedModel()
+    with pytest.raises(ModelUnavailableError, match="sin caption grabado"):
+        _ = model.write_caption(make_contract(), _caption_piece())
+
+
+def test_caption_replay_is_keyed_by_contract_and_piece(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = _caption_piece()
+    other_contract = make_contract(required_hashtags=("#otra",))
+    other_piece = _caption_piece(piece_id="piece-02")
+    directory = tmp_path / "recorded"
+    expected = Caption(caption="Mira @marca", hashtags=("#marca",))
+    _ = record_caption(
+        contract,
+        piece,
+        expected,
+        prompt_version=CAPTION_PROMPT_VERSION,
+        directory=directory,
+    )
+    model = RecordedModel.from_directory(directory)
+    assert model.write_caption(contract, piece) == expected
+    with pytest.raises(ModelUnavailableError, match="sin caption grabado"):
+        _ = model.write_caption(other_contract, piece)
+    with pytest.raises(ModelUnavailableError, match="sin caption grabado"):
+        _ = model.write_caption(contract, other_piece)
+
+
+def test_from_directory_rejects_stale_caption_prompt_version(tmp_path: Path) -> None:
+    directory = tmp_path / "recorded"
+    _ = record_caption(
+        make_contract(),
+        _caption_piece(),
+        Caption(caption="Mira @marca", hashtags=("#marca",)),
+        prompt_version="caption-v0",
+        directory=directory,
+    )
+    with pytest.raises(ModelUnavailableError, match="captions con prompt obsoleto"):
+        _ = RecordedModel.from_directory(
+            directory,
+            expected_caption_prompt_version=CAPTION_PROMPT_VERSION,
+        )
+
+
+def test_from_directory_rejects_unknown_json(tmp_path: Path) -> None:
+    directory = tmp_path / "recorded"
+    directory.mkdir()
+    _ = (directory / "suelto.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ModelUnavailableError, match="no reconocidas"):
+        _ = RecordedModel.from_directory(directory)
+
+
+def test_replay_rejects_duplicate_captions(tmp_path: Path) -> None:
+    directory = tmp_path / "recorded"
+    _ = record_caption(
+        make_contract(),
+        _caption_piece(),
+        Caption(caption="Mira @marca", hashtags=("#marca",)),
+        prompt_version=CAPTION_PROMPT_VERSION,
+        directory=directory,
+    )
+    document = next(iter(RecordedModel.from_directory(directory).captions.values()))
+    with pytest.raises(ValueError, match="caption duplicado"):
+        _ = RecordedModel(captions=[document, document])
