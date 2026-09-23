@@ -46,7 +46,17 @@ un gate. Se arregla el código.
 
 ## Proceso de revisión
 
-Al terminar un PR y con el CI verde, el owner pide la revisión: se invoca la
-skill `evidence-driven-review` en modo report (subagentes con contexto limpio,
-validación adversarial, snapshot base/head). Los hallazgos confirmados se
-corrigen y se hace re-revisión del delta. La skill no aprueba ni publica nada.
+**La skill `evidence-driven-review` ya no se invoca commit por commit ni fase por
+fase: es un gasto brutal de tokens y contamina el contexto.** El flujo es:
+
+1. El agente implementa el PR completo (puede agrupar varios commits en la rama).
+2. Verifica que el CI local esté verde (lint + type + test).
+3. Empuja la rama y abre el PR con todos los commits agrupados.
+4. Verifica que el CI remoto reporte verde.
+5. **Se detiene por completo y avisa al owner.**
+6. Solo el owner da la orden explícita de disparar `evidence-driven-review` sobre
+   el PR completo (snapshot base/head del PR, no commits sueltos).
+
+La skill se lanza una sola vez sobre el PR cerrado, nunca sobre estados intermedios.
+Los hallazgos confirmados se corrigen y se hace re-revisión del delta. La skill no
+aprueba ni publica nada.

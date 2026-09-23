@@ -57,6 +57,16 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"src/kliptych/download.py" = [
+    # yt-dlp/streamlink/chat-downloader se invocan con lista de argumentos y
+    # shell=False; el binario es configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # SubprocessDownloadRunner.run propaga TimeoutExpired de subprocess.run; la
+    # sección Raises documenta el contrato público del runner.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
@@ -107,6 +117,16 @@ ignore = [
     # fixtures sintéticos.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_download.py" = [
+    # ffmpeg/yt-dlp se invocan con lista de argumentos y shell=False para generar
+    # fixtures sintéticos y servir el video por localhost en la prueba real.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # firma fija del handler HTTP estándar (do_GET/log_message)
+    "invalid-function-name",
+    "builtin-argument-shadowing",
 ]
 "tests/test_exporter.py" = [
     # mklink se invoca con lista de argumentos y shell=False para crear un junction.
