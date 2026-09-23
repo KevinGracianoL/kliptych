@@ -47,6 +47,13 @@ ignore = [
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
 ]
+"src/kliptych/assembler.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
@@ -75,6 +82,12 @@ ignore = [
     # petición al endpoint configurado por el operador; el esquema http/https
     # se valida antes de construirla y no hay redirecciones.
     "suspicious-url-open-usage",
+]
+"tests/test_assembler.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # fixtures sintéticos.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/test_exporter.py" = [
     # mklink se invoca con lista de argumentos y shell=False para crear un junction.
