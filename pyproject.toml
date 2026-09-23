@@ -68,6 +68,21 @@ ignore = [
     "suspicious-subprocess-import",
     "subprocess-without-shell-equals-true",
 ]
+"src/kliptych/moments.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # detect delega en _run_ffmpeg, que lanza MomentDetectionError; la sección
+    # Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
+"src/kliptych/segment.py" = [
+    # build_prompt delega en _bounds_from, que lanza SegmentSelectionError; la
+    # sección Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/download.py" = [
     # yt-dlp/streamlink/chat-downloader se invocan con lista de argumentos y
     # shell=False; el binario es configuración del operador, nunca texto del LLM.
@@ -136,6 +151,19 @@ ignore = [
     # subprocess se usa solo para TimeoutExpired y para el runner real con
     # sys.executable; sin red y con lista de argumentos.
     "suspicious-subprocess-import",
+]
+"tests/test_moments.py" = [
+    # subprocess se usa solo para CompletedProcess/TimeoutExpired con ffmpeg
+    # simulado; lista de argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_moments_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético local.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
 ]
 "tests/test_download_integration.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el
