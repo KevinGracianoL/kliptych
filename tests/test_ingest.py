@@ -1,5 +1,6 @@
 """Tests de la ingesta de briefs locales."""
 
+import io
 import json
 import zipfile
 from collections.abc import Sequence
@@ -12,7 +13,7 @@ from pypdf import PdfWriter
 
 from kliptych.__main__ import main
 from kliptych.hashing import brief_key
-from kliptych.ingest import IngestError, ingest_file
+from kliptych.ingest import IngestError, ingest_file, ingest_text
 from kliptych.runtime import RecordedModel
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "campaigns" / "fixtures" / "given-clips"
@@ -162,6 +163,38 @@ def test_cli_ingest_prints_json(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert payload["source"] == str(path)
     assert payload["sha256"] == brief_key("hola brief")
     assert payload["chars"] == 10
+
+
+def test_ingests_pasted_text(tmp_path: Path) -> None:
+    brief = ingest_text("hola\r\nbrief", source="pegado de Google Docs")
+    assert brief.text == "hola\nbrief"
+    assert brief.media_type == "text/plain"
+    assert brief.source == "pegado de Google Docs"
+    assert brief.sha256 == brief_key("hola\nbrief")
+    _ = tmp_path
+
+
+def test_pasted_text_rejects_blank_input() -> None:
+    with pytest.raises(IngestError, match="utilizable"):
+        _ = ingest_text("   \n  ")
+
+
+def test_pasted_text_matches_file_ingestion(tmp_path: Path) -> None:
+    path = _write_text_file(tmp_path, "brief.txt", b"mismo contenido\r\n")
+    from_file = ingest_file(path)
+    from_text = ingest_text("mismo contenido\r\n")
+    assert from_file.sha256 == from_text.sha256
+
+
+def test_cli_ingest_reads_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("brief pegado"))
+    assert main(["ingest", "-"]) == 0
+    payload = _parse(capsys.readouterr().out)
+    assert payload["source"] == "<stdin>"
+    assert payload["sha256"] == brief_key("brief pegado")
+    assert payload["chars"] == len("brief pegado")
 
 
 def test_cli_ingest_reports_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

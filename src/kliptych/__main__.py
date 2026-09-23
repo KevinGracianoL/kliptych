@@ -9,7 +9,7 @@ from typing import cast
 
 from kliptych import __version__
 from kliptych.environment import SubprocessRunner, detect_environment
-from kliptych.ingest import IngestError, ingest_file
+from kliptych.ingest import IngestError, ingest_file, ingest_text
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -31,7 +31,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ingest_parser = subcommands.add_parser(
         "ingest", help="ingiere un brief local y lo imprime como JSON"
     )
-    _ = ingest_parser.add_argument("path", help="ruta del brief (txt, md, pdf, docx)")
+    _ = ingest_parser.add_argument(
+        "path", help="ruta del brief (txt, md, pdf, docx) o '-' para texto pegado por stdin"
+    )
     args = parser.parse_args(argv)
     command = cast("str | None", getattr(args, "command", None))
     if command == "env":
@@ -39,9 +41,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False))
         return 0
     if command == "ingest":
-        brief_path = Path(cast("str", getattr(args, "path", "")))
+        brief_path = cast("str", getattr(args, "path", ""))
         try:
-            brief = ingest_file(brief_path)
+            brief = (
+                ingest_text(sys.stdin.read(), source="<stdin>")
+                if brief_path == "-"
+                else ingest_file(Path(brief_path))
+            )
         except IngestError as error:
             print(json.dumps({"error": str(error)}, indent=2, ensure_ascii=False), file=sys.stderr)
             return 1

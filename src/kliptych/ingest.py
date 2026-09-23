@@ -1,13 +1,13 @@
 """Ingesta de briefs locales a texto normalizado.
 
-Formatos soportados: texto/markdown (UTF-8, con o sin BOM), PDF y DOCX. El
-texto se normaliza a saltos de línea LF y se identifica con el mismo hash que
-usa el runtime para las respuestas grabadas, de modo que un brief ingerido se
-puede reproducir con ``RecordedModel``.
+Todo el sistema es local, offline y determinista: no hay OAuth, tokens ni
+llamadas a APIs en la nube. Los briefs de Google Docs o Notion entran como
+archivo exportado (texto/markdown, PDF, DOCX) o como texto pegado
+(``ingest_text`` / ``kliptych ingest -``).
 
-Google Docs y Notion requieren una decisión de autenticación del owner
-(credenciales de API o export de enlaces compartidos); se incorporan cuando
-esa decisión exista.
+El texto se normaliza a saltos de línea LF y se identifica con el mismo hash
+que usa el runtime para las respuestas grabadas, de modo que un brief ingerido
+se puede reproducir con ``RecordedModel``.
 """
 
 import zipfile
@@ -71,12 +71,32 @@ def ingest_file(path: Path) -> IngestedBrief:
     else:
         msg = f"formato de brief no soportado: {suffix or path.name}"
         raise IngestError(msg)
+    return _build(source=str(path), media_type=media_type, text=text)
+
+
+def ingest_text(text: str, *, source: str = "texto pegado") -> IngestedBrief:
+    """Ingiere un brief pegado como texto plano.
+
+    Falla con ``IngestError`` si el texto no produce contenido utilizable.
+
+    Args:
+        text: Texto crudo del brief (por ejemplo pegado desde Google Docs o
+            Notion tras la exportación manual).
+        source: Procedencia declarada para el reporte.
+
+    Returns:
+        El brief ingerido con procedencia y hash del texto normalizado.
+    """
+    return _build(source=source, media_type="text/plain", text=text)
+
+
+def _build(*, source: str, media_type: str, text: str) -> IngestedBrief:
     normalized = normalize_brief(text)
     if not normalized.strip():
-        msg = f"el brief no contiene texto utilizable: {path}"
+        msg = f"el brief no contiene texto utilizable: {source}"
         raise IngestError(msg)
     return IngestedBrief(
-        source=str(path),
+        source=source,
         media_type=media_type,
         sha256=brief_key(normalized),
         text=normalized,
