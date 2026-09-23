@@ -44,7 +44,7 @@ def _manifest(**overrides: object) -> RunManifest:
             gpu=GpuInfo(name="GTX 1650 Ti", vram_mib=4096, driver_version="610.74"),
         ),
         "brief_sha256": "c" * 64,
-        "contract_schema_version": "1.0",
+        "contract_schema_version": "1.1",
         "contract_sha256": "b" * 64,
         "model_version": "recorded-v1",
         "prompt_version": "extract-v1",
@@ -76,7 +76,7 @@ def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
     path = write_manifest(_manifest(), tmp_path)
     payload = _parse(path.read_text(encoding="utf-8"))
     assert payload["brief_sha256"] == "c" * 64
-    assert payload["contract_schema_version"] == "1.0"
+    assert payload["contract_schema_version"] == "1.1"
     assert payload["caption_prompt_version"] == "caption-v1"
     gates = payload["gates"]
     assert isinstance(gates, list)

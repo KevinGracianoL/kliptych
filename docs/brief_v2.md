@@ -142,9 +142,9 @@ con una suposición. Queda null/UNKNOWN y produce MANUAL_REVIEW o
 NEW_ARCHETYPE. Un contrato contaminado con alucinaciones haría que el gate
 valide una campaña inventada por el modelo.
 
-4.3 Esquema Contract (v1.0):
+4.3 Esquema Contract (v1.1):
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "campaign_id": str,
   "format": "video" | "slideshow",
   "mode": "given_clips" | "long_video" | "audio_locked" | "repost_ugc" | "slideshow",
@@ -186,12 +186,16 @@ valide una campaña inventada por el modelo.
     }],
     "optional": [ ... misma forma ... ]
   },
+  "segments": [{"start_s": float, "end_s": float}],
   "geo_target": {"country": str, "min_pct": int, "enforcement": "post_publication_manual"} | null,
   "min_views_for_payout": {"value": int|null, "enforcement": "post_publication_manual"},
   "analytics_proof_required": {"value": bool, "enforcement": "post_publication_manual"}
 }
 
 Notas de diseño:
+- `segments` es obligatorio (al menos un segmento) cuando `mode="long_video"` y
+  está prohibido en cualquier otro modo: cada segmento exige `start_s >= 0` y
+  `end_s > start_s`, ambos finitos.
 - Un asset sin sha256 permite que el mismo asset_id apunte a otro archivo
   después. El hash es obligatorio.
 - Los campos con enforcement "post_publication_manual" (geo_target,
@@ -200,7 +204,7 @@ Notas de diseño:
 - Si hay conflicto entre plataformas, se resuelve por plataforma; si el
   conflicto es interno (dos reglas duras incompatibles), el contrato se marca
   en conflicto y va a MANUAL_REVIEW.
-- Nota de implementación (schema v1.0): `required_hashtags`, `required_mentions`
+- Nota de implementación (schema v1.1): `required_hashtags`, `required_mentions`
   y `caption_rules.must_mention` exigen el prefijo `#`/`@` respectivamente; el
   gate compara con frontera de token e ignora mayúsculas. Cada restricción
   declarada en la plataforma debe estar clasificada en `rules` (hard,

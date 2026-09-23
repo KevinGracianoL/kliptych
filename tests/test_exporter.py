@@ -88,7 +88,7 @@ def test_exports_passing_piece_with_metadata_and_gate_report(tmp_path: Path) -> 
 
     assert report.status is ExportStatus.EXPORTED
     assert report.package == "delivery"
-    assert report.schema_version == "1.0"
+    assert report.schema_version == "1.1"
     assert len(report.exported) == 1
     exported = report.exported[0]
     assert exported.piece_id == "piece-01"
@@ -100,7 +100,7 @@ def test_exports_passing_piece_with_metadata_and_gate_report(tmp_path: Path) -> 
     root = destination / _CAMPAIGN / "tiktok"
     assert (root / "piece-01.mp4").read_bytes() == b"video"
     metadata = _parse((root / "piece-01.metadata.json").read_text(encoding="utf-8"))
-    assert metadata["schema_version"] == "1.0"
+    assert metadata["schema_version"] == "1.1"
     assert metadata["piece_id"] == "piece-01"
     assert metadata["platform"] == "tiktok"
     assert metadata["caption"] == "mira @marca #marca"
@@ -236,7 +236,7 @@ def test_rejected_piece_is_not_exported_and_keeps_full_gate_result(tmp_path: Pat
 
     written = _parse((destination / "delivery_report.json").read_text(encoding="utf-8"))
     assert written["status"] == "blocked"
-    assert written["schema_version"] == "1.0"
+    assert written["schema_version"] == "1.1"
 
 
 def test_unsupported_rule_is_not_exported(tmp_path: Path) -> None:

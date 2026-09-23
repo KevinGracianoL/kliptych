@@ -73,7 +73,7 @@ class _ExporterBase(BaseModel):
 class PieceMetadata(_ExporterBase):
     """Metadata final que acompaña al artefacto en el paquete."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     piece_id: str
     platform: Platform
     caption: str
@@ -130,7 +130,7 @@ class Reminder(_ExporterBase):
 class DeliveryReport(_ExporterBase):
     """Resumen del paquete: lo exportado, lo rechazado y los recordatorios."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     campaign_id: str
     package: str
     status: ExportStatus

@@ -13,6 +13,8 @@ from kliptych.contract.draft import (
     OfficialAudioDraft,
     PlatformDraft,
     RuleSetDraft,
+    SegmentDraft,
+    SegmentsDraft,
     WatermarkDraft,
 )
 from kliptych.contract.enums import (
@@ -41,6 +43,7 @@ from kliptych.contract.schema import (
     OfficialAudio,
     PlatformRules,
     RuleSet,
+    Segment,
     Watermark,
     active_restriction_rules,
     contract_digest,
@@ -83,6 +86,9 @@ __all__ = [
     "RuleSet",
     "RuleSetDraft",
     "RuleStrength",
+    "Segment",
+    "SegmentDraft",
+    "SegmentsDraft",
     "SourceEvidence",
     "Watermark",
     "WatermarkDraft",

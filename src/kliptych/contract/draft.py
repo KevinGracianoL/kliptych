@@ -77,6 +77,19 @@ class WatermarkDraft(ContractBase):
     visible_full_video: FieldCandidate[bool] | None = None
 
 
+class SegmentDraft(ContractBase):
+    """Segmento temporal propuesto, con evidencia por cota."""
+
+    start_s: FieldCandidate[float] | None = None
+    end_s: FieldCandidate[float] | None = None
+
+
+class SegmentsDraft(ContractBase):
+    """Segmentos propuestos para el modo long_video."""
+
+    segments: list[SegmentDraft] = Field(default_factory=list, max_length=1000)
+
+
 class RuleSetDraft(ContractBase):
     """Clasificación propuesta de reglas, con evidencia por categoría."""
 
@@ -112,7 +125,7 @@ class GeoTargetDraft(ContractBase):
 class ContractDraft(ContractBase):
     """Salida cruda del LLM: todo campo es opcional y lleva su evidencia."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     campaign_id: FieldCandidate[str] | None = None
     format: FieldCandidate[Format] | None = None
     mode: FieldCandidate[Mode] | None = None
@@ -124,6 +137,7 @@ class ContractDraft(ContractBase):
     prohibitions: FieldCandidate[list[str]] | None = None
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
+    segments: SegmentsDraft | None = None
     geo_target: GeoTargetDraft | None = None
     min_views_for_payout: FieldCandidate[int] | None = None
     analytics_proof_required: FieldCandidate[bool] | None = None

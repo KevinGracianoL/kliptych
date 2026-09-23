@@ -23,7 +23,7 @@ def test_empty_draft_is_valid() -> None:
 def test_draft_carries_evidence_per_field() -> None:
     draft = ContractDraft.model_validate(
         {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "campaign_id": _candidate("camp-01", "Campaña camp-01"),
             "format": _candidate("video", "formato video vertical"),
             "mode": _candidate("given_clips", "usar los clips entregados"),
@@ -91,3 +91,12 @@ def test_validation_errors_hide_input_values() -> None:
             {"campaign_id": {"value": canary, "confidence": "explicit"}}
         )
     assert canary not in str(excinfo.value)
+
+
+def test_segments_draft_is_bounded() -> None:
+    segment = {
+        "start_s": _candidate(0.0, "desde el inicio"),
+        "end_s": _candidate(8.5, "hasta 8.5s"),
+    }
+    with pytest.raises(ValidationError, match="segments"):
+        _ = ContractDraft.model_validate({"segments": {"segments": [segment] * 1001}})

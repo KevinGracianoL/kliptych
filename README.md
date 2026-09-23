@@ -37,7 +37,7 @@ considera implementado si no tiene una corrida end-to-end; este README se
 actualiza solo con evidencia real.
 
 - [x] Bootstrap: uv + Python 3.13, ruff, basedpyright, pytest y CI.
-- [x] Contrato pydantic v1.0 con evidencia por campo.
+- [x] Contrato pydantic v1.1 (incluye segments para long_video).
 - [x] Resolutor `ContractDraft` → `Contract` (normaliza, clasifica y marca `MANUAL_REVIEW`/`NEW_ARCHETYPE` sin inventar).
 - [x] Asset registry con sha256/MIME/origen/licencia.
 - [x] Run manifest reproducible.

@@ -57,6 +57,7 @@ from kliptych.contract import (
     PlatformDraft,
     PlatformRules,
     RuleSet,
+    Segment,
     Watermark,
     active_restriction_rules,
 )
@@ -188,6 +189,7 @@ def _build_contract(
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
     official_audio = _resolve_official_audio(draft, platforms, issues)
+    segments = _resolve_segments(draft, mode, issues)
     rules = _resolve_rules(
         draft,
         context=_RuleContext(
@@ -220,6 +222,7 @@ def _build_contract(
         prohibitions=prohibitions,
         rules=rules,
         assets=assets,
+        segments=segments,
         geo_target=geo_target,
         min_views_for_payout=MinViewsForPayout(value=_value(draft.min_views_for_payout)),
         analytics_proof_required=AnalyticsProofRequired(
@@ -631,6 +634,65 @@ def _resolve_asset(
             )
         )
         return None
+
+
+def _resolve_segments(
+    draft: ContractDraft,
+    mode: Mode,
+    issues: list[ResolutionIssue],
+) -> tuple[Segment, ...]:
+    segments_draft = draft.segments
+    if mode is not Mode.LONG_VIDEO:
+        return ()
+    if segments_draft is None or not segments_draft.segments:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="segments",
+                detail="el modo long_video exige al menos un segmento",
+            )
+        )
+        return ()
+
+    segments: list[Segment] = []
+    for index, candidate in enumerate(segments_draft.segments):
+        conflicted = [
+            name
+            for name, bound in (("start_s", candidate.start_s), ("end_s", candidate.end_s))
+            if _is_conflict(bound)
+        ]
+        if conflicted:
+            issues.extend(
+                ResolutionIssue(
+                    code=IssueCode.CONFLICT,
+                    field=f"segments[{index}].{name}",
+                    detail="candidato en conflicto sin resolver",
+                )
+                for name in conflicted
+            )
+            continue
+        start = _value(candidate.start_s)
+        end = _value(candidate.end_s)
+        if start is None or end is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field=f"segments[{index}]",
+                    detail="segmento sin start_s o end_s resueltos",
+                )
+            )
+            continue
+        try:
+            segments.append(Segment(start_s=start, end_s=end))
+        except ValidationError as error:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field=f"segments[{index}]",
+                    detail=str(error),
+                )
+            )
+    return tuple(segments)
 
 
 def _base_rules(context: _RuleContext) -> list[str]:

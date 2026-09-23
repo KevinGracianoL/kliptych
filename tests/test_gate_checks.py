@@ -261,7 +261,7 @@ def test_contract_asset_hash_mismatch_fails(tmp_path: Path) -> None:
 def test_unsafe_registry_uri_fails_without_exception(tmp_path: Path) -> None:
     registry_file = tmp_path / "registry.json"
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "assets": [
             {
                 "asset_id": "malo",
