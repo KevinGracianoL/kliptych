@@ -183,7 +183,7 @@ class Contract(ContractBase):
     """Contrato validado y normalizado que consumen pipeline y gate."""
 
     schema_version: Literal["1.0"] = "1.0"
-    campaign_id: str = Field(min_length=1)
+    campaign_id: str = Field(min_length=1, max_length=64)
     format: Format
     mode: Mode
     platforms: dict[Platform, PlatformRules] = Field(min_length=1)

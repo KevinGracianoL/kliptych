@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import (
@@ -118,6 +119,62 @@ def test_exports_passing_piece_with_metadata_and_gate_report(tmp_path: Path) -> 
     assert gate_payload["contract_sha256"]
     checks = cast("list[object]", gate_payload["checks"])
     assert len(checks) > 0
+
+
+def test_rejects_destination_that_is_a_file(tmp_path: Path) -> None:
+    destination = tmp_path / "delivery"
+    _ = destination.write_bytes(b"contenido del usuario")
+    with pytest.raises(ExportError, match="no es un directorio"):
+        _ = _export(tmp_path, destination=destination)
+    assert destination.read_bytes() == b"contenido del usuario"
+
+
+def test_locked_destination_keeps_previous_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "delivery"
+    _ = _export(tmp_path, destination=destination)
+    original_rename = Path.rename
+
+    def failing_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith("delivery.staging-"):
+            raise PermissionError(13, "bloqueado")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+    with pytest.raises(ExportError, match="falló la escritura"):
+        _ = _export(tmp_path, destination=destination)
+    assert (destination / _CAMPAIGN / "tiktok" / "piece-01.mp4").exists()
+    assert not list(tmp_path.glob("delivery.backup-*"))
+    assert not list(tmp_path.glob("delivery.staging-*"))
+
+
+def test_restore_failure_reports_backup_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "delivery"
+    _ = _export(tmp_path, destination=destination)
+    original_rename = Path.rename
+
+    def failing_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith(("delivery.staging-", "delivery.backup-")):
+            raise PermissionError(13, "bloqueado")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+    with pytest.raises(ExportError, match="paquete previo quedó en"):
+        _ = _export(tmp_path, destination=destination)
+    assert not list(tmp_path.glob("delivery.staging-*"))
+
+
+def test_piece_id_length_is_bounded_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        _ = Piece(
+            piece_id="a" * 65,
+            platform=Platform.TIKTOK,
+            caption="x",
+            artifact_path=Path("x.mp4"),
+        )
 
 
 def test_metadata_merges_must_mention_with_required_mentions(tmp_path: Path) -> None:

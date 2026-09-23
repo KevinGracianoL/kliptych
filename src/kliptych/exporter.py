@@ -1,12 +1,15 @@
 """Exportador de paquetes de entrega: solo piezas que pasan el gate.
 
-El paquete se construye en un directorio de staging y se publica con un
-reemplazo atómico: un fallo a mitad deja intacto el paquete anterior y una
-publicación exitosa no conserva piezas de corridas previas. Dentro del
-paquete, cada pieza vive en ``<campaña>/<plataforma>/`` junto a su metadata
-final, el reporte del gate y un ``delivery_report.json`` con el resumen y los
-recordatorios post-publicación (geo, views para payout, analytics y revisión
-manual).
+El paquete se construye en un directorio de staging y se publica reemplazando
+el directorio anterior: ante un error gestionado, el paquete previo queda
+intacto y una publicación exitosa no conserva piezas de corridas anteriores.
+El reemplazo son dos renombres de directorio, así que existe una ventana breve
+en la que el destino no está visible para lectores concurrentes y una
+interrupción dura del proceso puede dejar un ``*.backup-*``/``*.staging-*``
+huérfano. Dentro del paquete, cada pieza vive en ``<campaña>/<plataforma>/``
+junto a su metadata final, el reporte del gate y un ``delivery_report.json``
+con el resumen y los recordatorios post-publicación (geo, views para payout,
+analytics y revisión manual).
 
 Los identificadores derivados del brief se validan como segmentos de ruta
 seguros y los nombres de salida se comprueban contra colisiones entre piezas;
@@ -187,8 +190,9 @@ def export_delivery(
 ) -> DeliveryReport:
     """Construye el paquete de entrega de las piezas que pasan el gate.
 
-    El paquete se arma en staging y se publica con un reemplazo atómico; ante
-    cualquier error, el destino queda como estaba antes de la llamada.
+    El paquete se arma en staging y se publica reemplazando el directorio
+    anterior; ante cualquier error gestionado, el destino queda como estaba
+    antes de la llamada.
 
     Args:
         contract: Contrato validado que declara las reglas.
@@ -211,6 +215,9 @@ def export_delivery(
         raise ExportError(msg)
     if not destination.name:
         msg = f"destino de entrega inválido: {destination}"
+        raise ExportError(msg)
+    if (destination.exists() or destination.is_symlink()) and not destination.is_dir():
+        msg = f"el destino de entrega existe y no es un directorio: {destination}"
         raise ExportError(msg)
     campaign = _safe_segment(contract.campaign_id, field="campaign_id")
     if campaign.casefold() == _SUMMARY_NAME:
@@ -414,15 +421,25 @@ def _publish(staging: Path, destination: Path) -> None:
         _ = destination.rename(backup)
     try:
         _ = staging.rename(destination)
-    except OSError:
+    except OSError as error:
         if backup is not None:
-            _ = backup.rename(destination)
+            try:
+                _ = backup.rename(destination)
+            except OSError:
+                msg = (
+                    "no se pudo publicar el paquete ni restaurar el anterior; "
+                    f"el paquete previo quedó en {backup.name}"
+                )
+                raise ExportError(msg) from error
         raise
     if backup is not None:
         _remove_tree(backup)
 
 
 def _remove_tree(path: Path) -> None:
+    if path.is_junction():
+        path.rmdir()
+        return
     if path.is_symlink() or path.is_file():
         path.unlink(missing_ok=True)
         return
