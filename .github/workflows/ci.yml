@@ -30,11 +30,19 @@ jobs:
 
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update -o Acquire::Retries=3 && sudo apt-get install -y -o Acquire::Retries=3 ffmpeg
 
       - name: Install ffmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg --no-progress -y
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install ffmpeg --no-progress -y
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "choco intento $attempt falló; reintentando en 15 s"
+            Start-Sleep -Seconds 15
+          }
+          exit 1
 
       - name: Sync dependencies
         run: uv sync --locked
