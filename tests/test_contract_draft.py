@@ -82,3 +82,12 @@ def test_draft_round_trips_through_json() -> None:
     )
     restored = ContractDraft.model_validate_json(draft.model_dump_json())
     assert restored == draft
+
+
+def test_validation_errors_hide_input_values() -> None:
+    canary = "CANARIO123"
+    with pytest.raises(ValidationError) as excinfo:
+        _ = ContractDraft.model_validate(
+            {"campaign_id": {"value": canary, "confidence": "explicit"}}
+        )
+    assert canary not in str(excinfo.value)

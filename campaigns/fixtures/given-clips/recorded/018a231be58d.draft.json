@@ -1,0 +1,141 @@
+{
+  "brief_sha256": "018a231be58d33d92ebac47842dc3da6946dfd68b01b8b2f9a8d77711f8ac49f",
+  "prompt_version": "extract-v1",
+  "draft": {
+    "schema_version": "1.0",
+    "campaign_id": {
+      "value": "demo-given-clips",
+      "evidence": {
+        "quote": "ID de campaña: demo-given-clips",
+        "start": 34,
+        "end": 65,
+        "location": "brief.md#l3"
+      },
+      "confidence": "explicit"
+    },
+    "format": {
+      "value": "video",
+      "evidence": {
+        "quote": "Formato: video vertical",
+        "start": 66,
+        "end": 89,
+        "location": "brief.md#l4"
+      },
+      "confidence": "explicit"
+    },
+    "mode": {
+      "value": "given_clips",
+      "evidence": {
+        "quote": "Modo: given_clips (la marca entrega clips ya cortados)",
+        "start": 90,
+        "end": 144,
+        "location": "brief.md#l5"
+      },
+      "confidence": "explicit"
+    },
+    "platforms": {
+      "tiktok": {
+        "duration": {
+          "min_s": {
+            "value": 8,
+            "evidence": {
+              "quote": "El video debe durar como mínimo 8 segundos",
+              "start": 162,
+              "end": 204,
+              "location": "brief.md#l8"
+            },
+            "confidence": "explicit"
+          },
+          "max_s": {
+            "value": 60,
+            "evidence": {
+              "quote": "y como máximo 60",
+              "start": 205,
+              "end": 221,
+              "location": "brief.md#l8"
+            },
+            "confidence": "explicit"
+          }
+        },
+        "caption_rules": null,
+        "audio_rule": null,
+        "required_hashtags": {
+          "value": [
+            "#marca"
+          ],
+          "evidence": {
+            "quote": "usar el hashtag #marca",
+            "start": 265,
+            "end": 287,
+            "location": "brief.md#l10"
+          },
+          "confidence": "explicit"
+        },
+        "required_mentions": {
+          "value": [
+            "@marca"
+          ],
+          "evidence": {
+            "quote": "mencionar @marca",
+            "start": 246,
+            "end": 262,
+            "location": "brief.md#l10"
+          },
+          "confidence": "explicit"
+        },
+        "attribution": null,
+        "link_rules": null
+      }
+    },
+    "languages": {
+      "source": {
+        "value": "es",
+        "evidence": {
+          "quote": "Idioma: español",
+          "start": 145,
+          "end": 160,
+          "location": "brief.md#l6"
+        },
+        "confidence": "explicit"
+      },
+      "subtitles": null,
+      "caption": {
+        "value": "es",
+        "evidence": {
+          "quote": "Idioma: español",
+          "start": 145,
+          "end": 160,
+          "location": "brief.md#l6"
+        },
+        "confidence": "explicit"
+      },
+      "voice": null
+    },
+    "official_audio": null,
+    "watermark": null,
+    "spelling_locks": null,
+    "prohibitions": null,
+    "rules": {
+      "hard": {
+        "value": [
+          "duration.min",
+          "caption.required_hashtag",
+          "caption.required_mention"
+        ],
+        "evidence": {
+          "quote": "En el caption hay que mencionar @marca y usar el hashtag #marca.",
+          "start": 224,
+          "end": 288,
+          "location": "brief.md#l10"
+        },
+        "confidence": "inferred"
+      },
+      "recommended": null,
+      "manual_review": null
+    },
+    "assets": null,
+    "geo_target": null,
+    "min_views_for_payout": null,
+    "analytics_proof_required": null
+  }
+}

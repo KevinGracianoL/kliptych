@@ -42,8 +42,8 @@ corrida end-to-end; este README se actualiza solo con evidencia real.
 - [x] Run manifest reproducible.
 - [x] Detección de entorno (ffmpeg/NVENC/GPU) y CLI `kliptych env`.
 - [x] Gate core determinista fail-closed.
+- [x] Interfaz `CampaignModel` + primer backend (OpenAI-compatible) con fixtures grabados.
 - [ ] Ingestores de briefs (Google Docs, Notion, .docx, PDF, texto).
-- [ ] Interfaz `CampaignModel` + primer backend con fixtures grabados.
 - [ ] Exportador de paquetes de entrega.
 
 Fases siguientes: B (walking skeleton `given_clips`), C (motor de video largo),
@@ -62,6 +62,20 @@ uv run pytest
 ```
 
 Doble cero en CI antes de mergear: lint + type + test, en Linux y Windows.
+
+### Runtime LLM
+
+El primer backend habla con un endpoint OpenAI-compatible configurado por el
+operador (nunca texto del brief):
+
+```sh
+KLIPTYCH_LLM_BASE_URL=https://<endpoint>/v1
+KLIPTYCH_LLM_API_KEY=<secreto>
+KLIPTYCH_LLM_MODEL=<modelo>
+```
+
+Los tests y las demos nunca llaman modelos reales: reproducen respuestas
+grabadas con `RecordedModel` desde `campaigns/fixtures/*/recorded/`.
 
 Todo cambio entra por rama + PR con CI verde; `main` no recibe pushes directos
 (hook local en `.githooks/pre-push`; activar una vez con

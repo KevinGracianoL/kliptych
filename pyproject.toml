@@ -62,11 +62,21 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"src/kliptych/runtime/transport.py" = [
+    # petición al endpoint configurado por el operador; el esquema http/https
+    # se valida antes de construirla y no hay redirecciones.
+    "suspicious-url-open-usage",
+]
 "tests/test_gate_probe.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
     # fixtures sintéticos.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_transport.py" = [
+    # firma fija del handler HTTP estándar (do_POST/log_message)
+    "invalid-function-name",
+    "builtin-argument-shadowing",
 ]
 "tests/**" = [
     "assert",                       # los tests usan assert por diseño
