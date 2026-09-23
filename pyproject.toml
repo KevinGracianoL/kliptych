@@ -12,7 +12,7 @@ dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 # Herramientas pesadas de descarga/transcripción, fuera de las dependencias
 # base para mantener mínimo el runtime. yt-dlp también se instala como
 # binario en CI.
-transcription = ["yt-dlp>=2025.1.1"]
+transcription = ["yt-dlp>=2025.1.1", "faster-whisper>=1.1,<2"]
 
 [project.scripts]
 kliptych = "kliptych.__main__:main"
@@ -118,6 +118,14 @@ ignore = [
     # se valida antes de construirla y no hay redirecciones.
     "suspicious-url-open-usage",
 ]
+"src/kliptych/transcribe.py" = [
+    # faster-whisper y torch son dependencias opcionales (extra transcription):
+    # se importan de forma diferida para no cargar el módulo base.
+    "import-outside-top-level",
+    # Frontera con faster-whisper: cualquier fallo de la librería se traduce a
+    # TranscriptionError conservando la causa.
+    "blind-except",
+]
 "tests/test_assembler.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
     # fixtures sintéticos.
@@ -170,6 +178,13 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"tests/test_transcribe_integration.py" = [
+    # PowerShell se invoca con lista de argumentos y shell=False para
+    # sintetizar la voz del fixture; la ruta viaja por variable de entorno.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "tests/test_transport.py" = [
     # firma fija del handler HTTP estándar (do_POST/log_message)
     "invalid-function-name",
@@ -185,6 +200,7 @@ ignore = [
     "undocumented-public-module",   # sin docstring de módulo en tests
     "undocumented-public-class",    # sin docstring de clase en tests
     "undocumented-public-function", # sin docstring de función en tests
+    "private-member-access",        # los tests espían el estado interno a propósito
 ]
 
 [tool.ruff.lint.pydocstyle]
