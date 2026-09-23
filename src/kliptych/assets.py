@@ -56,7 +56,7 @@ class RegistryDocument(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     assets: list[AssetRef] = Field(default_factory=list)
 
 

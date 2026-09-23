@@ -1,5 +1,11 @@
-"""Contrato validado (schema v1.0): restricciones duras que obedecen pipeline y gate."""
+"""Contrato validado (schema v1.1): restricciones duras que obedecen pipeline y gate.
 
+El contrato v1.1 incorpora ``segments`` para el modo ``long_video``: la lista de
+cortes temporales seleccionados del vídeo fuente, obligatoria en ese modo y
+prohibida en el resto.
+"""
+
+import math
 from typing import Annotated, Literal, Self
 
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
@@ -110,6 +116,28 @@ class Watermark(ContractBase):
         return asset_id
 
 
+class Segment(ContractBase):
+    """Segmento temporal seleccionado de un vídeo fuente (modo long_video)."""
+
+    start_s: float = Field(ge=0)
+    end_s: float = Field(gt=0)
+
+    @field_validator("start_s", "end_s")
+    @classmethod
+    def _bounds_are_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            msg = f"las cotas del segmento deben ser finitas, no {value}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if self.end_s <= self.start_s:
+            msg = f"start_s ({self.start_s}) debe ser menor que end_s ({self.end_s})"
+            raise ValueError(msg)
+        return self
+
+
 class RuleSet(ContractBase):
     """Clasificación de cada regla como hard, recommended o manual_review."""
 
@@ -200,7 +228,7 @@ class GlobalRestrictions(ContractBase):
 class Contract(ContractBase):
     """Contrato validado y normalizado que consumen pipeline y gate."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     campaign_id: str = Field(min_length=1, max_length=64)
     format: Format
     mode: Mode
@@ -212,6 +240,7 @@ class Contract(ContractBase):
     prohibitions: list[str] = Field(default_factory=list)
     rules: RuleSet
     assets: AssetBundle
+    segments: tuple[Segment, ...] = ()
     geo_target: GeoTarget | None = None
     min_views_for_payout: MinViewsForPayout = Field(default_factory=MinViewsForPayout)
     analytics_proof_required: AnalyticsProofRequired = Field(default_factory=AnalyticsProofRequired)
@@ -255,6 +284,17 @@ class Contract(ContractBase):
                 "restricciones declaradas sin regla clasificada en rules: "
                 f"{sorted(missing)}; cada regla debe ser hard, recommended o manual_review"
             )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _segments_valid_for_mode(self) -> Self:
+        if self.mode is Mode.LONG_VIDEO:
+            if not self.segments:
+                msg = "el modo long_video exige al menos un segmento"
+                raise ValueError(msg)
+        elif self.segments:
+            msg = "solo el modo long_video admite segmentos"
             raise ValueError(msg)
         return self
 

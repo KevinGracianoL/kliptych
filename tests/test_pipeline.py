@@ -389,18 +389,22 @@ def test_pipeline_reports_unsupported_mode(tmp_path: Path) -> None:
         mode=candidate("long_video"),
         assets={"required": [make_asset_draft()], "optional": []},
     )
-    model = _StaticModel(draft)
-    request = _unit_request(tmp_path, brief="brief long_video")
+    model = _StaticModel(draft, caption=_caption())
+    request = _unit_request(
+        tmp_path,
+        brief="brief long_video",
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+        run_id="run-longvideo",
+    )
     result = run_given_clips(model=model, settings=Settings.from_root(tmp_path), request=request)
-    assert result.outcome is RunOutcome.UNSUPPORTED
+    assert result.outcome is RunOutcome.MANUAL_REVIEW
     assert result.delivery is None
     assert result.package_path is None
-    assert [issue.code.value for issue in result.issues] == ["mode_not_implemented"]
+    assert any(code == "missing_required" for code in (issue.code.value for issue in result.issues))
     assert not (tmp_path / "delivery").exists()
     manifest = _json(Path(result.manifest_path))
-    assert manifest["contract_schema_version"] == "1.0"
-    assert manifest["contract_sha256"] is not None
-    assert result.contract_sha256 == manifest["contract_sha256"]
+    assert manifest["contract_sha256"] is None
 
 
 def test_pipeline_rejects_unsafe_asset_id(tmp_path: Path) -> None:

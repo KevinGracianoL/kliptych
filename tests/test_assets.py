@@ -184,7 +184,7 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
 def test_load_rejects_registry_with_traversal_uri(tmp_path: Path) -> None:
     registry_file = tmp_path / "registry.json"
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "assets": [
             {
                 "asset_id": "malo",
@@ -219,7 +219,7 @@ def test_load_rejects_duplicate_asset_ids(tmp_path: Path) -> None:
         "resolved_at": datetime(2026, 9, 22, tzinfo=UTC).isoformat(),
     }
     _ = registry_file.write_text(
-        json.dumps({"schema_version": "1.0", "assets": [asset, asset]}),
+        json.dumps({"schema_version": "1.1", "assets": [asset, asset]}),
         encoding="utf-8",
     )
     with pytest.raises(AssetAlreadyRegisteredError, match="duplicado"):

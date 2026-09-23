@@ -129,7 +129,7 @@ def make_contract(
             classified.add(rule_id)
     return Contract.model_validate(
         {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "campaign_id": "camp-test",
             "format": "video",
             "mode": "given_clips",
@@ -235,7 +235,7 @@ def conflict_candidate(quote: str = "el brief se contradice") -> dict[str, objec
 
 def make_draft(**overrides: object) -> ContractDraft:
     data: dict[str, object] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "campaign_id": candidate("camp-01"),
         "format": candidate("video"),
         "mode": candidate("given_clips"),

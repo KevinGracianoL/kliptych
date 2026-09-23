@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Platform
+from kliptych.contract import Platform, Segment
 from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus
 from kliptych.resolver import (
     IssueCode,
@@ -854,3 +854,45 @@ def test_resolvable_optional_asset_is_kept(tmp_path: Path) -> None:
     assert result.contract is not None
     assert [ref.asset_id for ref in result.contract.assets.optional] == ["opt-01"]
     assert _issue_fields(result, IssueCode.OPTIONAL_ASSET_DROPPED) == []
+
+
+def test_resolve_segments_valid_draft(tmp_path: Path) -> None:
+    draft = make_draft(
+        mode=candidate("long_video"),
+        segments={"segments": [{"start_s": candidate(0.0), "end_s": candidate(8.5)}]},
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert result.contract.segments == (Segment(start_s=0.0, end_s=8.5),)
+
+
+def test_resolve_segments_missing_field(tmp_path: Path) -> None:
+    draft = make_draft(
+        mode=candidate("long_video"),
+        segments={"segments": [{"end_s": candidate(8.5)}]},
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.MANUAL_REVIEW
+    assert _issue_fields(result, IssueCode.MISSING_REQUIRED) == ["segments[0]"]
+
+
+def test_resolve_segments_conflict(tmp_path: Path) -> None:
+    draft = make_draft(
+        mode=candidate("long_video"),
+        segments={"segments": [{"start_s": conflict_candidate(), "end_s": candidate(8.5)}]},
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.MANUAL_REVIEW
+    assert _issue_fields(result, IssueCode.CONFLICT) == ["segments[0].start_s"]
+
+
+def test_resolve_segments_empty_for_non_long_video(tmp_path: Path) -> None:
+    draft = make_draft(
+        segments={"segments": [{"start_s": candidate(0.0), "end_s": candidate(8.5)}]},
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert result.contract.segments == ()
+    assert [issue for issue in result.issues if issue.field.startswith("segments")] == []

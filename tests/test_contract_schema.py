@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from kliptych.contract import AssetRef, Contract, Platform, contract_digest
+from kliptych.contract import AssetRef, Contract, Platform, Segment, contract_digest
 
 _SHA256 = "a" * 64
 
@@ -43,7 +43,7 @@ def _platform(**overrides: object) -> dict[str, object]:
 
 def _contract_data(**overrides: object) -> dict[str, object]:
     data: dict[str, object] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "campaign_id": "camp-given-clips-01",
         "format": "video",
         "mode": "given_clips",
@@ -83,7 +83,7 @@ def _build(**overrides: object) -> Contract:
 
 def test_minimal_contract_is_valid() -> None:
     contract = _build()
-    assert contract.schema_version == "1.0"
+    assert contract.schema_version == "1.1"
     assert contract.mode.value == "given_clips"
     assert contract.platforms[Platform.TIKTOK].duration.min_s == 8
     assert contract.assets.required[0].asset_id == "clip-01"
@@ -324,3 +324,34 @@ def test_contract_is_immutable() -> None:
     contract = _build()
     with pytest.raises(ValidationError):
         contract.campaign_id = "otra"
+
+
+def test_segment_accepts_valid_range() -> None:
+    segment = Segment(start_s=0.0, end_s=8.5)
+    assert segment.start_s == pytest.approx(0.0)
+    assert segment.end_s == pytest.approx(8.5)
+
+
+def test_segment_rejects_end_at_or_before_start() -> None:
+    with pytest.raises(ValidationError, match="menor"):
+        _ = Segment(start_s=8.0, end_s=8.0)
+
+
+def test_segment_rejects_negative_start() -> None:
+    with pytest.raises(ValidationError, match="start_s"):
+        _ = Segment(start_s=-0.5, end_s=8.0)
+
+
+def test_segment_rejects_non_finite_end() -> None:
+    with pytest.raises(ValidationError, match="finitas"):
+        _ = Segment(start_s=0.0, end_s=float("inf"))
+
+
+def test_long_video_contract_requires_segments() -> None:
+    with pytest.raises(ValidationError, match="exige al menos un segmento"):
+        _ = _build(mode="long_video")
+
+
+def test_non_long_video_rejects_segments() -> None:
+    with pytest.raises(ValidationError, match="solo el modo long_video"):
+        _ = _build(segments=[{"start_s": 0.0, "end_s": 8.5}])
