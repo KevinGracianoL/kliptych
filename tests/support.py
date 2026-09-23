@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kliptych.contract import AssetRef, Contract, Platform
+from kliptych.contract import AssetRef, Contract, ContractDraft, Platform
 from kliptych.gate import MediaInfo, Piece, ProbeError
 
 ALL_HARD_RULES = (
@@ -68,9 +68,25 @@ def _active_rule_ids(
         active.append("subtitles.spelling_lock")
     if required_assets:
         active.append("assets.required")
-    if watermark_required and watermark_visible_full_video:
-        active.append("watermark.full_video")
+    watermark_rule = _watermark_rule_id(
+        watermark_required=watermark_required,
+        watermark_visible_full_video=watermark_visible_full_video,
+    )
+    if watermark_rule is not None:
+        active.append(watermark_rule)
     return active
+
+
+def _watermark_rule_id(
+    *,
+    watermark_required: bool,
+    watermark_visible_full_video: bool,
+) -> str | None:
+    if not watermark_required:
+        return None
+    if watermark_visible_full_video:
+        return "watermark.full_video"
+    return "watermark.present"
 
 
 def make_contract(
@@ -90,6 +106,7 @@ def make_contract(
     required_assets: Sequence[AssetRef] = (),
     watermark_required: bool = False,
     watermark_visible_full_video: bool = False,
+    audio_rule: str = "own_clip",
 ) -> Contract:
     plan = [*hard]
     classified = {*hard, *recommended, *manual_review}
@@ -124,7 +141,7 @@ def make_contract(
                         "first_line": first_line,
                         "forbidden": list(forbidden),
                     },
-                    "audio_rule": "own_clip",
+                    "audio_rule": audio_rule,
                     "required_hashtags": list(required_hashtags),
                     "required_mentions": list(required_mentions),
                     "attribution": {"type": "none", "value": None},
@@ -199,3 +216,66 @@ class FakeProbe:
             raise self.error
         assert self.info is not None
         return self.info
+
+
+def candidate(value: object, quote: str = "cita del brief") -> dict[str, object]:
+    return {
+        "value": value,
+        "evidence": {"quote": quote, "start": 0, "end": len(quote), "location": "brief.md#l1"},
+        "confidence": "explicit",
+    }
+
+
+def conflict_candidate(quote: str = "el brief se contradice") -> dict[str, object]:
+    return {
+        "evidence": {"quote": quote, "start": 0, "end": len(quote), "location": "brief.md#l2"},
+        "confidence": "conflict",
+    }
+
+
+def make_draft(**overrides: object) -> ContractDraft:
+    data: dict[str, object] = {
+        "schema_version": "1.0",
+        "campaign_id": candidate("camp-01"),
+        "format": candidate("video"),
+        "mode": candidate("given_clips"),
+        "platforms": {
+            "tiktok": {
+                "duration": {"min_s": candidate(8)},
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+            }
+        },
+        "languages": {"source": candidate("es"), "caption": candidate("es")},
+        "watermark": {
+            "required": candidate(value=False),
+            "visible_full_video": candidate(value=False),
+        },
+        "rules": {
+            "hard": candidate(
+                [
+                    "duration.min",
+                    "caption.required_hashtag",
+                    "caption.required_mention",
+                ]
+            ),
+            "recommended": candidate([]),
+            "manual_review": candidate([]),
+        },
+        "assets": {"required": [], "optional": []},
+    }
+    data.update(overrides)
+    return ContractDraft.model_validate(data)
+
+
+def make_asset_draft(
+    *,
+    asset_id: str = "clip-01",
+    uri: str = "clip.mp4",
+) -> dict[str, object]:
+    return {
+        "asset_id": candidate(asset_id),
+        "kind": candidate("video"),
+        "uri": candidate(uri),
+        "origin": candidate("brief"),
+    }

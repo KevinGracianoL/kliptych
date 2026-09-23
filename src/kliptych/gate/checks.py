@@ -18,6 +18,9 @@ Catálogo de reglas que el contrato puede declarar:
   pudo medir, el resultado es ``unsupported`` (jamás ``pass``).
 - ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
   y con locks declarados el resultado es ``unsupported``.
+- ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
+  todo el video o en alguna parte; sin validador mecánico todavía (fase B), el
+  motor las marca ``unsupported``.
 
 Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 ``unsupported`` (o ``manual_review`` si el contrato las clasificó así).
@@ -28,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import Contract, Format, PlatformRules
+from kliptych.contract import AudioRule, Contract, Format, PlatformRules
 from kliptych.gate.models import CheckStatus, MediaInfo, Piece
 
 
@@ -108,12 +111,17 @@ def check_duration_max(context: GateContext) -> CheckOutcome:
 def check_audio_present(context: GateContext) -> CheckOutcome:
     """Verifica que el artefacto tenga pista de audio.
 
+    La exigencia es por plataforma: ``audio_rule=any`` no exige audio.
+
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si hay pista de audio; FAIL si no; UNSUPPORTED sin probe.
+        PASS si la plataforma no exige audio o el artefacto tiene pista;
+        FAIL si lo exige y no la tiene; UNSUPPORTED sin probe.
     """
+    if context.rules.audio_rule is AudioRule.ANY:
+        return _pass(audio_rule="any")
     if context.media is None:
         return _unsupported("no se pudo inspeccionar el artefacto")
     if context.media.has_audio:

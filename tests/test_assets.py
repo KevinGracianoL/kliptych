@@ -84,13 +84,51 @@ def test_register_rejects_relative_traversal(tmp_path: Path) -> None:
     assert outside.exists()
 
 
-def test_register_rejects_absolute_path_outside_root(tmp_path: Path) -> None:
-    outside = _write(tmp_path, "outside.txt")
+def test_register_rejects_absolute_path_inside_root(tmp_path: Path) -> None:
+    inside = _write(tmp_path, "clip.mp4")
+    registry = AssetRegistry(tmp_path)
+    with pytest.raises(UnsafeAssetPathError, match="relativa"):
+        _ = registry.register(asset_id="a", kind="video", uri=str(inside), origin="brief")
+
+
+def test_register_rejects_unc_without_resolving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = AssetRegistry(tmp_path)
+
+    def forbidden_resolve(_self_path: Path) -> Path:
+        msg = "resolve() no debe ejecutarse sobre rutas no relativas"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(Path, "resolve", forbidden_resolve)
+    with pytest.raises(UnsafeAssetPathError, match="relativa"):
+        _ = registry.register(
+            asset_id="a",
+            kind="file",
+            uri=r"\\attacker.example\share\x.mp4",
+            origin="brief",
+        )
+
+
+def test_canonical_uri_normalizes_relative_paths(tmp_path: Path) -> None:
+    _ = _write(tmp_path, "clip.mp4")
+    registry = AssetRegistry(tmp_path)
+    assert registry.canonical_uri("clip.mp4") == "clip.mp4"
+    assert registry.canonical_uri("./sub/../clip.mp4") == "clip.mp4"
+
+
+def test_canonical_uri_rejects_traversal(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
     registry = AssetRegistry(root)
     with pytest.raises(UnsafeAssetPathError, match="fuera"):
-        _ = registry.register(asset_id="a", kind="file", uri=str(outside), origin="brief")
+        _ = registry.canonical_uri("../fuera.txt")
+
+
+def test_register_rejects_nul_byte_in_uri(tmp_path: Path) -> None:
+    registry = AssetRegistry(tmp_path)
+    with pytest.raises(UnsafeAssetPathError, match="nulo"):
+        _ = registry.register(asset_id="a", kind="file", uri="clip\x00.mp4", origin="brief")
 
 
 def test_duplicate_asset_id_is_rejected(tmp_path: Path) -> None:

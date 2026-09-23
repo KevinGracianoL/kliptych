@@ -169,6 +169,16 @@ class AnalyticsProofRequired(ContractBase):
     enforcement: Literal["post_publication_manual"] = ENFORCEMENT
 
 
+class GlobalRestrictions(ContractBase):
+    """Restricciones globales que, con las de plataforma, activan rule_ids."""
+
+    watermark_required: bool = False
+    watermark_visible_full_video: bool = False
+    has_required_assets: bool = False
+    spelling_locks: tuple[str, ...] = ()
+    prohibitions: tuple[str, ...] = ()
+
+
 class Contract(ContractBase):
     """Contrato validado y normalizado que consumen pipeline y gate."""
 
@@ -208,11 +218,18 @@ class Contract(ContractBase):
     @model_validator(mode="after")
     def _declared_restrictions_are_classified(self) -> Self:
         classified = {*self.rules.hard, *self.rules.recommended, *self.rules.manual_review}
+        global_restrictions = GlobalRestrictions(
+            watermark_required=self.watermark.required,
+            watermark_visible_full_video=self.watermark.visible_full_video,
+            has_required_assets=bool(self.assets.required),
+            spelling_locks=tuple(self.spelling_locks),
+            prohibitions=tuple(self.prohibitions),
+        )
         missing: set[str] = set()
         for platform, rules in self.platforms.items():
             missing.update(
                 f"{platform}.{rule_id}"
-                for rule_id in active_restriction_rules(rules, self)
+                for rule_id in active_restriction_rules(rules, global_restrictions)
                 if rule_id not in classified
             )
         if missing:
@@ -224,12 +241,15 @@ class Contract(ContractBase):
         return self
 
 
-def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[str]:
+def active_restriction_rules(
+    rules: PlatformRules,
+    global_restrictions: GlobalRestrictions,
+) -> list[str]:
     """Deriva los rule_ids que activa una plataforma según sus restricciones.
 
     Args:
         rules: Restricciones declaradas para una plataforma.
-        contract: Contrato completo (para restricciones globales).
+        global_restrictions: Restricciones globales de la campaña.
 
     Returns:
         Los rule_ids del catálogo del gate que la plataforma exige; el
@@ -237,10 +257,12 @@ def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[s
         evalúe en vez de ignorarlos en silencio.
 
     Nota:
-        ``audio_rule``, ``attribution`` y ``link_rules.link_in_bio`` aún no
-        tienen rule_id en el catálogo del gate (fases C/D); hasta que lo
-        tengan, el contrato puede declararlos sin clasificación y el gate no
-        los evalúa.
+        ``watermark.present`` cubre el watermark exigido sin cobertura total y
+        aún no tiene validador mecánico (fase B): clasificado en ``rules``, el
+        gate lo marca ``unsupported``.  ``audio_rule``, ``attribution`` y
+        ``link_rules.link_in_bio`` tampoco tienen rule_id en el catálogo del
+        gate (fases C/D); hasta que lo tengan, el contrato puede declararlos
+        sin clasificación y el gate no los evalúa.
     """
     active: list[str] = []
     if rules.duration.min_s is not None:
@@ -249,16 +271,25 @@ def active_restriction_rules(rules: PlatformRules, contract: Contract) -> list[s
         active.append("duration.max")
     if rules.caption_rules.first_line is not None:
         active.append("caption.first_line")
-    if rules.caption_rules.forbidden or contract.prohibitions:
+    if rules.caption_rules.forbidden or global_restrictions.prohibitions:
         active.append("caption.forbidden")
     if rules.caption_rules.must_mention or rules.required_mentions:
         active.append("caption.required_mention")
     if rules.required_hashtags:
         active.append("caption.required_hashtag")
-    if contract.assets.required:
+    if global_restrictions.has_required_assets:
         active.append("assets.required")
-    if contract.watermark.required and contract.watermark.visible_full_video:
-        active.append("watermark.full_video")
-    if contract.spelling_locks:
+    watermark_rule = _watermark_rule(global_restrictions)
+    if watermark_rule is not None:
+        active.append(watermark_rule)
+    if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
     return active
+
+
+def _watermark_rule(global_restrictions: GlobalRestrictions) -> str | None:
+    if not global_restrictions.watermark_required:
+        return None
+    if global_restrictions.watermark_visible_full_video:
+        return "watermark.full_video"
+    return "watermark.present"

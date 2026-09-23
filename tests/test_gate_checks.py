@@ -184,6 +184,15 @@ def test_missing_audio_track_fails(tmp_path: Path) -> None:
     assert _check(result, "audio.present").status is CheckStatus.FAIL
 
 
+def test_audio_not_required_when_platform_rule_is_any(tmp_path: Path) -> None:
+    contract = make_contract(hard=["audio.present"], audio_rule="any")
+    media = make_media(has_audio=False)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    check = _check(result, "audio.present")
+    assert check.status is CheckStatus.PASS
+    assert check.evidence == {"audio_rule": "any"}
+
+
 def test_video_stream_required_for_video_format(tmp_path: Path) -> None:
     contract = make_contract(hard=["artifact.video_stream"])
     media = make_media(has_video=False)
@@ -311,10 +320,11 @@ def test_no_required_assets_passes(tmp_path: Path) -> None:
     assert _check(result, "assets.required").status is CheckStatus.PASS
 
 
-def test_partial_watermark_gate_passes(tmp_path: Path) -> None:
+def test_partial_watermark_is_unsupported(tmp_path: Path) -> None:
     contract = make_contract(watermark_required=True, watermark_visible_full_video=False)
     result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
-    assert result.status is GateStatus.PASSED
+    assert _check(result, "watermark.present").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED
 
 
 def test_full_video_watermark_is_unsupported(tmp_path: Path) -> None:
