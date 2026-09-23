@@ -5,13 +5,24 @@ por un timeout explícito y un tamaño máximo. yt-dlp recibe ``--max-filesize``
 de forma nativa; streamlink y chat-downloader se verifican después de
 descargar, antes de dar el artefacto por bueno. El alcance termina en el
 artefacto descargado: no hay transcripción ni ensamblado aquí.
+
+La URL se valida antes de descargar (esquema http/https y sin destinos locales
+o privados). Ante cualquier fallo se eliminan solo los artefactos creados por
+esta llamada, incluidos los sidecars de yt-dlp; un archivo preexistente en
+``destination`` nunca se toca.
 """
 
 import contextlib
+import glob
+import ipaddress
+import os
+import signal
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from kliptych.environment import CommandResult
 
@@ -19,10 +30,25 @@ _DEFAULT_TIMEOUT_S = 3600.0
 _DEFAULT_MAX_SIZE_BYTES = 2 * 1024**3
 _PROBE_TIMEOUT_S = 15.0
 _STDERR_TAIL = 400
+_TERMINATE_GRACE_S = 5.0
 
 _YTDLP = "yt-dlp"
 _STREAMLINK = "streamlink"
 _CHAT_DOWNLOADER = "chat_downloader"
+
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+_YTDLP_SIDECAR_SUFFIXES = (".part", ".ytdl")
+_YTDLP_FRAGMENT_PATTERNS = (".part-Frag*", ".f*")
 
 
 class DownloadError(Exception):
@@ -51,8 +77,10 @@ class DownloadRunner(Protocol):
 class SubprocessDownloadRunner:
     """Runner real de descargas: lista de argumentos y timeout explícito.
 
-    A diferencia del runner de detección, deja propagar
-    ``subprocess.TimeoutExpired`` para que la descarga lo traduzca a
+    Aísla cada descarga en su propio grupo de procesos para poder matar todo el
+    árbol ante un timeout: en Windows usa ``CREATE_NEW_PROCESS_GROUP`` y
+    ``taskkill /T /F``; en POSIX usa ``start_new_session`` y ``os.killpg``. Deja
+    propagar ``subprocess.TimeoutExpired`` para que la descarga lo traduzca a
     ``DownloadError`` conservando la causa.
     """
 
@@ -68,24 +96,78 @@ class SubprocessDownloadRunner:
             El resultado del comando; ``ok=False`` si el binario no existe.
 
         Raises:
-            subprocess.TimeoutExpired: Si el comando excede ``timeout_s``.
+            subprocess.TimeoutExpired: Si el comando excede ``timeout_s``; el
+                árbol completo de procesos se termina antes de propagar.
         """
         try:
-            completed = subprocess.run(
-                list(argv),
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=timeout_s,
-                check=False,
-            )
+            process = _spawn(list(argv))
         except OSError as error:
             return CommandResult(ok=False, stderr=str(error))
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            raise
         return CommandResult(
-            ok=completed.returncode == 0,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            ok=process.returncode == 0,
+            stdout=stdout or "",
+            stderr=stderr or "",
         )
+
+
+def _spawn(command: list[str]) -> subprocess.Popen[str]:
+    # Cada descarga lidera su propio grupo de procesos para poder matar el
+    # árbol completo: flags nativos por plataforma, nunca shell.
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    # Matar solo al hijo directo deja vivos a los nietos (p. ej. el yt-dlp.exe
+    # empaquetado con PyInstaller); se mata todo el árbol del proceso.
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError):
+            _ = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
+        _reap(process)
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGTERM)
+        if not _wait_briefly(process):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            _reap(process)
+
+
+def _wait_briefly(process: subprocess.Popen[str]) -> bool:
+    try:
+        _ = process.wait(timeout=_TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _reap(process: subprocess.Popen[str]) -> None:
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        _ = process.wait(timeout=_TERMINATE_GRACE_S)
 
 
 class MediaDownloader:
@@ -142,8 +224,13 @@ class MediaDownloader:
     ) -> Path:
         """Descarga un video con yt-dlp.
 
+        Ante cualquier fallo se eliminan los artefactos creados por esta llamada
+        (incluidos los sidecars de yt-dlp como ``.part``); un archivo
+        preexistente en ``destination`` queda intacto.
+
         Args:
-            url: URL del video.
+            url: URL del video; debe ser http/https y no apuntar a una dirección
+                local o privada.
             destination: Ruta del artefacto descargado.
             format_selector: Selector de formato de yt-dlp, si se requiere.
 
@@ -151,9 +238,10 @@ class MediaDownloader:
             La ruta del artefacto descargado.
 
         Raises:
-            DownloadError: Si yt-dlp no está disponible, la descarga falla,
-                excede el timeout o supera el tamaño máximo.
+            DownloadError: Si la URL no es segura, yt-dlp no está disponible, la
+                descarga falla, excede el timeout o supera el tamaño máximo.
         """
+        _validate_url(url)
         argv = self.build_ytdlp_argv(
             url=url,
             destination=destination,
@@ -171,8 +259,13 @@ class MediaDownloader:
     ) -> Path:
         """Descarga un stream con streamlink.
 
+        Ante cualquier fallo se eliminan los artefactos creados por esta llamada
+        (incluidos los sidecars de yt-dlp como ``.part``); un archivo
+        preexistente en ``destination`` queda intacto.
+
         Args:
-            url: URL del stream.
+            url: URL del stream; debe ser http/https y no apuntar a una
+                dirección local o privada.
             destination: Ruta del artefacto descargado.
             stream: Nombre del stream a elegir (por defecto ``best``).
 
@@ -180,26 +273,35 @@ class MediaDownloader:
             La ruta del artefacto descargado.
 
         Raises:
-            DownloadError: Si streamlink no está disponible, la descarga
-                falla, excede el timeout o supera el tamaño máximo.
+            DownloadError: Si la URL no es segura, streamlink no está
+                disponible, la descarga falla, excede el timeout o supera el
+                tamaño máximo.
         """
+        _validate_url(url)
         argv = self.build_streamlink_argv(url=url, destination=destination, stream=stream)
         return self._run_download(argv, destination=destination, tool=_STREAMLINK)
 
     def download_chat(self, *, url: str, destination: Path) -> Path:
         """Descarga el chat-replay de un stream con chat-downloader.
 
+        Ante cualquier fallo se eliminan los artefactos creados por esta llamada
+        (incluidos los sidecars de yt-dlp como ``.part``); un archivo
+        preexistente en ``destination`` queda intacto.
+
         Args:
-            url: URL del video o stream.
+            url: URL del video o stream; debe ser http/https y no apuntar a una
+                dirección local o privada.
             destination: Ruta del artefacto JSON descargado.
 
         Returns:
             La ruta del artefacto descargado.
 
         Raises:
-            DownloadError: Si chat-downloader no está disponible, la descarga
-                falla, excede el timeout o supera el tamaño máximo.
+            DownloadError: Si la URL no es segura, chat-downloader no está
+                disponible, la descarga falla, excede el timeout o supera el
+                tamaño máximo.
         """
+        _validate_url(url)
         argv = self.build_chat_argv(url=url, destination=destination)
         return self._run_download(argv, destination=destination, tool=_CHAT_DOWNLOADER)
 
@@ -220,10 +322,11 @@ class MediaDownloader:
             format_selector: Selector de formato opcional.
 
         Returns:
-            El argv completo, como lista de argumentos.
+            El argv completo, como lista de argumentos; la URL va tras ``--``.
         """
         argv = [
             _YTDLP,
+            "--ignore-config",
             "--no-playlist",
             "--no-progress",
             "--max-filesize",
@@ -233,7 +336,7 @@ class MediaDownloader:
         ]
         if format_selector is not None:
             argv += ["--format", format_selector]
-        argv.append(url)
+        argv += ["--", url]
         return argv
 
     @staticmethod
@@ -251,7 +354,7 @@ class MediaDownloader:
             stream: Nombre del stream a elegir.
 
         Returns:
-            El argv completo, como lista de argumentos.
+            El argv completo, como lista de argumentos; la URL va tras ``--``.
         """
         return [
             _STREAMLINK,
@@ -263,6 +366,7 @@ class MediaDownloader:
             "no",
             "--default-stream",
             stream,
+            "--",
             url,
         ]
 
@@ -275,7 +379,7 @@ class MediaDownloader:
             destination: Ruta del artefacto JSON descargado.
 
         Returns:
-            El argv completo, como lista de argumentos.
+            El argv completo, como lista de argumentos; la URL va tras ``--``.
         """
         return [
             _CHAT_DOWNLOADER,
@@ -283,6 +387,7 @@ class MediaDownloader:
             "--overwrite",
             "--output",
             str(destination),
+            "--",
             url,
         ]
 
@@ -295,26 +400,34 @@ class MediaDownloader:
         except OSError as error:
             msg = f"no se pudo preparar el directorio del destino {destination}: {error}"
             raise DownloadError(msg) from error
+        preexisting = frozenset(path for path in _artifact_paths(destination) if path.exists())
         try:
             result = self._runner.run(argv, timeout_s=self._timeout_s)
         except subprocess.TimeoutExpired as error:
-            _remove_quietly(destination)
+            _clean_download_artifacts(destination, preexisting=preexisting)
             msg = f"{tool} excedió el timeout de {self._timeout_s} s"
             raise DownloadError(msg) from error
         except OSError as error:
-            _remove_quietly(destination)
+            _clean_download_artifacts(destination, preexisting=preexisting)
             msg = f"no se pudo ejecutar {tool}: {error}"
             raise DownloadError(msg) from error
         if not result.ok:
-            _remove_quietly(destination)
+            _clean_download_artifacts(destination, preexisting=preexisting)
             msg = f"{tool} falló: {_tail(result.stderr)}"
             raise DownloadError(msg)
-        if not destination.is_file():
+        try:
+            is_file = destination.is_file()
+            size = destination.stat().st_size if is_file else 0
+        except OSError as error:
+            _clean_download_artifacts(destination, preexisting=preexisting)
+            msg = f"no se pudo verificar el artefacto {destination}: {error}"
+            raise DownloadError(msg) from error
+        if not is_file:
+            _clean_download_artifacts(destination, preexisting=preexisting)
             msg = f"{tool} no produjo el artefacto esperado: {destination}"
             raise DownloadError(msg)
-        size = destination.stat().st_size
         if size > self._max_size_bytes:
-            _remove_quietly(destination)
+            _clean_download_artifacts(destination, preexisting=preexisting)
             msg = (
                 f"la descarga de {tool} excede el tamaño máximo de "
                 f"{self._max_size_bytes} bytes: {size} bytes"
@@ -323,8 +436,54 @@ class MediaDownloader:
         return destination
 
 
+def _validate_url(url: str) -> None:
+    # La URL entra a herramientas externas como último argumento; se rechaza
+    # cualquier esquema que no sea http/https y cualquier destino local o
+    # privado (loopback, link-local, rangos RFC 1918 y ULA IPv6).
+    try:
+        parts = urlsplit(url)
+    except ValueError as error:
+        msg = f"URL inválida: {url!r}"
+        raise DownloadError(msg) from error
+    if parts.scheme not in _ALLOWED_SCHEMES:
+        msg = f"esquema de URL no permitido: {parts.scheme or url!r}"
+        raise DownloadError(msg)
+    host = parts.hostname
+    if host is None:
+        msg = f"URL sin host: {url!r}"
+        raise DownloadError(msg)
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if any(address in network for network in _BLOCKED_NETWORKS):
+        msg = f"URL hacia una dirección local o privada no permitida: {host}"
+        raise DownloadError(msg)
+
+
+def _artifact_paths(destination: Path) -> set[Path]:
+    # Rutas que yt-dlp puede dejar tras un fallo: el destino, sus sidecars
+    # conocidos y los fragmentos previos al merge. Nunca un glob amplio sobre
+    # ``destination.name`` que pudiera borrar archivos ajenos.
+    parent = destination.parent
+    escaped = glob.escape(destination.name)
+    paths = {destination}
+    paths.update(parent / f"{destination.name}{suffix}" for suffix in _YTDLP_SIDECAR_SUFFIXES)
+    for pattern in _YTDLP_FRAGMENT_PATTERNS:
+        with contextlib.suppress(OSError):
+            paths.update(parent.glob(f"{escaped}{pattern}"))
+    return paths
+
+
+def _clean_download_artifacts(destination: Path, *, preexisting: frozenset[Path]) -> None:
+    # Limpieza best-effort: solo se eliminan los artefactos que no existían
+    # antes de esta descarga, preservando cualquier archivo previo.
+    for path in _artifact_paths(destination):
+        if path not in preexisting:
+            _remove_quietly(path)
+
+
 def _remove_quietly(path: Path) -> None:
-    # Limpieza best-effort del artefacto descargado ante cualquier fallo.
     with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
 

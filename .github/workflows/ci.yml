@@ -54,7 +54,7 @@ jobs:
       - name: Install yt-dlp
         shell: bash
         run: |
-          uv tool install yt-dlp
+          uv tool install "yt-dlp==2026.8.19"
           echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
 
       - name: Sync dependencies
