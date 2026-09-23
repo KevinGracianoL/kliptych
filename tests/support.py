@@ -279,3 +279,19 @@ def make_asset_draft(
         "uri": candidate(uri),
         "origin": candidate("brief"),
     }
+
+
+def write_fixture_clip(root: Path, *, content: bytes = b"clip") -> Path:
+    """Materializa el clip declarado por la fixture given_clips bajo ``root``.
+
+    Args:
+        root: Raíz del workspace/registry donde resolver la uri del contrato.
+        content: Bytes del clip; en tests unitarios no se decodifica.
+
+    Returns:
+        La ruta del clip escrito.
+    """
+    path = root / "assets" / "samples" / "given-clips-sample.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_bytes(content)
+    return path

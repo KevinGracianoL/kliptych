@@ -48,9 +48,10 @@ def _manifest(**overrides: object) -> RunManifest:
         "contract_sha256": "b" * 64,
         "model_version": "recorded-v1",
         "prompt_version": "extract-v1",
+        "caption_prompt_version": "caption-v1",
         "render_arguments": ("-c:v", "h264_nvenc"),
         "outputs": (OutputHash(path="piece.mp4", sha256="d" * 64, size_bytes=10),),
-        "gate": _gate_result(),
+        "gates": (_gate_result(),),
     }
     defaults.update(overrides)
     return RunManifest.model_validate(defaults)
@@ -69,9 +70,10 @@ def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
     payload = _parse(path.read_text(encoding="utf-8"))
     assert payload["brief_sha256"] == "c" * 64
     assert payload["contract_schema_version"] == "1.0"
-    gate = payload["gate"]
-    assert isinstance(gate, dict)
-    gate_payload = cast("dict[str, object]", gate)
+    assert payload["caption_prompt_version"] == "caption-v1"
+    gates = payload["gates"]
+    assert isinstance(gates, list)
+    gate_payload = cast("dict[str, object]", gates[0])
     assert gate_payload["status"] == "rejected"
     checks = gate_payload["checks"]
     assert isinstance(checks, list)

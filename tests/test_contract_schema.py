@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from kliptych.contract import Contract, Platform
+from kliptych.contract import AssetRef, Contract, Platform, contract_digest
 
 _SHA256 = "a" * 64
 
@@ -87,6 +87,49 @@ def test_minimal_contract_is_valid() -> None:
     assert contract.mode.value == "given_clips"
     assert contract.platforms[Platform.TIKTOK].duration.min_s == 8
     assert contract.assets.required[0].asset_id == "clip-01"
+
+
+@pytest.mark.parametrize(
+    "asset_id",
+    [
+        "..\\..\\pwned",
+        "../../pwned",
+        "C:\\abs\\pwned",
+        "\\\\server\\share\\pwned",
+        "con",
+        "x" * 65,
+    ],
+)
+def test_asset_id_rejects_unsafe_segments(asset_id: str) -> None:
+    with pytest.raises(ValidationError, match="asset_id"):
+        _ = AssetRef.model_validate(_asset(asset_id=asset_id))
+
+
+def test_asset_id_accepts_safe_segment() -> None:
+    assert AssetRef.model_validate(_asset()).asset_id == "clip-01"
+
+
+def test_watermark_asset_id_rejects_unsafe_segment() -> None:
+    with pytest.raises(ValidationError, match="asset_id"):
+        _ = _build(
+            watermark={
+                "required": True,
+                "asset_id": "../escape",
+                "visible_full_video": True,
+            }
+        )
+
+
+def test_contract_digest_ignores_resolved_at_but_not_asset_changes() -> None:
+    base = _build()
+    moved = {**_asset(), "resolved_at": datetime(2030, 1, 1, tzinfo=UTC).isoformat()}
+    changed = {**_asset(), "sha256": "b" * 64}
+    assert contract_digest(base) == contract_digest(
+        _build(assets={"required": [moved], "optional": []})
+    )
+    assert contract_digest(base) != contract_digest(
+        _build(assets={"required": [changed], "optional": []})
+    )
 
 
 def test_contract_round_trips_through_json() -> None:

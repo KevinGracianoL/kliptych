@@ -39,6 +39,7 @@ from tests.support import (
     make_draft,
     make_media,
     make_piece,
+    write_fixture_clip,
 )
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "campaigns" / "fixtures" / "given-clips"
@@ -345,6 +346,7 @@ def test_fixture_brief_flows_to_the_gate(tmp_path: Path) -> None:
     brief = (_FIXTURES / "brief.md").read_text(encoding="utf-8")
     model = RecordedModel.from_directory(_FIXTURES / "recorded")
     draft = model.extract_contract(brief)
+    _ = write_fixture_clip(tmp_path)
     registry = AssetRegistry(tmp_path)
     result = resolve_contract(draft, registry=registry)
     assert result.status is ResolutionStatus.RESOLVED
@@ -583,20 +585,25 @@ def test_write_caption_rejects_undeclared_platform() -> None:
     assert transport.calls == []
 
 
-def test_recorded_write_caption_rejects_undeclared_platform(tmp_path: Path) -> None:
+def test_recorded_write_caption_rejects_undeclared_platform() -> None:
     contract = make_contract()
     piece = _caption_piece(platform=Platform.INSTAGRAM_REELS)
-    directory = tmp_path / "recorded"
-    _ = record_caption(
-        contract,
-        piece,
-        Caption(caption="caption para x", hashtags=("#marca",)),
-        prompt_version=CAPTION_PROMPT_VERSION,
-        directory=directory,
-    )
-    model = RecordedModel.from_directory(directory)
+    model = RecordedModel()
     with pytest.raises(ModelInputError, match="instagram_reels"):
         _ = model.write_caption(contract, piece)
+
+
+def test_record_caption_rejects_undeclared_platform(tmp_path: Path) -> None:
+    contract = make_contract()
+    piece = _caption_piece(platform=Platform.INSTAGRAM_REELS)
+    with pytest.raises(ModelInputError, match="instagram_reels"):
+        _ = record_caption(
+            contract,
+            piece,
+            Caption(caption="caption para x", hashtags=("#marca",)),
+            prompt_version=CAPTION_PROMPT_VERSION,
+            directory=tmp_path / "recorded",
+        )
 
 
 def test_model_exposes_caption_prompt_version() -> None:
@@ -656,7 +663,7 @@ def test_caption_fixture_load_does_not_echo_content(tmp_path: Path) -> None:
     directory = tmp_path / "recorded"
     directory.mkdir()
     payload = {
-        "contract_sha256": "a" * 64,
+        "prompt_sha256": "a" * 64,
         "platform": "tiktok",
         "piece_id": "piece-01",
         "prompt_version": CAPTION_PROMPT_VERSION,

@@ -80,6 +80,7 @@ class IssueCode(StrEnum):
     OPTIONAL_ASSET_DROPPED = "optional_asset_dropped"
     RULE_DEFAULTED = "rule_defaulted"
     INVALID_CONTRACT = "invalid_contract"
+    MODE_NOT_IMPLEMENTED = "mode_not_implemented"
 
 
 _BLOCKING_CODES = frozenset(

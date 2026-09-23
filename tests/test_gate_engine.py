@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Platform
+from kliptych.contract import Platform, contract_digest
 from kliptych.gate import (
     DEFAULT_VALIDATORS,
     CheckOutcome,
@@ -19,7 +19,6 @@ from kliptych.gate import (
     GateStatus,
     ProbeError,
 )
-from kliptych.hashing import sha256_canonical_json
 from tests.support import ALL_HARD_RULES, FakeProbe, make_contract, make_media, make_piece
 
 
@@ -55,7 +54,7 @@ def test_all_checks_pass_yields_passed(tmp_path: Path) -> None:
     assert [check.id for check in result.checks] == list(ALL_HARD_RULES)
     assert all(check.status is CheckStatus.PASS for check in result.checks)
     assert result.artifact_sha256 == sha256(b"video").hexdigest()
-    expected_contract_hash = sha256_canonical_json(make_contract().model_dump(mode="json"))
+    expected_contract_hash = contract_digest(make_contract())
     assert result.contract_sha256 == expected_contract_hash
 
 

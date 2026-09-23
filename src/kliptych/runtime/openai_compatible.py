@@ -24,7 +24,7 @@ from kliptych.runtime.model import (
     ModelOutputError,
     ModelUnavailableError,
     PieceContext,
-    ensure_platform_declared,
+    caption_prompt_payload,
 )
 from kliptych.runtime.transport import HttpError, HttpTransport, UrllibTransport
 
@@ -263,20 +263,7 @@ class OpenAIChatModel:
 
 
 def _caption_user_content(contract: Contract, piece: PieceContext) -> str:
-    ensure_platform_declared(contract, piece)
-    platform_rules = contract.platforms[piece.platform]
-    payload: dict[str, object] = {
-        "campaign_id": contract.campaign_id,
-        "platform": piece.platform.value,
-        "piece_id": piece.piece_id,
-        "languages": contract.languages.model_dump(mode="json"),
-        "caption_rules": platform_rules.caption_rules.model_dump(mode="json"),
-        "required_mentions": list(platform_rules.required_mentions),
-        "required_hashtags": list(platform_rules.required_hashtags),
-        "prohibitions": list(contract.prohibitions),
-        "spelling_locks": list(contract.spelling_locks),
-    }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return json.dumps(caption_prompt_payload(contract, piece), ensure_ascii=False, sort_keys=True)
 
 
 def _parse_draft(body: bytes) -> ContractDraft:

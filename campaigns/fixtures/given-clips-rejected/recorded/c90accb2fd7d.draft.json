@@ -1,5 +1,5 @@
 {
-  "brief_sha256": "018a231be58d33d92ebac47842dc3da6946dfd68b01b8b2f9a8d77711f8ac49f",
+  "brief_sha256": "c90accb2fd7d1b97e2fe0be671f637bd6234ec13fddbe042f4a3bde69a5512f9",
   "prompt_version": "extract-v1",
   "draft": {
     "schema_version": "1.0",
@@ -58,7 +58,16 @@
           }
         },
         "caption_rules": null,
-        "audio_rule": null,
+        "audio_rule": {
+          "value": "own_clip",
+          "evidence": {
+            "quote": "Audio: usar el audio del propio clip",
+            "start": 419,
+            "end": 455,
+            "location": "brief.md#l16"
+          },
+          "confidence": "explicit"
+        },
         "required_hashtags": {
           "value": [
             "#marca"
@@ -133,7 +142,53 @@
       "recommended": null,
       "manual_review": null
     },
-    "assets": null,
+    "assets": {
+      "required": [
+        {
+          "asset_id": {
+            "value": "clip-01",
+            "evidence": {
+              "quote": "Material entregado: assets/samples/given-clips-sample.mp4",
+              "start": 360,
+              "end": 417,
+              "location": "brief.md#l14"
+            },
+            "confidence": "explicit"
+          },
+          "kind": {
+            "value": "video",
+            "evidence": {
+              "quote": "Material entregado: assets/samples/given-clips-sample.mp4",
+              "start": 360,
+              "end": 417,
+              "location": "brief.md#l14"
+            },
+            "confidence": "explicit"
+          },
+          "uri": {
+            "value": "assets/samples/given-clips-sample.mp4",
+            "evidence": {
+              "quote": "Material entregado: assets/samples/given-clips-sample.mp4",
+              "start": 360,
+              "end": 417,
+              "location": "brief.md#l14"
+            },
+            "confidence": "explicit"
+          },
+          "origin": {
+            "value": "brief",
+            "evidence": {
+              "quote": "Material entregado: assets/samples/given-clips-sample.mp4",
+              "start": 360,
+              "end": 417,
+              "location": "brief.md#l14"
+            },
+            "confidence": "explicit"
+          }
+        }
+      ],
+      "optional": []
+    },
     "geo_target": null,
     "min_views_for_payout": null,
     "analytics_proof_required": null

@@ -8,6 +8,9 @@ license = "LicenseRef-Proprietary"
 authors = [{ name = "Kevin Graciano" }]
 dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 
+[project.scripts]
+kliptych = "kliptych.__main__:main"
+
 [dependency-groups]
 dev = [
     "basedpyright>=1.29",
@@ -78,6 +81,11 @@ ignore = [
     # documentada se traduce de inmediato a IngestError conservando la causa.
     "blind-except",
 ]
+"src/kliptych/pipeline.py" = [
+    # run_given_clips delega el ensamblado y la exportación; PipelineError se
+    # lanza en el helper _resolved y la sección Raises documenta el contrato.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/runtime/openai_compatible.py" = [
     # extract_contract/write_caption delegan en _complete, que es quien lanza
     # los errores; la sección Raises documenta el contrato público.
@@ -118,6 +126,18 @@ ignore = [
     "suspicious-subprocess-import",
     # user_password/owner_password son parámetros reales de pypdf, no secretos.
     "hardcoded-password-func-arg",
+]
+"tests/test_main.py" = [
+    # El entry point instalado se ejecuta en subproceso para verificar que el
+    # comando documentado en el README existe.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_pipeline.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # el clip sintético de la demo.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/test_transport.py" = [
     # firma fija del handler HTTP estándar (do_POST/log_message)

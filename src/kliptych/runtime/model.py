@@ -55,12 +55,19 @@ class PieceContext(ContractBase):
     platform: Platform
 
 
-def ensure_platform_declared(contract: Contract, piece: PieceContext) -> None:
-    """Valida que el contrato declare la plataforma de la pieza.
+def caption_prompt_payload(contract: Contract, piece: PieceContext) -> dict[str, object]:
+    """Construye el payload que el modelo recibe para redactar el caption.
+
+    Es la fuente única del prompt y de la clave de replay: solo viaja lo que
+    afecta al caption (reglas, idiomas y menciones/hashtags obligatorios), sin
+    assets, rutas locales ni evidencia del brief.
 
     Args:
         contract: Contrato validado de la campaña.
-        piece: Identidad de la pieza.
+        piece: Identidad de la pieza (id y plataforma).
+
+    Returns:
+        El payload serializable del prompt de caption.
 
     Raises:
         ModelInputError: Si el contrato no declara la plataforma de la pieza.
@@ -68,6 +75,18 @@ def ensure_platform_declared(contract: Contract, piece: PieceContext) -> None:
     if piece.platform not in contract.platforms:
         msg = f"el contrato no declara la plataforma {piece.platform.value}"
         raise ModelInputError(msg)
+    platform_rules = contract.platforms[piece.platform]
+    return {
+        "campaign_id": contract.campaign_id,
+        "platform": piece.platform.value,
+        "piece_id": piece.piece_id,
+        "languages": contract.languages.model_dump(mode="json"),
+        "caption_rules": platform_rules.caption_rules.model_dump(mode="json"),
+        "required_mentions": list(platform_rules.required_mentions),
+        "required_hashtags": list(platform_rules.required_hashtags),
+        "prohibitions": list(contract.prohibitions),
+        "spelling_locks": list(contract.spelling_locks),
+    }
 
 
 class CampaignModel(Protocol):

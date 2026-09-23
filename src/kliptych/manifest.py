@@ -36,13 +36,14 @@ class RunManifest(_ManifestBase):
     contract_sha256: str | None = Field(default=None, pattern=_SHA256)
     model_version: str | None = None
     prompt_version: str | None = None
+    caption_prompt_version: str | None = None
     whisper_version: str | None = None
     ffmpeg_version: str | None = None
     render_arguments: tuple[str, ...] = ()
     environment: EnvironmentReport
     assets: tuple[AssetRef, ...] = ()
     outputs: tuple[OutputHash, ...] = ()
-    gate: GateResult | None = None
+    gates: tuple[GateResult, ...] = ()
     degradations: tuple[str, ...] = ()
 
 

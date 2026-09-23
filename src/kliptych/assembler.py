@@ -127,6 +127,40 @@ class FFmpegAssembler:
             raise AssembleError(msg) from error
         return destination
 
+    def render_arguments(
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None = None,
+        width: int = _DEFAULT_WIDTH,
+        height: int = _DEFAULT_HEIGHT,
+    ) -> tuple[str, ...]:
+        """Devuelve el argv de ffmpeg que se usaría para este ensamblado.
+
+        Es la receta de render que se registra en el manifiesto; el ensamblado
+        real escribe primero en un temporal y publica al final.
+
+        Args:
+            clip: Clip entregado por la campaña.
+            destination: Ruta final del artefacto.
+            watermark: Imagen opcional a superponer.
+            width: Ancho del lienzo vertical.
+            height: Alto del lienzo vertical.
+
+        Returns:
+            El argv completo de ffmpeg, como tupla inmutable.
+        """
+        return tuple(
+            self._build_argv(
+                clip=clip,
+                destination=destination,
+                watermark=watermark,
+                width=width,
+                height=height,
+            )
+        )
+
     def _build_argv(
         self,
         *,

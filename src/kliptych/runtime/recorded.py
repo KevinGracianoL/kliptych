@@ -3,8 +3,8 @@
 Los tests y las demos nunca llaman modelos reales: reproducen respuestas
 grabadas (fixtures golden) desde disco. Los drafts se indexan por el sha256 del
 brief normalizado a saltos de línea LF; los captions, por el hash canónico del
-contrato más la plataforma y la pieza, de modo que el replay es estable entre
-plataformas.
+payload exacto del prompt de caption, de modo que el replay es estable entre
+plataformas y no depende de datos que no viajan al modelo.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -20,20 +20,10 @@ from kliptych.runtime.model import (
     Caption,
     ModelUnavailableError,
     PieceContext,
-    ensure_platform_declared,
+    caption_prompt_payload,
 )
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
-
-# `resolved_at` es procedencia de la resolución (reloj), no una entrada del
-# prompt de caption: excluirlo mantiene la clave de replay estable entre
-# resoluciones frescas del mismo contrato lógico.
-_VOLATILE_ASSET_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
-    "assets": {
-        "required": {"__all__": {"resolved_at"}},
-        "optional": {"__all__": {"resolved_at"}},
-    }
-}
 
 
 class RecordedDocument(ContractBase):
@@ -45,23 +35,22 @@ class RecordedDocument(ContractBase):
 
 
 class RecordedCaptionDocument(ContractBase):
-    """Caption grabado para un contrato, plataforma y pieza concretos."""
+    """Caption grabado para el prompt de una pieza concreta.
 
-    contract_sha256: str = Field(pattern=_SHA256_PATTERN)
+    ``prompt_sha256`` es el hash canónico del payload exacto que recibe el
+    modelo (``caption_prompt_payload``): la clave no depende de datos que no
+    viajan al prompt, como los hashes de los assets.
+    """
+
+    prompt_sha256: str = Field(pattern=_SHA256_PATTERN)
     platform: Platform
     piece_id: str = Field(min_length=1, max_length=64)
     prompt_version: str = Field(min_length=1)
     caption: Caption
 
 
-def _caption_projection(contract: Contract) -> dict[str, object]:
-    projection: dict[str, object] = contract.model_dump(mode="json", exclude=_VOLATILE_ASSET_FIELDS)
-    return projection
-
-
 def _caption_key(contract: Contract, piece: PieceContext) -> str:
-    contract_sha256 = sha256_canonical_json(_caption_projection(contract))
-    return f"{contract_sha256}:{piece.platform.value}:{piece.piece_id}"
+    return sha256_canonical_json(caption_prompt_payload(contract, piece))
 
 
 class RecordedModel:
@@ -99,7 +88,7 @@ class RecordedModel:
 
     @staticmethod
     def _caption_document_key(document: RecordedCaptionDocument) -> str:
-        return f"{document.contract_sha256}:{document.platform.value}:{document.piece_id}"
+        return document.prompt_sha256
 
     @property
     def documents(self) -> Mapping[str, RecordedDocument]:
@@ -205,7 +194,6 @@ class RecordedModel:
             ModelInputError: Si el contrato no declara la plataforma de la pieza.
             ModelUnavailableError: Si no hay caption grabado para esa pieza.
         """
-        ensure_platform_declared(contract, piece)
         key = _caption_key(contract, piece)
         document = self._captions.get(key)
         if document is None:
@@ -280,7 +268,7 @@ def record_caption(
     directory.mkdir(parents=True, exist_ok=True)
     key = _caption_key(contract, piece)
     document = RecordedCaptionDocument(
-        contract_sha256=sha256_canonical_json(_caption_projection(contract)),
+        prompt_sha256=key,
         platform=piece.platform,
         piece_id=piece.piece_id,
         prompt_version=prompt_version,

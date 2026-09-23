@@ -266,6 +266,23 @@ def test_failed_assemble_leaves_no_partial_artifact(
     _no_partials(destination)
 
 
+def test_render_arguments_match_executed_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[_Call] = []
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls))
+    clip = _file(tmp_path, "clip.mp4")
+    destination = tmp_path / "piece.mp4"
+    assembler = FFmpegAssembler(ffmpeg="ffmpeg")
+    recipe = assembler.render_arguments(clip=clip, destination=destination, watermark=None)
+    _ = assembler.assemble(clip=clip, destination=destination)
+    assert len(calls) == 1
+    executed, _ = calls[0]
+    assert list(recipe[:-1]) == executed[:-1]
+    assert recipe[-1] == str(destination)
+    assert executed[-1] != str(destination)
+
+
 def _generate_clip(
     path: Path,
     *,
