@@ -51,6 +51,12 @@ jobs:
           Write-Host "::error::ffmpeg no quedó instalado en Windows"
           exit 1
 
+      - name: Install yt-dlp
+        shell: bash
+        run: |
+          uv tool install "yt-dlp==2026.8.19"
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
       - name: Sync dependencies
         run: uv sync --locked
 
