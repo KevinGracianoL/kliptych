@@ -502,6 +502,30 @@ class FFmpegReframer:
                 preparar, ffmpeg falla o expira.
         """
         result = self.analyze(video)
+        return self.render(video=video, destination=destination, result=result)
+
+    def render(self, *, video: Path, destination: Path, result: ReframeResult) -> Path:
+        """Renderiza el recorte 9:16 a partir de una trayectoria ya calculada.
+
+        Permite reutilizar la trayectoria de ``analyze`` sin volver a muestrear
+        frames ni re-ejecutar la detección. El render ocurre en un temporal
+        hermano y se publica con un reemplazo atómico solo si ffmpeg termina
+        con éxito; ante cualquier fallo el artefacto previo en ``destination``
+        queda intacto.
+
+        Args:
+            video: Ruta del video fuente.
+            destination: Ruta del artefacto final; se crean los directorios
+                padre que falten.
+            result: Trayectoria de recorte ya calculada.
+
+        Returns:
+            La ruta del artefacto recortado.
+
+        Raises:
+            ReframeError: Si el destino no se puede preparar, ffmpeg falla o
+                expira.
+        """
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
