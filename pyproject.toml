@@ -13,6 +13,9 @@ dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
 # base para mantener mínimo el runtime. yt-dlp también se instala como
 # binario en CI.
 transcription = ["yt-dlp>=2025.1.1", "faster-whisper>=1.1,<2"]
+# Detección de caras para el reframe 9:16. MediaPipe corre en CPU (Tasks API,
+# delegate CPU) para no ocupar VRAM; se mantiene fuera del runtime base.
+reframe = ["mediapipe>=0.10.35,<1"]
 
 [project.scripts]
 kliptych = "kliptych.__main__:main"
@@ -141,6 +144,32 @@ ignore = [
     # TranscriptionError conservando la causa.
     "blind-except",
 ]
+"src/kliptych/reframe.py" = [
+    # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False; el
+    # binario es configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # mediapipe/numpy son dependencias opcionales (extra reframe): se importan
+    # de forma diferida para no cargar el módulo base ni tocar VRAM.
+    "import-outside-top-level",
+    # Frontera con mediapipe: cualquier fallo de la librería se traduce a
+    # ReframeError conservando la causa.
+    "blind-except",
+    # analyze/reframe delegan en helpers que lanzan ReframeError; la sección
+    # Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
+"src/kliptych/subtitles.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # burn delega en _run_ffmpeg, que lanza SubtitleError; la sección Raises
+    # documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "tests/test_assembler.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
     # fixtures sintéticos.
@@ -217,6 +246,35 @@ ignore = [
     # firma fija del handler HTTP estándar (do_POST/log_message)
     "invalid-function-name",
     "builtin-argument-shadowing",
+]
+"tests/test_reframe.py" = [
+    # subprocess se usa solo para CompletedProcess/TimeoutExpired/Popen con
+    # ffmpeg simulado; lista de argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_subtitles.py" = [
+    # subprocess se usa solo para CompletedProcess/TimeoutExpired con ffmpeg
+    # simulado; lista de argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_reframe_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético y descargar el modelo de caras (integración, fuera de CI).
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # descarga del modelo BlazeFace desde el bucket público de MediaPipe; es
+    # integración (excluida de CI) y se salta si no hay red.
+    "suspicious-url-open-usage",
+]
+"tests/test_subtitles_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético y quemar los subtítulos.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
 ]
 "tests/**" = [
     "assert",                       # los tests usan assert por diseño
