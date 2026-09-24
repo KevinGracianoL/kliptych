@@ -429,6 +429,7 @@ def test_cleanup_removes_temps_on_success(tmp_path: Path, monkeypatch: pytest.Mo
     result = _run(tmp_path, injectables)
     output_dir = tmp_path / "out"
     assert _leftovers(output_dir) == []
+    assert result.subtitles is not None
     assert not result.subtitles.exists()
     assert result.source.is_file()
     assert len(result.cleaning) == 3

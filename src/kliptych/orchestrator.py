@@ -5,6 +5,11 @@ reframe 9:16 -> subtítulos -> vídeo vertical final. No implementa ninguna de l
 etapas: compone los módulos de C2-C4 y traduce cualquier fallo de una etapa a
 ``PipelineError`` conservando la causa.
 
+El modo Repost/UGC (``repost_mode``) reutiliza el mismo encadenado pero salta las
+capas de inteligencia: no transcribe, no detecta momentos ni llama al LLM; el
+vídeo completo es el segmento y solo se reframea si no es 9:16. El audio externo
+y el passthrough final siguen publicándose de forma atómica.
+
 Los artefactos finales (``source.mp4`` y ``final.mp4``) se publican de forma
 atómica: ffmpeg escribe en un temporal hermano y solo un render exitoso
 reemplaza el destino. Un registro de limpieza elimina todos los temporales
@@ -12,6 +17,7 @@ reemplaza el destino. Un registro de limpieza elimina todos los temporales
 camino feliz como ante error.
 """
 
+import shutil
 import subprocess
 import uuid
 from collections.abc import Generator, Mapping, Sequence
@@ -42,6 +48,9 @@ from kliptych.transcribe import (
 _STDERR_TAIL = 400
 _SOURCE_NAME = "source.mp4"
 _FINAL_NAME = "final.mp4"
+_FFPROBE = "ffprobe"
+_TARGET_ASPECT = 9.0 / 16.0
+_ASPECT_TOLERANCE = 0.05
 
 
 class PipelineError(Exception):
@@ -54,22 +63,27 @@ class PipelineResult:
 
     Attributes:
         source: Vídeo fuente descargado, conservado en ``output_dir``.
-        transcript: Transcripción word-level del vídeo.
-        moments: Momentos candidatos detectados, ordenados por puntuación.
-        selection: Segmentos elegidos por el modelo.
-        reframe: Trayectoria de recorte 9:16 del segmento procesado.
+        transcript: Transcripción word-level del vídeo; ``None`` en modo repost,
+            que omite la transcripción por completo.
+        moments: Momentos candidatos detectados, ordenados por puntuación;
+            vacío en modo repost, que no analiza el vídeo.
+        selection: Segmentos elegidos; en modo repost es un único segmento que
+            cubre el vídeo completo.
+        reframe: Trayectoria de recorte 9:16 del segmento procesado, o ``None``
+            cuando no hizo falta reframe (el vídeo ya era 9:16 en modo repost).
         subtitles: Ruta del ``.ass`` generado; el archivo se elimina en la
-            limpieza final y la ruta se conserva como procedencia.
+            limpieza final y la ruta se conserva como procedencia. Es ``None``
+            en modo repost, que no genera subtítulos.
         final_video: Vídeo vertical final con subtítulos quemados.
         cleaning: Rutas de los temporales eliminados al terminar.
     """
 
     source: Path
-    transcript: Transcript
+    transcript: Transcript | None
     moments: tuple[Moment, ...]
     selection: SegmentSelection
-    reframe: ReframeResult
-    subtitles: Path
+    reframe: ReframeResult | None
+    subtitles: Path | None
     final_video: Path
     cleaning: tuple[str, ...]
 
@@ -94,6 +108,10 @@ class PipelineConfig:
             inyectar; mutuamente excluyente con ``audio_track_path``.
         audio_mix_ratio: Peso de la pista externa: ``1.0`` la reemplaza, ``0.0``
             deja la original y un valor intermedio las mezcla.
+        repost_mode: Si se activa el modo Repost/UGC: omite transcripción,
+            detección de momentos y selección LLM, usa el vídeo completo como
+            segmento y sólo reframea cuando el vídeo no es 9:16. Coincide con
+            ``audio_locked`` para inyectar una pista externa.
     """
 
     output_dir: Path
@@ -106,6 +124,7 @@ class PipelineConfig:
     audio_track_path: Path | None = None
     audio_track_url: str | None = None
     audio_mix_ratio: float = 1.0
+    repost_mode: bool = False
 
     def __post_init__(self) -> None:
         """Valida la proporción de mezcla de la pista externa.
@@ -233,8 +252,17 @@ class _Dependencies:
     detector: MomentDetector
     transcriber: Transcriber
     selector: SegmentSelector
-    reframer: Reframer
+    reframer: Reframer | None
     subtitle_renderer: SubtitleBurner
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoInfo:
+    """Dimensiones y duración leídas del vídeo con ffprobe."""
+
+    width: int
+    height: int
+    duration_s: float
 
 
 def run_long_video(
@@ -326,7 +354,7 @@ def _resolve_dependencies(
         detector=FFmpegMomentDetector() if detector is None else detector,
         transcriber=FasterWhisperTranscriber() if transcriber is None else transcriber,
         selector=LLMSegmentSelector() if selector is None else selector,
-        reframer=_default_reframer(config) if reframer is None else reframer,
+        reframer=_resolve_reframer(config, injected=reframer),
         subtitle_renderer=(
             SubtitleRenderer(render=config.render)
             if subtitle_renderer is None
@@ -347,6 +375,48 @@ def _default_reframer(config: PipelineConfig) -> FFmpegReframer:
     )
 
 
+def _resolve_reframer(config: PipelineConfig, *, injected: Reframer | None) -> Reframer | None:
+    """Resuelve el reframer sin exigirlo cuando el modo repost no lo necesite.
+
+    Args:
+        config: Configuración con el modo y el modelo de caras opcional.
+        injected: Reframer inyectado por el llamador, o ``None``.
+
+    Returns:
+        El reframer inyectado, el estándar de MediaPipe, o ``None`` en modo
+        repost sin ``face_model_path`` (el vídeo ya vertical no se reframea).
+
+    Raises:
+        PipelineError: Si se requiere el reframer estándar y falta
+            ``face_model_path``.
+    """
+    if injected is not None:
+        return injected
+    if config.repost_mode and config.face_model_path is None:
+        return None
+    return _default_reframer(config)
+
+
+def _require_reframer(dependencies: _Dependencies) -> Reframer:
+    """Devuelve el reframer resuelto o falla si se necesita y no existe.
+
+    Args:
+        dependencies: Dependencias resueltas para la corrida.
+
+    Returns:
+        El reframer listo para analizar y renderizar.
+
+    Raises:
+        PipelineError: Si el repost necesita reframe pero no se configuró un
+            reframer ni ``face_model_path``.
+    """
+    reframer = dependencies.reframer
+    if reframer is None:
+        msg = "se requiere un reframer inyectado o face_model_path para reframe 9:16 con MediaPipe"
+        raise PipelineError(msg)
+    return reframer
+
+
 def _run_stages(
     url: str,
     *,
@@ -356,18 +426,35 @@ def _run_stages(
     registry: _CleanupRegistry,
 ) -> PipelineResult:
     source = _download(url, config=config, downloader=dependencies.downloader, registry=registry)
-    transcript = _transcribe(source, transcriber=dependencies.transcriber)
-    moments = _detect(source, transcript=transcript, detector=dependencies.detector)
-    selection = _select(
-        transcript,
-        moments,
-        contract=config.contract,
-        model=model,
-        selector=dependencies.selector,
-    )
+    if config.repost_mode:
+        # Repost/UGC: sin transcripción, sin momentos y sin LLM; el vídeo
+        # completo es el segmento.
+        transcript: Transcript | None = None
+        moments: tuple[Moment, ...] = ()
+        selection = _full_video_selection(source, render=config.render)
+    else:
+        transcript = _transcribe(source, transcriber=dependencies.transcriber)
+        moments = _detect(source, transcript=transcript, detector=dependencies.detector)
+        selection = _select(
+            transcript,
+            moments,
+            contract=config.contract,
+            model=model,
+            selector=dependencies.selector,
+        )
     segment = _primary_segment(selection)
     clip = _cut_segment(source, segment=segment, render=config.render, registry=registry)
-    reframe, reframed = _reframe(clip, reframer=dependencies.reframer, registry=registry)
+    reframe: ReframeResult | None = None
+    reframed: Path
+    if config.repost_mode and not _needs_reframe(clip, config.render):
+        # El vídeo ya es 9:16: passthrough sin tocar la pista visual.
+        reframed = clip
+    else:
+        reframe, reframed = _reframe(
+            clip,
+            reframer=_require_reframer(dependencies),
+            registry=registry,
+        )
     with_audio = (
         _inject_audio(
             reframed,
@@ -378,19 +465,24 @@ def _run_stages(
         if config.audio_locked
         else reframed
     )
-    subtitles = _write_subtitles(
-        transcript,
-        segment=segment,
-        renderer=dependencies.subtitle_renderer,
-        output_dir=config.output_dir,
-        registry=registry,
-    )
-    final_video = _burn(
-        with_audio,
-        subtitles=subtitles,
-        renderer=dependencies.subtitle_renderer,
-        output_dir=config.output_dir,
-    )
+    subtitles: Path | None
+    if transcript is not None:
+        subtitles = _write_subtitles(
+            transcript,
+            segment=segment,
+            renderer=dependencies.subtitle_renderer,
+            output_dir=config.output_dir,
+            registry=registry,
+        )
+        final_video = _burn(
+            with_audio,
+            subtitles=subtitles,
+            renderer=dependencies.subtitle_renderer,
+            output_dir=config.output_dir,
+        )
+    else:
+        subtitles = None
+        final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
     return PipelineResult(
         source=source,
         transcript=transcript,
@@ -416,6 +508,159 @@ def _download(
         _ = downloader.download_video(url=url, destination=temporary)
         _ = temporary.replace(source)
     return source
+
+
+def _probe_video(video: Path, *, render: RenderConfig) -> _VideoInfo:
+    """Lee las dimensiones y la duración de un vídeo con ffprobe.
+
+    Args:
+        video: Ruta del vídeo a sondear.
+        render: Configuración con el timeout del sondeo.
+
+    Returns:
+        Las dimensiones y la duración del vídeo.
+
+    Raises:
+        PipelineError: Si ffprobe no está disponible, falla, expira o no se
+            pueden leer las dimensiones o la duración.
+    """
+    argv = [
+        _FFPROBE,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height:format=duration",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(video),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=render.timeout_s,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        msg = f"ffprobe no está disponible: {_FFPROBE}"
+        raise PipelineError(msg) from error
+    except subprocess.TimeoutExpired as error:
+        msg = f"ffprobe excedió el timeout de {render.timeout_s} s"
+        raise PipelineError(msg) from error
+    except OSError as error:
+        msg = f"no se pudo ejecutar ffprobe ({_FFPROBE}): {error}"
+        raise PipelineError(msg) from error
+    if completed.returncode != 0:
+        msg = f"ffprobe falló con código {completed.returncode}: {_tail(completed.stderr)}"
+        raise PipelineError(msg)
+    fields = _probe_fields(completed.stdout)
+    width = _probe_dimension(fields.get("width"), video=video)
+    height = _probe_dimension(fields.get("height"), video=video)
+    duration_s = _probe_duration(fields.get("duration"), video=video)
+    if width <= 0 or height <= 0:
+        msg = f"dimensiones inválidas en {video}: {width}x{height}"
+        raise PipelineError(msg)
+    return _VideoInfo(width=width, height=height, duration_s=duration_s)
+
+
+def _probe_fields(stdout: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def _probe_dimension(raw: str | None, *, video: Path) -> int:
+    if raw is None or not raw.isdigit():
+        msg = f"no se pudieron leer las dimensiones de {video}: {raw!r}"
+        raise PipelineError(msg)
+    return int(raw)
+
+
+def _probe_duration(raw: str | None, *, video: Path) -> float:
+    if raw is None:
+        msg = f"no se pudo leer la duración de {video}"
+        raise PipelineError(msg)
+    try:
+        return float(raw)
+    except ValueError:
+        msg = f"no se pudo leer la duración de {video}: {raw!r}"
+        raise PipelineError(msg) from None
+
+
+def _is_vertical(width: int, height: int) -> bool:
+    # Las dimensiones vienen validadas por _probe_video: aquí son positivas.
+    aspect = width / height
+    return abs(aspect - _TARGET_ASPECT) <= _TARGET_ASPECT * _ASPECT_TOLERANCE
+
+
+def _needs_reframe(video: Path, render: RenderConfig) -> bool:
+    """Indica si el vídeo debe pasar por el reframe 9:16.
+
+    Args:
+        video: Ruta del vídeo a evaluar.
+        render: Configuración con el timeout del sondeo.
+
+    Returns:
+        ``True`` si el vídeo no es 9:16 dentro de la tolerancia; ``False`` si ya
+        es vertical.
+
+    Raises:
+        PipelineError: Si no se pueden leer las dimensiones del vídeo.
+    """
+    info = _probe_video(video, render=render)
+    return not _is_vertical(info.width, info.height)
+
+
+def _full_video_selection(source: Path, *, render: RenderConfig) -> SegmentSelection:
+    """Construye la selección que cubre el vídeo completo (modo repost).
+
+    Args:
+        source: Ruta del vídeo fuente descargado.
+        render: Configuración con el timeout del sondeo.
+
+    Returns:
+        Una selección con un único segmento ``[0, duración]``.
+
+    Raises:
+        PipelineError: Si no se puede leer la duración del vídeo o no es
+            utilizable.
+    """
+    info = _probe_video(source, render=render)
+    if info.duration_s <= 0.0:
+        msg = f"el vídeo fuente no tiene duración utilizable: {source}"
+        raise PipelineError(msg)
+    return SegmentSelection(
+        segments=(Segment(start_s=0.0, end_s=info.duration_s),),
+        rationale="modo repost: el vídeo completo es el segmento",
+    )
+
+
+def _publish(video: Path, *, output_dir: Path, registry: _CleanupRegistry) -> Path:
+    """Publica el vídeo procesado como artefacto final sin subtítulos.
+
+    Args:
+        video: Vídeo procesado (cortado, reframeado y/o con audio inyectado).
+        output_dir: Directorio donde se publica ``final.mp4``.
+        registry: Registro del temporal de publicación.
+
+    Returns:
+        La ruta del artefacto final.
+
+    Raises:
+        PipelineError: Si no se puede copiar o publicar el artefacto.
+    """
+    destination = output_dir / _FINAL_NAME
+    temporary = registry.register(_temporary_path(destination))
+    with _translated("publicación del vídeo final"):
+        _ = shutil.copyfile(video, temporary)
+        _ = temporary.replace(destination)
+    return destination
 
 
 def _transcribe(source: Path, *, transcriber: Transcriber) -> Transcript:
