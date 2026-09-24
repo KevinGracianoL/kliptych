@@ -46,9 +46,9 @@ un gate. Se arregla el código.
 
 ## Roles de agentes
 
-- **LongCat 2.0** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta.
-- **DeepSeek V4.1 Flash (programmer)** es el agente de implementación: ejecuta tareas de código delegadas por el orquestador.
-- El orquestador no implementa código directamente; delega al programmer y verifica los resultados.
+- **LongCat 2.0** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta. No implementa código y no hace code reviews.
+- **Gemini 3.8 Flash High via OmniRoute (programmer)** es el agente de implementación y revisión: ejecuta tareas de código delegadas por el orquestador y realiza code reviews ejecutando la skill `evidence-driven-review` sobre PRs completos (snapshot base/head, nunca commit por commit).
+- El orquestador no implementa código directamente; delega al programmer la implementación y las reviews, y verifica los resultados.
 
 ## Higiene de ramas
 
