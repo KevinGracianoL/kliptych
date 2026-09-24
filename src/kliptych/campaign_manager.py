@@ -146,6 +146,7 @@ class CampaignManager:
         mode: str = "long_video",
         url: str | None = None,
         images: Sequence[Path] | None = None,
+        resume: bool = False,
     ) -> CampaignOutcome:
         """Procesa la campaña según su arquetipo.
 
@@ -160,6 +161,7 @@ class CampaignManager:
                 (``long_video`` o ``slideshow``).
             url: URL del vídeo fuente, requerida por el modo ``long_video``.
             images: Imágenes del slideshow, requeridas por el modo ``slideshow``.
+            resume: Si es True, reanuda la ejecución desde checkpoints previos.
 
         Returns:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
@@ -181,7 +183,7 @@ class CampaignManager:
                 Archetype.NEW_ARCHETYPE,
             )
         if classification.archetype is Archetype.KNOWN:
-            return self._process_known(campaign, mode=mode, url=url, images=images)
+            return self._process_known(campaign, mode=mode, url=url, images=images, resume=resume)
         return self._process_proposal(campaign, contract, classification)
 
     def _process_known(
@@ -191,9 +193,10 @@ class CampaignManager:
         mode: str,
         url: str | None,
         images: Sequence[Path] | None,
+        resume: bool = False,
     ) -> CampaignOutcome:
         try:
-            outcome = self._render_known(campaign, mode=mode, url=url, images=images)
+            outcome = self._render_known(campaign, mode=mode, url=url, images=images, resume=resume)
         except Exception as error:
             return _error_outcome(
                 campaign,
@@ -209,20 +212,21 @@ class CampaignManager:
         mode: str,
         url: str | None,
         images: Sequence[Path] | None,
+        resume: bool = False,
     ) -> CampaignOutcome:
         if mode == "long_video":
             return CampaignOutcome(
                 campaign_id=campaign.campaign_id,
                 archetype=Archetype.KNOWN,
                 status=CampaignStatus.COMPLETED,
-                pipeline_result=self._run_long_video(url),
+                pipeline_result=self._run_long_video(url, resume=resume),
             )
         if mode == "slideshow":
             return CampaignOutcome(
                 campaign_id=campaign.campaign_id,
                 archetype=Archetype.KNOWN,
                 status=CampaignStatus.COMPLETED,
-                slideshow_result=self._run_slideshow(images),
+                slideshow_result=self._run_slideshow(images, resume=resume),
             )
         msg = f"modo de video no soportado: {mode!r}"
         raise CampaignManagerError(msg)
@@ -257,7 +261,7 @@ class CampaignManager:
             pull_request=pull_request,
         )
 
-    def _run_long_video(self, url: str | None) -> PipelineResult:
+    def _run_long_video(self, url: str | None, *, resume: bool = False) -> PipelineResult:
         orchestrator = self._video_orchestrator
         if orchestrator is None:
             msg = "no hay orquestador de video configurado para el modo long_video"
@@ -265,20 +269,22 @@ class CampaignManager:
         if url is None:
             msg = "el modo long_video requiere la URL del video fuente"
             raise CampaignManagerError(msg)
-        return orchestrator.run_long_video(url)
+        return orchestrator.run_long_video(url, resume=resume)
 
-    def _run_slideshow(self, images: Sequence[Path] | None) -> SlideshowResult:
+    def _run_slideshow(
+        self, images: Sequence[Path] | None, *, resume: bool = False
+    ) -> SlideshowResult:
         if images is None:
             msg = "el modo slideshow requiere la secuencia de imágenes"
             raise CampaignManagerError(msg)
         slideshow_orchestrator = self._slideshow_orchestrator
         if slideshow_orchestrator is not None:
-            return slideshow_orchestrator.run(images)
+            return slideshow_orchestrator.run(images, resume=resume)
         video_orchestrator = self._video_orchestrator
         if video_orchestrator is None:
             msg = "no hay orquestador de slideshow configurado"
             raise CampaignManagerError(msg)
-        return video_orchestrator.run_slideshow(images)
+        return video_orchestrator.run_slideshow(images, resume=resume)
 
 
 def _error_outcome(campaign: Campaign, message: str, archetype: Archetype) -> CampaignOutcome:

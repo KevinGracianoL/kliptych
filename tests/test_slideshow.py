@@ -284,7 +284,8 @@ def test_full_pipeline_downloads_assembles_and_injects_audio(
     assert result.final_video.is_file()
     assert result.subtitles is None
     assert _leftovers(tmp_path / "out") == []
-    assert len(result.cleaning) == 5
+    assert len(result.cleaning) == 3
+    assert all(image.is_file() for image in result.images)
 
 
 def test_cleanup_captures_concat_images_and_intermediates(
@@ -298,11 +299,10 @@ def test_cleanup_captures_concat_images_and_intermediates(
     result = _run(("https://example.com/a.png",), config, slide_duration_s=1.0)
     cleaned = set(result.cleaning)
     assert any(name.endswith(".txt") for name in cleaned)
-    assert any(name.endswith(".jpg") for name in cleaned)
     assert any("slideshow" in name for name in cleaned)
     assert any("audio_injected" in name for name in cleaned)
     assert not result.slideshow_video.exists()
-    assert not result.images[0].exists()
+    assert result.images[0].is_file()
     assert result.final_video.is_file()
 
 
