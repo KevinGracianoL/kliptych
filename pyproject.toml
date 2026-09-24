@@ -210,6 +210,19 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"tests/test_slideshow.py" = [
+    # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
+    # argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_slideshow_integration.py" = [
+    # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
+    # generar los fixtures sintéticos del slideshow.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "tests/test_audio_locked_integration.py" = [
     # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
     # generar los fixtures sintéticos y medir la duración del audio.

@@ -15,6 +15,13 @@ atómica: ffmpeg escribe en un temporal hermano y solo un render exitoso
 reemplaza el destino. Un registro de limpieza elimina todos los temporales
 (``.part`` de la descarga, clips intermedios, ``.ass`` y reframes) tanto en el
 camino feliz como ante error.
+
+El modo Slideshow (``run_slideshow``) convierte una secuencia de imágenes
+estáticas en un vídeo vertical continuo. Salta las capas de inteligencia (no
+transcribe ni selecciona segmentos, porque no hay voz ni momentos que elegir) y
+exige audio externo: sin ``audio_locked`` no arranca. Las imágenes se ensamblan
+con el demuxer ``concat`` de ffmpeg, que escala y rellena cada slide a 9:16, y
+el resultado se publica con la misma limpieza determinista.
 """
 
 import shutil
@@ -51,6 +58,15 @@ _FINAL_NAME = "final.mp4"
 _FFPROBE = "ffprobe"
 _TARGET_ASPECT = 9.0 / 16.0
 _ASPECT_TOLERANCE = 0.05
+_SLIDESHOW_NAME = "slideshow.mp4"
+_SLIDESHOW_CONCAT_NAME = "slideshow_input.txt"
+_SLIDESHOW_WIDTH = 1080
+_SLIDESHOW_HEIGHT = 1920
+_SLIDESHOW_FPS = "30"
+_SLIDESHOW_FILTER = (
+    f"scale={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:force_original_aspect_ratio=decrease,"
+    f"pad={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+)
 
 
 class PipelineError(Exception):
@@ -85,6 +101,29 @@ class PipelineResult:
     reframe: ReframeResult | None
     subtitles: Path | None
     final_video: Path
+    cleaning: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SlideshowResult:
+    """Resultado del pipeline slideshow.
+
+    Attributes:
+        images: Imágenes resueltas, en orden de montaje; las descargadas desde
+            URL se eliminan en la limpieza final.
+        slideshow_video: Vídeo intermedio ensamblado a partir de las imágenes;
+            se elimina en la limpieza final y la ruta se conserva como
+            procedencia.
+        final_video: Vídeo vertical final con el audio externo inyectado.
+        subtitles: Siempre ``None``: el slideshow no transcribe y por tanto no
+            genera subtítulos.
+        cleaning: Rutas de los temporales eliminados al terminar.
+    """
+
+    images: tuple[Path, ...]
+    slideshow_video: Path
+    final_video: Path
+    subtitles: Path | None
     cleaning: tuple[str, ...]
 
 
@@ -319,6 +358,260 @@ def run_long_video(
     finally:
         cleaning = registry.cleanup()
     return replace(result, cleaning=cleaning)
+
+
+def run_slideshow(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    slide_duration_s: float = 3.0,
+) -> SlideshowResult:
+    """Convierte una secuencia de imágenes en un vídeo vertical con audio.
+
+    Ensambla las imágenes con el demuxer ``concat`` de ffmpeg, inyecta de forma
+    obligatoria la pista externa y publica ``final.mp4`` de forma atómica. No
+    transcribe ni llama al LLM: el slideshow no tiene voz ni momentos que
+    seleccionar.
+
+    Args:
+        images: Rutas locales o URLs http/https de las imágenes, en orden de
+            montaje.
+        config: Directorio de salida, render y pista de audio externa; exige
+            ``audio_locked=True``.
+        slide_duration_s: Duración de cada slide en segundos; debe ser positiva.
+
+    Returns:
+        El resultado con los artefactos y las rutas de temporales limpiados.
+
+    Raises:
+        PipelineError: Si la duración no es positiva, falta ``audio_locked``,
+            no hay imágenes, una imagen no existe o una etapa falla.
+    """
+    _validate_slideshow(images, config=config, slide_duration_s=slide_duration_s)
+    try:
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        msg = f"no se pudo preparar el directorio de salida {config.output_dir}: {error}"
+        raise PipelineError(msg) from error
+    downloader = MediaDownloader(
+        timeout_s=config.download_timeout_s,
+        max_size_bytes=config.download_max_size_bytes,
+    )
+    registry = _CleanupRegistry()
+    try:
+        result = _run_slideshow_stages(
+            images,
+            config=config,
+            slide_duration_s=slide_duration_s,
+            downloader=downloader,
+            registry=registry,
+        )
+    finally:
+        cleaning = registry.cleanup()
+    return replace(result, cleaning=cleaning)
+
+
+def _validate_slideshow(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    slide_duration_s: float,
+) -> None:
+    """Valida las precondiciones del modo slideshow.
+
+    Args:
+        images: Imágenes declaradas por el llamador.
+        config: Configuración con la política de audio.
+        slide_duration_s: Duración de cada slide en segundos.
+
+    Raises:
+        PipelineError: Si la duración no es positiva, ``audio_locked`` está
+            desactivado o no hay imágenes.
+    """
+    if slide_duration_s <= 0:
+        msg = f"la duración por slide debe ser positiva: {slide_duration_s}"
+        raise PipelineError(msg)
+    if not config.audio_locked:
+        msg = "el slideshow requiere audio_locked=True"
+        raise PipelineError(msg)
+    if not images:
+        msg = "el slideshow requiere al menos una imagen"
+        raise PipelineError(msg)
+
+
+def _run_slideshow_stages(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    slide_duration_s: float,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> SlideshowResult:
+    resolved = _resolve_slideshow_images(
+        images,
+        config=config,
+        downloader=downloader,
+        registry=registry,
+    )
+    concat = _write_concat_file(
+        resolved,
+        slide_duration_s=slide_duration_s,
+        output_dir=config.output_dir,
+        registry=registry,
+    )
+    slideshow_video = _assemble_slideshow(
+        concat,
+        render=config.render,
+        output_dir=config.output_dir,
+        registry=registry,
+    )
+    with_audio = _inject_audio(
+        slideshow_video,
+        config=config,
+        downloader=downloader,
+        registry=registry,
+    )
+    final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
+    return SlideshowResult(
+        images=resolved,
+        slideshow_video=slideshow_video,
+        final_video=final_video,
+        subtitles=None,
+        cleaning=(),
+    )
+
+
+def _resolve_slideshow_images(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> tuple[Path, ...]:
+    return tuple(
+        _resolve_slideshow_image(
+            image,
+            index=index,
+            config=config,
+            downloader=downloader,
+            registry=registry,
+        )
+        for index, image in enumerate(images)
+    )
+
+
+def _resolve_slideshow_image(
+    image: Path | str,
+    *,
+    index: int,
+    config: PipelineConfig,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Resuelve una imagen local o descarga su URL como temporal registrado.
+
+    Args:
+        image: Ruta local o URL http/https de la imagen.
+        index: Posición de la imagen en la secuencia, para nombrar el temporal.
+        config: Configuración con el directorio de salida y los límites.
+        downloader: Descargador acotado para las imágenes entregadas por URL.
+        registry: Registro donde se anota la imagen descargada como temporal.
+
+    Returns:
+        La ruta local de la imagen.
+
+    Raises:
+        PipelineError: Si la imagen resuelta no existe como archivo.
+    """
+    if isinstance(image, Path) or not _is_url(image):
+        path = Path(image)
+    else:
+        path = registry.register(_temporary_path(config.output_dir / f"slide_{index:03d}.jpg"))
+        with _translated("descarga de imagen"):
+            _ = downloader.download_video(url=image, destination=path)
+    if not path.is_file():
+        msg = f"la imagen del slideshow no existe: {path}"
+        raise PipelineError(msg)
+    return path
+
+
+def _write_concat_file(
+    images: Sequence[Path],
+    *,
+    slide_duration_s: float,
+    output_dir: Path,
+    registry: _CleanupRegistry,
+) -> Path:
+    destination = registry.register(_temporary_path(output_dir / _SLIDESHOW_CONCAT_NAME))
+    content = _concat_file_content(images, slide_duration_s=slide_duration_s)
+    with _translated("archivo de concatenación del slideshow"):
+        _ = destination.write_text(content, encoding="utf-8")
+    return destination
+
+
+def _concat_file_content(images: Sequence[Path], *, slide_duration_s: float) -> str:
+    """Construye el contenido del archivo ``concat`` del demuxer de ffmpeg.
+
+    Cada imagen precede a su directiva ``duration`` y la última se repite al
+    final: el demuxer solo retiene el último frame si vuelve a aparecer.
+
+    Args:
+        images: Imágenes en orden de montaje.
+        slide_duration_s: Duración de cada slide en segundos.
+
+    Returns:
+        El contenido del archivo, terminado en salto de línea.
+    """
+    duration = _seconds(slide_duration_s)
+    lines: list[str] = []
+    for image in images:
+        lines.extend((_concat_file_line(image), f"duration {duration}"))
+    lines.append(_concat_file_line(images[-1]))
+    return "\n".join(lines) + "\n"
+
+
+def _concat_file_line(path: Path) -> str:
+    # El demuxer exige comillas simples y escapa una comilla literal como
+    # '\'' (cierra, escapa y reabre); las rutas usan separadores POSIX.
+    escaped = path.as_posix().replace("'", "'\\''")
+    return f"file '{escaped}'"
+
+
+def _assemble_slideshow(
+    concat: Path,
+    *,
+    render: RenderConfig,
+    output_dir: Path,
+    registry: _CleanupRegistry,
+) -> Path:
+    destination = registry.register(_temporary_path(output_dir / _SLIDESHOW_NAME))
+    argv = [
+        render.ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat),
+        "-vf",
+        _SLIDESHOW_FILTER,
+        "-r",
+        _SLIDESHOW_FPS,
+    ]
+    argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
+    argv.append(str(destination))
+    with _translated("ensamblado del slideshow"):
+        _run_ffmpeg(argv, render=render)
+    return destination
+
+
+def _is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
 
 
 def _resolve_dependencies(
