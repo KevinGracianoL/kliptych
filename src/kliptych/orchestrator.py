@@ -24,8 +24,11 @@ con el demuxer ``concat`` de ffmpeg, que escala y rellena cada slide a 9:16, y
 el resultado se publica con la misma limpieza determinista.
 """
 
+import json
+import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -33,7 +36,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from kliptych.contract import Contract, Segment
 from kliptych.download import MediaDownloader
@@ -595,7 +598,7 @@ def _resolve_slideshow_image(
         path = Path(image)
     else:
         destination = config.output_dir / f"slide_{index:03d}.jpg"
-        if resume and destination.is_file():
+        if resume and destination.is_file() and destination.stat().st_size > 0:
             path = destination
         else:
             temporary = registry.register(_temporary_path(destination))
@@ -603,7 +606,6 @@ def _resolve_slideshow_image(
                 _ = downloader.download_video(url=image, destination=temporary)
                 _ = temporary.replace(destination)
             path = destination
-        _ = registry.register(path, is_artifact=True)
     if not path.is_file():
         msg = f"la imagen del slideshow no existe: {path}"
         raise PipelineError(msg)
@@ -794,8 +796,11 @@ def _resolve_source_stage(
     state: PipelineStateManager,
     resume: bool,
 ) -> Path:
+    destination = config.output_dir / _SOURCE_NAME
     if resume and state.is_done(PipelineStage.DOWNLOAD):
-        return state.artifact_path(PipelineStage.DOWNLOAD) or (config.output_dir / _SOURCE_NAME)
+        source_path = state.artifact_path(PipelineStage.DOWNLOAD) or destination
+        if source_path.is_file() and source_path.stat().st_size > 0:
+            return source_path
     try:
         source = _download(url, config=config, downloader=downloader, registry=registry)
         state.mark_done(PipelineStage.DOWNLOAD, source)
@@ -817,13 +822,20 @@ def _resolve_transcript_stage(
     artifact = config.output_dir / "transcript.json"
     if resume and (state.is_done(PipelineStage.TRANSCRIBE) or artifact.is_file()):
         artifact_file = state.artifact_path(PipelineStage.TRANSCRIBE) or artifact
-        transcript = Transcript.model_validate_json(artifact_file.read_text(encoding="utf-8"))
-        if not state.is_done(PipelineStage.TRANSCRIBE):
-            state.mark_done(PipelineStage.TRANSCRIBE, artifact_file)
-        return transcript
+        if artifact_file.is_file() and artifact_file.stat().st_size > 0:
+            try:
+                transcript = Transcript.model_validate_json(
+                    artifact_file.read_text(encoding="utf-8")
+                )
+            except (ValidationError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                if not state.is_done(PipelineStage.TRANSCRIBE):
+                    state.mark_done(PipelineStage.TRANSCRIBE, artifact_file)
+                return transcript
     try:
         transcript = _transcribe(source, transcriber=transcriber)
-        _ = artifact.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+        _atomic_write_json(artifact, transcript.model_dump_json(indent=2))
         state.mark_done(PipelineStage.TRANSCRIBE, artifact)
     except Exception:
         state.mark_failed(PipelineStage.TRANSCRIBE)
@@ -845,13 +857,18 @@ def _resolve_moments_stage(
     adapter = TypeAdapter(tuple[Moment, ...])
     if resume and (state.is_done(PipelineStage.MOMENTS) or artifact.is_file()):
         artifact_file = state.artifact_path(PipelineStage.MOMENTS) or artifact
-        moments = adapter.validate_json(artifact_file.read_text(encoding="utf-8"))
-        if not state.is_done(PipelineStage.MOMENTS):
-            state.mark_done(PipelineStage.MOMENTS, artifact_file)
-        return moments
+        if artifact_file.is_file() and artifact_file.stat().st_size > 0:
+            try:
+                moments = adapter.validate_json(artifact_file.read_text(encoding="utf-8"))
+            except (ValidationError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                if not state.is_done(PipelineStage.MOMENTS):
+                    state.mark_done(PipelineStage.MOMENTS, artifact_file)
+                return moments
     try:
         moments = _detect(source, transcript=transcript, detector=detector)
-        _ = artifact.write_bytes(adapter.dump_json(moments, indent=2))
+        _atomic_write_json(artifact, adapter.dump_json(moments, indent=2).decode("utf-8"))
         state.mark_done(PipelineStage.MOMENTS, artifact)
     except Exception:
         state.mark_failed(PipelineStage.MOMENTS)
@@ -873,10 +890,17 @@ def _resolve_selection_stage(
     artifact = config.output_dir / "selection.json"
     if resume and (state.is_done(PipelineStage.SELECT) or artifact.is_file()):
         artifact_file = state.artifact_path(PipelineStage.SELECT) or artifact
-        selection = SegmentSelection.model_validate_json(artifact_file.read_text(encoding="utf-8"))
-        if not state.is_done(PipelineStage.SELECT):
-            state.mark_done(PipelineStage.SELECT, artifact_file)
-        return selection
+        if artifact_file.is_file() and artifact_file.stat().st_size > 0:
+            try:
+                selection = SegmentSelection.model_validate_json(
+                    artifact_file.read_text(encoding="utf-8")
+                )
+            except (ValidationError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                if not state.is_done(PipelineStage.SELECT):
+                    state.mark_done(PipelineStage.SELECT, artifact_file)
+                return selection
     try:
         selection = _select(
             transcript,
@@ -885,7 +909,7 @@ def _resolve_selection_stage(
             model=model,
             selector=selector,
         )
-        _ = artifact.write_text(selection.model_dump_json(indent=2), encoding="utf-8")
+        _atomic_write_json(artifact, selection.model_dump_json(indent=2))
         state.mark_done(PipelineStage.SELECT, artifact)
     except Exception:
         state.mark_failed(PipelineStage.SELECT)
@@ -959,15 +983,38 @@ def _resolve_reframe_stage(
     dependencies: _Dependencies,
     registry: _CleanupRegistry,
     state: PipelineStateManager,
+    resume: bool = False,
 ) -> tuple[ReframeResult | None, Path]:
     if config.repost_mode and not _needs_reframe(clip, config.render):
         return None, clip
+    reframe_json = config.output_dir / "reframe.json"
+    reframed_video = state.artifact_path(PipelineStage.REFRAME) or (
+        config.output_dir / "reframed.mp4"
+    )
+    subtitles_already_done = (
+        state.is_done(PipelineStage.SUBTITLES) and (config.output_dir / _FINAL_NAME).is_file()
+    )
+    video_valid = reframed_video.is_file() and reframed_video.stat().st_size > 0
+    json_valid = reframe_json.is_file() and reframe_json.stat().st_size > 0
+    can_reuse = (video_valid or subtitles_already_done) and json_valid
+    if resume and state.is_done(PipelineStage.REFRAME) and can_reuse:
+        try:
+            reframe = ReframeResult.model_validate_json(reframe_json.read_text(encoding="utf-8"))
+        except (ValidationError, ValueError, json.JSONDecodeError):
+            pass
+        else:
+            if video_valid:
+                _ = registry.register(reframed_video, is_artifact=True)
+            return reframe, reframed_video
     try:
+        destination = config.output_dir / "reframed.mp4"
         reframe, reframed = _reframe(
             clip,
             reframer=_require_reframer(dependencies),
+            destination=destination,
             registry=registry,
         )
+        _atomic_write_json(reframe_json, reframe.model_dump_json(indent=2))
         state.mark_done(PipelineStage.REFRAME, reframed)
     except Exception:
         state.mark_failed(PipelineStage.REFRAME)
@@ -985,10 +1032,20 @@ def _resolve_subtitles_and_burn_stage(
     config: PipelineConfig,
     registry: _CleanupRegistry,
     state: PipelineStateManager,
+    resume: bool = False,
 ) -> tuple[Path | None, Path]:
     if transcript is None:
         final_video = _publish(video, output_dir=config.output_dir, registry=registry)
         return None, final_video
+    final_video = state.artifact_path(PipelineStage.SUBTITLES) or (config.output_dir / _FINAL_NAME)
+    if (
+        resume
+        and state.is_done(PipelineStage.SUBTITLES)
+        and final_video.is_file()
+        and final_video.stat().st_size > 0
+    ):
+        cached_subtitles = config.output_dir / "subtitles.ass"
+        return cached_subtitles, final_video
     try:
         subtitles = _write_subtitles(
             transcript,
@@ -997,18 +1054,18 @@ def _resolve_subtitles_and_burn_stage(
             output_dir=config.output_dir,
             registry=registry,
         )
-        final_video = _burn(
+        final = _burn(
             video,
             subtitles=subtitles,
             renderer=dependencies.subtitle_renderer,
             output_dir=config.output_dir,
         )
-        state.mark_done(PipelineStage.SUBTITLES, final_video)
+        state.mark_done(PipelineStage.SUBTITLES, final)
     except Exception:
         state.mark_failed(PipelineStage.SUBTITLES)
         raise
     else:
-        return subtitles, final_video
+        return subtitles, final
 
 
 def _run_stages(
@@ -1045,6 +1102,7 @@ def _run_stages(
         dependencies=dependencies,
         registry=registry,
         state=state,
+        resume=resume,
     )
     with_audio = (
         _inject_audio(
@@ -1052,6 +1110,7 @@ def _run_stages(
             config=config,
             downloader=dependencies.downloader,
             registry=registry,
+            resume=resume,
         )
         if config.audio_locked
         else reframed
@@ -1064,6 +1123,7 @@ def _run_stages(
         config=config,
         registry=registry,
         state=state,
+        resume=resume,
     )
     return PipelineResult(
         source=source,
@@ -1382,12 +1442,15 @@ def _reframe(
     clip: Path,
     *,
     reframer: Reframer,
+    destination: Path,
     registry: _CleanupRegistry,
 ) -> tuple[ReframeResult, Path]:
-    destination = registry.register(_temporary_path(clip.with_name("reframed.mp4")))
+    temporary = registry.register(_temporary_path(destination))
     with _translated("reframe 9:16"):
         result = reframer.analyze(clip)
-        _ = reframer.render(video=clip, destination=destination, result=result)
+        _ = reframer.render(video=clip, destination=temporary, result=result)
+        _ = temporary.replace(destination)
+    _ = registry.register(destination, is_artifact=True)
     return result, destination
 
 
@@ -1462,7 +1525,6 @@ def _resolve_audio_track(
         PipelineError: Si se configuraron ambas fuentes, ninguna o la ruta no
             existe.
     """
-    _ = resume
     if config.audio_track_path is not None and config.audio_track_url is not None:
         msg = "audio_locked acepta audio_track_path o audio_track_url, no ambos"
         raise PipelineError(msg)
@@ -1472,11 +1534,15 @@ def _resolve_audio_track(
             raise PipelineError(msg)
         return config.audio_track_path
     if config.audio_track_url is not None:
-        destination = registry.register(
-            _temporary_path(config.output_dir / "audio_track.mp3"), is_artifact=True
-        )
+        destination = config.output_dir / "audio_track.mp3"
+        if resume and destination.is_file() and destination.stat().st_size > 0:
+            _ = registry.register(destination, is_artifact=True)
+            return destination
+        temporary = registry.register(_temporary_path(destination))
         with _translated("descarga de audio"):
-            _ = downloader.download_video(url=config.audio_track_url, destination=destination)
+            _ = downloader.download_video(url=config.audio_track_url, destination=temporary)
+            _ = temporary.replace(destination)
+        _ = registry.register(destination, is_artifact=True)
         return destination
     msg = "audio_locked requiere audio_track_path o audio_track_url"
     raise PipelineError(msg)
@@ -1564,6 +1630,20 @@ def _run_ffmpeg(argv: list[str], *, render: RenderConfig) -> None:
     if completed.returncode != 0:
         msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
         raise PipelineError(msg)
+
+
+def _atomic_write_json(destination: Path, content: str) -> None:
+    parent = destination.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=f".{destination.stem}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            _ = file.write(content)
+        _ = Path(tmp).replace(destination)
+    except BaseException:
+        with suppress(OSError):
+            Path(tmp).unlink()
+        raise
 
 
 def _temporary_path(destination: Path) -> Path:

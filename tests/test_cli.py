@@ -47,6 +47,7 @@ class FakeCampaignManager:
         mode: str = "long_video",
         url: str | None = None,
         images: Sequence[Path] | None = None,
+        resume: bool = False,
     ) -> CampaignOutcome:
         self.calls.append(
             {
@@ -54,6 +55,7 @@ class FakeCampaignManager:
                 "mode": mode,
                 "url": url,
                 "images": images,
+                "resume": resume,
             }
         )
         return self.outcome

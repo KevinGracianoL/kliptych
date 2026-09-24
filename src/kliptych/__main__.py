@@ -25,6 +25,7 @@ from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
+from kliptych.gc import clean_temporary_directories
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
 from kliptych.intelligence import LLMCampaignClassifier
@@ -53,6 +54,7 @@ class _CampaignManagerProtocol(Protocol):
         mode: str,
         url: str | None,
         images: Sequence[Path] | None,
+        resume: bool = False,
     ) -> CampaignOutcome: ...
 
 
@@ -100,6 +102,17 @@ def main(
         default=None,
         help="raíz del workspace (por defecto KLIPTYCH_ROOT o el directorio actual)",
     )
+    run_group = run_parser.add_mutually_exclusive_group()
+    _ = run_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="reanuda la ejecución desde el último punto de control",
+    )
+    _ = run_group.add_argument(
+        "--restart",
+        action="store_true",
+        help="reinicia la ejecución descartando puntos de control previos",
+    )
     campaign_parser = subcommands.add_parser(
         "campaign", help="procesa una campaña mediante clasificación y enrutamiento inteligente"
     )
@@ -113,6 +126,29 @@ def main(
     )
     _ = campaign_parser.add_argument(
         "--url", default=None, help="URL del vídeo fuente (modo long_video)"
+    )
+    campaign_group = campaign_parser.add_mutually_exclusive_group()
+    _ = campaign_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="reanuda la ejecución desde el último punto de control",
+    )
+    _ = campaign_group.add_argument(
+        "--restart",
+        action="store_true",
+        help="reinicia la ejecución descartando puntos de control previos",
+    )
+    clean_parser = subcommands.add_parser("clean", help="elimina directorios temporales obsoletos")
+    _ = clean_parser.add_argument(
+        "--days",
+        type=float,
+        default=7.0,
+        help="antigüedad mínima en días para eliminar (default: 7)",
+    )
+    _ = clean_parser.add_argument(
+        "--root",
+        default=None,
+        help="directorio raíz donde escanear (por defecto 'campaigns')",
     )
     args = parser.parse_args(argv)
     setup_logging(
@@ -128,6 +164,8 @@ def main(
         return _run_command(args)
     if command == "campaign":
         return _cmd_campaign(args, manager=manager)
+    if command == "clean":
+        return _cmd_clean(args)
     parser.print_help()
     return 0
 
@@ -201,7 +239,8 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     except RuntimeError:
         logger.exception("Error de configuración")
         return 1
-    result = active_manager.process(campaign, mode=mode, url=url, images=None)
+    resume = cast("bool", getattr(args, "resume", False))
+    result = active_manager.process(campaign, mode=mode, url=url, images=None, resume=resume)
     if result.error is not None:
         logger.error("La campaña falló: %s", result.error)
         return 1
@@ -238,6 +277,24 @@ def _run_command(args: argparse.Namespace) -> int:
         _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
         return 1
     _ = sys.stdout.write(json.dumps(_run_payload(result), indent=2) + "\n")
+    return 0
+
+
+def _cmd_clean(args: argparse.Namespace) -> int:
+    days = cast("float", getattr(args, "days", 7.0))
+    root_arg = cast("str | None", getattr(args, "root", None))
+    target = Path(root_arg) if root_arg is not None else Path("campaigns")
+    if not target.exists():
+        logger.info("Directorio no encontrado: %s", target)
+        _ = sys.stdout.write("[]\n")
+        return 0
+    try:
+        removed = clean_temporary_directories(target, days=days)
+    except ValueError:
+        logger.exception("Parámetro inválido")
+        return 1
+    logger.info("Limpieza completada: %d directorios eliminados", len(removed))
+    _ = sys.stdout.write(json.dumps([str(p) for p in removed], indent=2) + "\n")
     return 0
 
 

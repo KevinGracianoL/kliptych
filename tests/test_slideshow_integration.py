@@ -187,6 +187,6 @@ def test_slideshow_cleans_downloaded_images(
         slide_duration_s=_SLIDE_DURATION_S,
     )
     assert result.final_video.is_file()
-    assert not result.images[0].exists()
+    assert result.images[0].is_file()
     assert not result.slideshow_video.exists()
     assert _leftovers(tmp_path / "out") == []

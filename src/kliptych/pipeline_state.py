@@ -5,6 +5,8 @@ en formato JSON de manera atómica, y verificar si una etapa ya fue completada
 con su artefacto correspondiente para garantizar idempotencia en la reanudación.
 """
 
+import os
+import tempfile
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -82,7 +84,7 @@ class PipelineStateManager:
         )
 
     def _try_load_existing(self) -> PipelineCheckpoint | None:
-        if not self.checkpoint_path.is_file():
+        if not self.checkpoint_path.is_file() or self.checkpoint_path.stat().st_size == 0:
             return None
         with suppress(OSError, ValueError):
             data = self.checkpoint_path.read_text(encoding="utf-8")
@@ -155,11 +157,15 @@ class PipelineStateManager:
     def save(self) -> None:
         """Escribe el checkpoint a disco de forma atómica."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.checkpoint_path.with_name(
-            f".{self.checkpoint_path.name}.tmp-{uuid.uuid4().hex}"
-        )
-        _ = tmp_path.write_text(self.checkpoint.model_dump_json(indent=2), encoding="utf-8")
-        _ = tmp_path.replace(self.checkpoint_path)
+        fd, tmp = tempfile.mkstemp(dir=self.output_dir, prefix=".checkpoint-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                _ = file.write(self.checkpoint.model_dump_json(indent=2))
+            _ = Path(tmp).replace(self.checkpoint_path)
+        except BaseException:
+            with suppress(OSError):
+                Path(tmp).unlink()
+            raise
 
     @classmethod
     def load(cls, output_dir: Path) -> "PipelineStateManager":
@@ -175,7 +181,7 @@ class PipelineStateManager:
             FileNotFoundError: Si no existe ``checkpoint.json`` en el directorio.
         """
         checkpoint_file = output_dir / _CHECKPOINT_FILE
-        if not checkpoint_file.is_file():
+        if not checkpoint_file.is_file() or checkpoint_file.stat().st_size == 0:
             msg = f"no se encontró checkpoint en {checkpoint_file}"
             raise FileNotFoundError(msg)
         data = checkpoint_file.read_text(encoding="utf-8")

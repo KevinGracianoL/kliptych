@@ -6,17 +6,24 @@ que los artefactos útiles se conserven ante fallos y que los temporales
 puros se eliminen deterministamente.
 """
 
+import os
+import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import pytest
 
 from kliptych import orchestrator
+from kliptych.__main__ import main
+from kliptych.campaign_manager import CampaignManager, CampaignOutcome
+from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import Contract, Segment
 from kliptych.encoding import RenderConfig
+from kliptych.gc import clean_temporary_directories
+from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
 from kliptych.moments import (
     ChatMessage,
     Moment,
@@ -27,7 +34,9 @@ from kliptych.orchestrator import (
     PipelineConfig,
     PipelineError,
     PipelineResult,
+    SlideshowResult,
     run_long_video,
+    run_slideshow,
 )
 from kliptych.pipeline_state import (
     PipelineStage,
@@ -45,6 +54,9 @@ from kliptych.transcribe import (
     TranscriptionError,
     Word,
 )
+
+if TYPE_CHECKING:
+    from kliptych.git_proposals import ProposalEngine
 
 _URL = "https://example.com/video"
 
@@ -540,3 +552,399 @@ def test_idempotent_moments_and_selection(tmp_path: Path, monkeypatch: pytest.Mo
     assert counter.transcribe_calls == 0  # transcript.json exists on disk
     assert counter.detect_calls == 0  # moments.json exists on disk
     assert counter.select_calls == 0  # selection.json exists on disk
+
+
+def test_corrupt_or_empty_artifacts_trigger_reexecution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Creamos artefactos vacíos o corruptos
+    source = config.output_dir / "source.mp4"
+    _ = source.write_bytes(b"")  # 0 bytes
+
+    transcript_file = config.output_dir / "transcript.json"
+    _ = transcript_file.write_text("{invalid json", encoding="utf-8")
+
+    moments_file = config.output_dir / "moments.json"
+    _ = moments_file.write_text("not json", encoding="utf-8")
+
+    selection_file = config.output_dir / "selection.json"
+    _ = selection_file.write_text("", encoding="utf-8")
+
+    mgr = PipelineStateManager(config.output_dir)
+    mgr.mark_done(PipelineStage.DOWNLOAD, source)
+    mgr.mark_done(PipelineStage.TRANSCRIBE, transcript_file)
+    mgr.mark_done(PipelineStage.MOMENTS, moments_file)
+    mgr.mark_done(PipelineStage.SELECT, selection_file)
+
+    result = _run(config, deps, resume=True)
+    assert isinstance(result, PipelineResult)
+
+    # Debido a la corrupción o tamaño 0, todas las etapas deben haberse re-ejecutado
+    assert counter.download_calls == 1
+    assert counter.transcribe_calls == 1
+    assert counter.detect_calls == 1
+    assert counter.select_calls == 1
+
+
+def test_slideshow_images_protected_from_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", _mock_ffmpeg())
+    fake_img = tmp_path / "downloaded.jpg"
+    _ = fake_img.write_bytes(b"image_bytes")
+    track = tmp_path / "track.mp3"
+    _ = track.write_bytes(b"audio_bytes")
+
+    class _MockDownloader:
+        def __init__(self, *, timeout_s: float, max_size_bytes: int) -> None:
+            _ = (timeout_s, max_size_bytes)
+
+        @staticmethod
+        def download_video(
+            *, url: str, destination: Path, format_selector: str | None = None
+        ) -> Path:
+            _ = (url, format_selector)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _ = destination.write_bytes(fake_img.read_bytes())
+            return destination
+
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _MockDownloader)
+
+    config = PipelineConfig(
+        output_dir=tmp_path / "slideshow_out",
+        contract=_contract(),
+        render=RenderConfig(),
+        audio_locked=True,
+        audio_track_path=track,
+    )
+    result = run_slideshow(
+        ["https://example.com/slide1.jpg"],
+        config=config,
+        slide_duration_s=2.0,
+    )
+    assert isinstance(result, SlideshowResult)
+    # EDR-001: las imágenes en result.images deben conservarse, no eliminarse
+    assert len(result.images) == 1
+    assert result.images[0].is_file()
+    assert result.images[0].stat().st_size > 0
+
+
+def test_audio_track_caching_and_stable_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+    config = replace(
+        config,
+        audio_locked=True,
+        audio_track_url="https://example.com/audio.mp3",
+    )
+
+    audio_downloads = 0
+
+    class _TrackedAudioDownloader:
+        def __init__(self, *, timeout_s: float, max_size_bytes: int) -> None:
+            _ = (timeout_s, max_size_bytes)
+
+        @staticmethod
+        def download_video(
+            *, url: str, destination: Path, format_selector: str | None = None
+        ) -> Path:
+            nonlocal audio_downloads
+            _ = (url, format_selector)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _ = destination.write_bytes(b"audio_bytes")
+            if "audio" in url:
+                audio_downloads += 1
+            else:
+                counter.download_calls += 1
+            return destination
+
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _TrackedAudioDownloader)
+
+    # Primer intento
+    result = _run(config, deps, resume=False)
+    assert isinstance(result, PipelineResult)
+    assert audio_downloads == 1
+
+    # Simulamos que audio_track.mp3 existe en disco en ruta estable
+    audio_path = config.output_dir / "audio_track.mp3"
+    _ = audio_path.write_bytes(b"cached_audio_bytes")
+
+    # Segundo intento con resume=True
+    _ = _run(config, deps, resume=True)
+    # audio_downloads sigue siendo 1: se reutilizó el audio en caché
+    assert audio_downloads == 1
+
+
+def test_reframe_and_subtitles_idempotency_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # Primer intento completo
+    result1 = _run(config, deps, resume=False)
+    assert isinstance(result1, PipelineResult)
+    assert counter.reframe_calls == 1
+    assert counter.subtitles_calls == 1
+
+    # Segundo intento con resume=True
+    result2 = _run(config, deps, resume=True)
+    assert isinstance(result2, PipelineResult)
+    # EDR-006: no deben haberse vuelto a llamar
+    assert counter.reframe_calls == 1
+    assert counter.subtitles_calls == 1
+
+
+def test_reframe_and_subtitles_reexecute_if_corrupted_or_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # Primer intento completo
+    _ = _run(config, deps, resume=False)
+    assert counter.reframe_calls == 1
+    assert counter.subtitles_calls == 1
+
+    # Corrompemos el artefacto de reframe
+    reframe_json = config.output_dir / "reframe.json"
+    if reframe_json.exists():
+        _ = reframe_json.write_text("corrupted", encoding="utf-8")
+    reframed_video = config.output_dir / "reframed.mp4"
+    if reframed_video.exists():
+        _ = reframed_video.write_bytes(b"")
+
+    final_video = config.output_dir / "final.mp4"
+    _ = final_video.write_bytes(b"")
+
+    # Segundo intento con resume=True
+    _ = _run(config, deps, resume=True)
+    assert counter.reframe_calls == 2
+    assert counter.subtitles_calls == 2
+
+
+class _DummyClassifier(CampaignClassifier):
+    @override
+    def classify(self, brief: str, contract: Contract) -> ArchetypeClassification:
+        _ = (brief, contract)
+        return ArchetypeClassification(
+            archetype=Archetype.KNOWN,
+            rationale="dummy",
+        )
+
+
+class _DummyProposalEngine:
+    @staticmethod
+    def propose(campaign: object, contract: object) -> object:
+        _ = (campaign, contract)
+        return None
+
+
+class _MockVideoOrchestrator:
+    def __init__(self) -> None:
+        self.long_video_kwargs: list[dict[str, object]] = []
+        self.slideshow_kwargs: list[dict[str, object]] = []
+
+    def run_long_video(self, url: str, **kwargs: object) -> PipelineResult:
+        self.long_video_kwargs.append({"url": url, **kwargs})
+        return PipelineResult(
+            source=Path("source.mp4"),
+            transcript=None,
+            moments=(),
+            selection=SegmentSelection(
+                segments=(Segment(start_s=0.0, end_s=1.0),), rationale="resumen"
+            ),
+            reframe=None,
+            subtitles=None,
+            final_video=Path("final.mp4"),
+            cleaning=(),
+        )
+
+    def run_slideshow(self, images: Sequence[Path], **kwargs: object) -> SlideshowResult:
+        self.slideshow_kwargs.append({"images": images, **kwargs})
+        return SlideshowResult(
+            images=tuple(images),
+            slideshow_video=Path("slideshow.mp4"),
+            final_video=Path("final.mp4"),
+            subtitles=None,
+            cleaning=(),
+        )
+
+
+def test_campaign_manager_propagates_resume_flag(tmp_path: Path) -> None:
+    video_orchestrator = _MockVideoOrchestrator()
+    proposal_engine = cast("ProposalEngine", cast("object", _DummyProposalEngine()))
+    manager = CampaignManager(
+        classifier=_DummyClassifier(),
+        proposal_engine=proposal_engine,
+        video_orchestrator=video_orchestrator,
+    )
+    campaign = Campaign(
+        campaign_id="test-camp",
+        brief="brief",
+        status=CampaignStatus.PENDING,
+        contract=_contract(),
+    )
+
+    # Modo long_video con resume=True
+    outcome = manager.process(campaign, mode="long_video", url=_URL, resume=True)
+    assert outcome.status == CampaignStatus.COMPLETED
+    assert len(video_orchestrator.long_video_kwargs) == 1
+    assert video_orchestrator.long_video_kwargs[0].get("resume") is True
+
+    # Modo slideshow con resume=True
+    outcome_slide = manager.process(
+        campaign, mode="slideshow", images=[tmp_path / "img.jpg"], resume=True
+    )
+    assert outcome_slide.status == CampaignStatus.COMPLETED
+    assert len(video_orchestrator.slideshow_kwargs) == 1
+    assert video_orchestrator.slideshow_kwargs[0].get("resume") is True
+
+
+def test_cli_resume_and_restart_flags(tmp_path: Path) -> None:
+    brief = tmp_path / "brief.txt"
+    _ = brief.write_text("test brief", encoding="utf-8")
+
+    class _FakeManager:
+        def __init__(self) -> None:
+            self.last_resume: bool | None = None
+
+        def process(
+            self,
+            campaign: Campaign,
+            *,
+            mode: str = "long_video",
+            url: str | None = None,
+            images: Sequence[Path] | None = None,
+            resume: bool = False,
+        ) -> CampaignOutcome:
+            _ = (campaign, mode, url, images)
+            self.last_resume = resume
+            return CampaignOutcome(
+                campaign_id="test",
+                archetype=Archetype.KNOWN,
+                status=CampaignStatus.COMPLETED,
+            )
+
+    fake_mgr = _FakeManager()
+    # --resume flag
+    code = main(
+        ["campaign", str(brief), "--out", str(tmp_path / "out"), "--resume"],
+        manager=fake_mgr,
+    )
+    assert code == 0
+    assert fake_mgr.last_resume is True
+
+    # --restart flag
+    code = main(
+        ["campaign", str(brief), "--out", str(tmp_path / "out"), "--restart"],
+        manager=fake_mgr,
+    )
+    assert code == 0
+    assert fake_mgr.last_resume is False
+
+    # Ambos flags a la vez -> error 2 (mutualmente excluyentes)
+    with pytest.raises(SystemExit) as exc_info:
+        _ = main(
+            ["campaign", str(brief), "--out", str(tmp_path / "out"), "--resume", "--restart"],
+            manager=fake_mgr,
+        )
+    assert exc_info.value.code == 2
+
+
+def test_gc_clean_temporary_directories_and_cli(tmp_path: Path) -> None:
+    campaigns = tmp_path / "campaigns"
+    campaigns.mkdir(parents=True, exist_ok=True)
+
+    # Subcarpetas temporales
+    old_tmp = campaigns / "tmp_old_dir"
+    old_tmp.mkdir()
+    _ = (old_tmp / "file.tmp").write_bytes(b"data")
+
+    old_dot_tmp = campaigns / ".tmp-old_part"
+    old_dot_tmp.mkdir()
+
+    new_tmp = campaigns / "tmp_new_dir"
+    new_tmp.mkdir()
+
+    # Carpetas y archivos no temporales protegidos
+    fixtures_dir = campaigns / "fixtures"
+    fixtures_dir.mkdir()
+    _ = (fixtures_dir / "test.json").write_bytes(b"{}")
+
+    pending_dir = campaigns / "pending"
+    pending_dir.mkdir()
+
+    variations_file = campaigns / "variations.md"
+    _ = variations_file.write_text("# Variations", encoding="utf-8")
+
+    # Modificamos mtime para simular antigüedad (10 días atrás)
+    ten_days_ago = time.time() - (10 * 86400)
+
+    os.utime(old_tmp, (ten_days_ago, ten_days_ago))
+    os.utime(old_dot_tmp, (ten_days_ago, ten_days_ago))
+
+    # Ejecutamos comando CLI clean
+    code = main(["clean", "--days", "7", "--root", str(campaigns)])
+    assert code == 0
+
+    # Las carpetas viejas fueron eliminadas
+    assert not old_tmp.exists()
+    assert not old_dot_tmp.exists()
+
+    # Las carpetas y archivos protegidos o recientes siguen existiendo
+    assert new_tmp.exists()
+    assert fixtures_dir.exists()
+    assert (fixtures_dir / "test.json").exists()
+    assert pending_dir.exists()
+    assert variations_file.exists()
+
+
+def test_gc_nested_and_dry_run_and_errors(tmp_path: Path) -> None:
+    # Error en days negativo
+    with pytest.raises(ValueError, match="mayor o igual a 0"):
+        _ = clean_temporary_directories(tmp_path, days=-1.0)
+
+    # Directorio inexistente devuelve tupla vacía
+    assert clean_temporary_directories(tmp_path / "nonexistent", days=0) == ()
+
+    # Subdirectorio anidado en carpeta no protegida
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    nested_tmp = private_dir / "tmp_nested"
+    nested_tmp.mkdir()
+
+    # Dry-run identifica pero no elimina
+    found = clean_temporary_directories(tmp_path, days=0.0, dry_run=True)
+    assert nested_tmp in found
+    assert nested_tmp.exists()
+
+    # Ejecución normal elimina
+    removed = clean_temporary_directories(tmp_path, days=0.0, dry_run=False)
+    assert nested_tmp in removed
+    assert not nested_tmp.exists()
+
+
+def test_cli_clean_edge_cases(tmp_path: Path) -> None:
+    # Root inexistente
+    code_nonexistent = main(["clean", "--root", str(tmp_path / "missing")])
+    assert code_nonexistent == 0
+
+    # Días negativos -> error 1
+    code_invalid = main(["clean", "--days", "-2", "--root", str(tmp_path)])
+    assert code_invalid == 1
+
+
+def test_cli_run_subcommand_resume_and_restart_flags(tmp_path: Path) -> None:
+    brief = tmp_path / "brief.txt"
+    _ = brief.write_text("test brief", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        _ = main(["run", str(brief), "--out", str(tmp_path / "out"), "--resume", "--restart"])
+    assert exc_info.value.code == 2
