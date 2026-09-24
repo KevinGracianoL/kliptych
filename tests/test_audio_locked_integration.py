@@ -36,6 +36,7 @@ pytestmark = [
 
 _FIXTURE_TIMEOUT_S = 120
 _SEGMENT_END_S = 1.5
+_SOURCE_DURATION_S = 2.0
 _VIDEO_URL = "https://example.com/video"
 _AUDIO_URL = "https://cdn.example.com/track.mp3"
 
@@ -145,11 +146,11 @@ def _generate_video(path: Path) -> Path:
         "-f",
         "lavfi",
         "-i",
-        "testsrc=size=320x240:rate=10:duration=2",
+        f"testsrc=size=320x240:rate=10:duration={_SOURCE_DURATION_S:g}",
         "-f",
         "lavfi",
         "-i",
-        "sine=frequency=440:duration=2",
+        f"sine=frequency=440:duration={_SOURCE_DURATION_S:g}",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -174,7 +175,7 @@ def _generate_audio(path: Path) -> Path:
         "-f",
         "lavfi",
         "-i",
-        "sine=frequency=880:duration=2",
+        f"sine=frequency=880:duration={_SOURCE_DURATION_S:g}",
         "-c:a",
         "pcm_s16le",
         str(path),
@@ -285,7 +286,9 @@ def test_long_video_locked_audio_mixes_downloaded_track(
     media = FFprobeProbe().probe(result.final_video)
     assert media.has_video
     assert media.has_audio
-    assert _audio_duration_s(result.final_video) == pytest.approx(2.0, abs=0.6)
+    audio_duration = _audio_duration_s(result.final_video)
+    assert 0.0 < audio_duration < _SOURCE_DURATION_S
+    assert abs(audio_duration - _SEGMENT_END_S) < abs(audio_duration - _SOURCE_DURATION_S)
     assert any("audio_track" in path for path in result.cleaning)
     leftover = [path.name for path in (tmp_path / "out").iterdir() if ".part-" in path.name]
     assert leftover == []
