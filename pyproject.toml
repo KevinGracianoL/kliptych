@@ -71,6 +71,14 @@ ignore = [
     # lanzan CampaignConfigError; la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
 ]
+"src/kliptych/campaign_manager.py" = [
+    # El motor de video (orquestador) importa subprocess; se importa de forma
+    # diferida solo para resolver los tipos de resultado de CampaignOutcome.
+    "import-outside-top-level",
+    # Frontera del controlador: cualquier fallo del clasificador, motor de video
+    # o motor de propuestas se traduce a CampaignOutcome con error.
+    "blind-except",
+]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
@@ -215,6 +223,12 @@ ignore = [
 "tests/test_audio_locked.py" = [
     # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
     # argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_campaign_manager.py" = [
+    # El controlador se importa en un subproceso para verificar que no carga el
+    # motor de video; lista de argumentos y shell=False.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
