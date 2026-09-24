@@ -1,5 +1,5 @@
 """Kliptych: briefs de campaña convertidos en paquetes de entrega validados."""
 
-from kliptych._version import __version__
+__version__ = "1.0.0"
 
 __all__ = ["__version__"]
