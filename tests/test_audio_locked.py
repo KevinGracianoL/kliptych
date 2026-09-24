@@ -309,9 +309,17 @@ def test_audio_injection_arguments_replace() -> None:
 def test_audio_injection_arguments_mix() -> None:
     argv = audio_injection_arguments(mix_ratio=0.5)
     filter_graph = argv[argv.index("-filter_complex") + 1]
-    assert "amix=inputs=2" in filter_graph
-    assert "[0:a]volume=0.500[original]" in filter_graph
-    assert "[1:a]volume=0.500[external]" in filter_graph
+    assert "amix=inputs=2:duration=first:dropout_transition=2[aout]" in filter_graph
+    assert "duration=longest" not in filter_graph
+    assert "aformat=sample_fmts=fltp:channel_layouts=stereo" in filter_graph
+    assert (
+        "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.500[original]"
+        in filter_graph
+    )
+    assert (
+        "[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.500[external]"
+        in filter_graph
+    )
     assert argv[argv.index("-map", argv.index("-map") + 1) + 1] == "[aout]"
 
 
@@ -408,7 +416,10 @@ def test_inject_audio_builds_mix_argv(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     argv = captured[0]
     assert "-filter_complex" in argv
-    assert "amix=inputs=2" in argv[argv.index("-filter_complex") + 1]
+    filter_graph = argv[argv.index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=first:dropout_transition=2[aout]" in filter_graph
+    assert "duration=longest" not in filter_graph
+    assert "aformat=sample_fmts=fltp:channel_layouts=stereo" in filter_graph
 
 
 def test_pipeline_without_audio_locked_is_unchanged(

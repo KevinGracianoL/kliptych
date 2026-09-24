@@ -79,9 +79,11 @@ def audio_injection_arguments(*, mix_ratio: float) -> tuple[str, ...]:
             "-shortest",
         )
     filter_graph = (
-        f"[0:a]volume={_volume(1.0 - mix_ratio)}[original];"
-        f"[1:a]volume={_volume(mix_ratio)}[external];"
-        "[original][external]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+        f"[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"volume={_volume(1.0 - mix_ratio)}[original];"
+        f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"volume={_volume(mix_ratio)}[external];"
+        "[original][external]amix=inputs=2:duration=first:dropout_transition=2[aout]"
     )
     return (
         "-filter_complex",
