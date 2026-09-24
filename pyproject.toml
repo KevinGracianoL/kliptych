@@ -66,10 +66,26 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"src/kliptych/campaign_config.py" = [
+    # generate_campaign_config/variations_md_entry delegan en helpers que
+    # lanzan CampaignConfigError; la sección Raises documenta el contrato.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
     "subprocess-without-shell-equals-true",
+]
+"src/kliptych/git_proposals.py" = [
+    # open_pull_request refleja la firma del protocolo GitProvider (rama, base,
+    # título, cuerpo, campaña y arquetipo); es el contrato público del motor.
+    "too-many-arguments",
+    # los proveedores delegan en helpers que lanzan GitError; la sección Raises
+    # documenta el contrato público.
+    "docstring-extraneous-exception",
+    # la URL es la base de la API de GitHub configurada por el operador; el
+    # esquema http/https se valida antes de construir la petición.
+    "suspicious-url-open-usage",
 ]
 "src/kliptych/moments.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
@@ -267,6 +283,13 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "start-process-with-partial-path",
     "suspicious-subprocess-import",
+]
+"tests/test_git_proposals.py" = [
+    # el token del proveedor de API es un valor falso de test, no un secreto.
+    "hardcoded-password-func-arg",
+    # firma fija del handler HTTP estándar (do_GET/log_message)
+    "invalid-function-name",
+    "builtin-argument-shadowing",
 ]
 "tests/test_gate_probe.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
