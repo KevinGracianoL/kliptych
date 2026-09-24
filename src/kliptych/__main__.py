@@ -18,9 +18,11 @@ from pydantic import ValidationError
 
 from kliptych import __version__
 from kliptych.assembler import AssembleError
+from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
+from kliptych.contract import Contract, ContractDraft
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
@@ -28,6 +30,7 @@ from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_f
 from kliptych.intelligence import LLMCampaignClassifier
 from kliptych.logging_setup import setup_logging
 from kliptych.pipeline import PipelineError, RunRequest, RunResult, run_given_clips
+from kliptych.resolver import resolve_contract
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -162,8 +165,21 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _extract_contract(brief_text: str) -> Contract | None:
+    try:
+        draft = ContractDraft.model_validate_json(brief_text)
+        return resolve_contract(draft, registry=AssetRegistry(Path.cwd())).contract
+    except (ValidationError, ValueError):
+        pass
+    try:
+        return Contract.model_validate_json(brief_text)
+    except (ValidationError, ValueError):
+        return None
+
+
 def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol | None) -> int:
     brief_path = cast("str", getattr(args, "brief", ""))
+    out_dir = cast("str", getattr(args, "out", ""))
     mode = cast("str", getattr(args, "mode", "long_video"))
     url = cast("str | None", getattr(args, "url", None))
     try:
@@ -172,12 +188,19 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
         logger.exception("Error al ingerir el brief de campaña")
         return 1
     logger.info("Procesando campaña %s en modo %s", Path(brief_path).name, mode)
+    logger.info("Directorio de salida: %s", out_dir)
+    contract = _extract_contract(brief.text)
     campaign = Campaign(
         campaign_id=brief.sha256[:12],
         brief=brief.text,
         status=CampaignStatus.PENDING,
+        contract=contract,
     )
-    active_manager = manager if manager is not None else _build_campaign_manager()
+    try:
+        active_manager = manager if manager is not None else _build_campaign_manager()
+    except RuntimeError:
+        logger.exception("Error de configuración")
+        return 1
     result = active_manager.process(campaign, mode=mode, url=url, images=None)
     if result.error is not None:
         logger.error("La campaña falló: %s", result.error)
