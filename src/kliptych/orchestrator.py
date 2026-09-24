@@ -33,6 +33,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import TypeAdapter
+
 from kliptych.contract import Contract, Segment
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
@@ -42,6 +44,7 @@ from kliptych.encoding import (
     video_encoder_arguments,
 )
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
+from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
 from kliptych.segment import LLMSegmentSelector, SegmentSelection, SegmentSelector
 from kliptych.subtitles import SubtitleRenderer
@@ -252,28 +255,55 @@ class SubtitleBurner(Protocol):
 class _CleanupRegistry:
     """Registro de temporales que se eliminan al terminar el pipeline."""
 
-    paths: list[Path] = field(default_factory=list)
+    temps: list[Path] = field(default_factory=list)
+    artifacts: list[Path] = field(default_factory=list)
 
-    def register(self, path: Path) -> Path:
-        """Registra un temporal y devuelve la misma ruta.
+    def register(self, path: Path, *, is_artifact: bool = False) -> Path:
+        """Registra un archivo y devuelve la misma ruta.
 
         Args:
-            path: Ruta del temporal a eliminar al finalizar.
+            path: Ruta del archivo a registrar.
+            is_artifact: Si es True, es un artefacto útil conservado ante
+                fallos para permitir la reanudación del pipeline.
 
         Returns:
             La misma ruta, para encadenar en la creación de temporales.
         """
-        self.paths.append(path)
+        if is_artifact:
+            self.artifacts.append(path)
+        else:
+            self.temps.append(path)
         return path
 
-    def cleanup(self) -> tuple[str, ...]:
-        """Elimina los temporales registrados que aún existan.
+    @property
+    def paths(self) -> list[Path]:
+        return [*self.temps, *self.artifacts]
+
+    @paths.setter
+    def paths(self, value: list[Path]) -> None:
+        self.temps = list(value)
+        self.artifacts = []
+
+    def cleanup(self, mode: str = "all") -> tuple[str, ...]:
+        """Elimina los temporales registrados según el modo.
+
+        Args:
+            mode: "all" elimina todo (éxito o reinicio forzado); "temp_only"
+                elimina solo verdaderos temporales, conservando artefactos
+                descargados para resume.
 
         Returns:
             Las rutas eliminadas, en el orden de registro.
+
+        Raises:
+            ValueError: Si el modo no es 'all' ni 'temp_only'.
         """
+        if mode not in {"all", "temp_only"}:
+            msg = f"modo de limpieza inválido: {mode}"
+            raise ValueError(msg)
+        targets = [*self.temps, *self.artifacts] if mode == "all" else list(self.temps)
         removed: list[str] = []
-        for path in self.paths:
+        for path in targets:
             if not path.exists():
                 continue
             with suppress(OSError):
@@ -314,6 +344,7 @@ def run_long_video(
     selector: SegmentSelector | None = None,
     reframer: Reframer | None = None,
     subtitle_renderer: SubtitleBurner | None = None,
+    resume: bool = False,
 ) -> PipelineResult:
     """Ejecuta el pipeline long_video desde la URL hasta el vídeo final.
 
@@ -326,6 +357,8 @@ def run_long_video(
         selector: Constructor y validador del prompt; por defecto el de LLM.
         reframer: Reframer 9:16; por defecto usa MediaPipe en CPU y ffmpeg.
         subtitle_renderer: Renderizador de subtítulos; por defecto usa ffmpeg.
+        resume: Si es True, reanuda la ejecución desde el último punto de control
+            sin repetir las etapas ya completadas.
 
     Returns:
         El resultado con los artefactos y las rutas de temporales limpiados.
@@ -347,6 +380,9 @@ def run_long_video(
         subtitle_renderer=subtitle_renderer,
     )
     registry = _CleanupRegistry()
+    state = PipelineStateManager(config.output_dir)
+    if not resume:
+        state.reset()
     try:
         result = _run_stages(
             url,
@@ -354,9 +390,14 @@ def run_long_video(
             config=config,
             dependencies=dependencies,
             registry=registry,
+            state=state,
+            resume=resume,
         )
-    finally:
-        cleaning = registry.cleanup()
+        cleaning = registry.cleanup(mode="all")
+        state.mark_done(PipelineStage.COMPLETED, result.final_video)
+    except Exception:
+        _ = registry.cleanup(mode="temp_only")
+        raise
     return replace(result, cleaning=cleaning)
 
 
@@ -365,6 +406,7 @@ def run_slideshow(
     *,
     config: PipelineConfig,
     slide_duration_s: float = 3.0,
+    resume: bool = False,
 ) -> SlideshowResult:
     """Convierte una secuencia de imágenes en un vídeo vertical con audio.
 
@@ -379,6 +421,8 @@ def run_slideshow(
         config: Directorio de salida, render y pista de audio externa; exige
             ``audio_locked=True``.
         slide_duration_s: Duración de cada slide en segundos; debe ser positiva.
+        resume: Si es True, reanuda la ejecución aprovechando imágenes o pistas
+            ya descargadas.
 
     Returns:
         El resultado con los artefactos y las rutas de temporales limpiados.
@@ -398,6 +442,9 @@ def run_slideshow(
         max_size_bytes=config.download_max_size_bytes,
     )
     registry = _CleanupRegistry()
+    state = PipelineStateManager(config.output_dir)
+    if not resume:
+        state.reset()
     try:
         result = _run_slideshow_stages(
             images,
@@ -405,9 +452,14 @@ def run_slideshow(
             slide_duration_s=slide_duration_s,
             downloader=downloader,
             registry=registry,
+            state=state,
+            resume=resume,
         )
-    finally:
-        cleaning = registry.cleanup()
+        cleaning = registry.cleanup(mode="all")
+        state.mark_done(PipelineStage.COMPLETED, result.final_video)
+    except Exception:
+        _ = registry.cleanup(mode="temp_only")
+        raise
     return replace(result, cleaning=cleaning)
 
 
@@ -453,12 +505,16 @@ def _run_slideshow_stages(
     slide_duration_s: float,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    state: PipelineStateManager,
+    resume: bool = False,
 ) -> SlideshowResult:
+    _ = state
     resolved = _resolve_slideshow_images(
         images,
         config=config,
         downloader=downloader,
         registry=registry,
+        resume=resume,
     )
     concat = _write_concat_file(
         resolved,
@@ -477,6 +533,7 @@ def _run_slideshow_stages(
         config=config,
         downloader=downloader,
         registry=registry,
+        resume=resume,
     )
     final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
     return SlideshowResult(
@@ -494,6 +551,7 @@ def _resolve_slideshow_images(
     config: PipelineConfig,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    resume: bool = False,
 ) -> tuple[Path, ...]:
     return tuple(
         _resolve_slideshow_image(
@@ -502,6 +560,7 @@ def _resolve_slideshow_images(
             config=config,
             downloader=downloader,
             registry=registry,
+            resume=resume,
         )
         for index, image in enumerate(images)
     )
@@ -514,6 +573,7 @@ def _resolve_slideshow_image(
     config: PipelineConfig,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    resume: bool = False,
 ) -> Path:
     """Resuelve una imagen local o descarga su URL como temporal registrado.
 
@@ -523,6 +583,7 @@ def _resolve_slideshow_image(
         config: Configuración con el directorio de salida y los límites.
         downloader: Descargador acotado para las imágenes entregadas por URL.
         registry: Registro donde se anota la imagen descargada como temporal.
+        resume: Si es True, reutiliza la imagen si ya fue descargada.
 
     Returns:
         La ruta local de la imagen.
@@ -533,9 +594,16 @@ def _resolve_slideshow_image(
     if isinstance(image, Path) or not _is_url(image):
         path = Path(image)
     else:
-        path = registry.register(_temporary_path(config.output_dir / f"slide_{index:03d}.jpg"))
-        with _translated("descarga de imagen"):
-            _ = downloader.download_video(url=image, destination=path)
+        destination = config.output_dir / f"slide_{index:03d}.jpg"
+        if resume and destination.is_file():
+            path = destination
+        else:
+            temporary = registry.register(_temporary_path(destination))
+            with _translated("descarga de imagen"):
+                _ = downloader.download_video(url=image, destination=temporary)
+                _ = temporary.replace(destination)
+            path = destination
+        _ = registry.register(path, is_artifact=True)
     if not path.is_file():
         msg = f"la imagen del slideshow no existe: {path}"
         raise PipelineError(msg)
@@ -717,6 +785,232 @@ def _require_reframer(dependencies: _Dependencies) -> Reframer:
     return reframer
 
 
+def _resolve_source_stage(
+    url: str,
+    *,
+    config: PipelineConfig,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+    state: PipelineStateManager,
+    resume: bool,
+) -> Path:
+    if resume and state.is_done(PipelineStage.DOWNLOAD):
+        return state.artifact_path(PipelineStage.DOWNLOAD) or (config.output_dir / _SOURCE_NAME)
+    try:
+        source = _download(url, config=config, downloader=downloader, registry=registry)
+        state.mark_done(PipelineStage.DOWNLOAD, source)
+    except Exception:
+        state.mark_failed(PipelineStage.DOWNLOAD)
+        raise
+    else:
+        return source
+
+
+def _resolve_transcript_stage(
+    source: Path,
+    *,
+    config: PipelineConfig,
+    transcriber: Transcriber,
+    state: PipelineStateManager,
+    resume: bool,
+) -> Transcript:
+    artifact = config.output_dir / "transcript.json"
+    if resume and (state.is_done(PipelineStage.TRANSCRIBE) or artifact.is_file()):
+        artifact_file = state.artifact_path(PipelineStage.TRANSCRIBE) or artifact
+        transcript = Transcript.model_validate_json(artifact_file.read_text(encoding="utf-8"))
+        if not state.is_done(PipelineStage.TRANSCRIBE):
+            state.mark_done(PipelineStage.TRANSCRIBE, artifact_file)
+        return transcript
+    try:
+        transcript = _transcribe(source, transcriber=transcriber)
+        _ = artifact.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+        state.mark_done(PipelineStage.TRANSCRIBE, artifact)
+    except Exception:
+        state.mark_failed(PipelineStage.TRANSCRIBE)
+        raise
+    else:
+        return transcript
+
+
+def _resolve_moments_stage(
+    source: Path,
+    *,
+    transcript: Transcript,
+    config: PipelineConfig,
+    detector: MomentDetector,
+    state: PipelineStateManager,
+    resume: bool,
+) -> tuple[Moment, ...]:
+    artifact = config.output_dir / "moments.json"
+    adapter = TypeAdapter(tuple[Moment, ...])
+    if resume and (state.is_done(PipelineStage.MOMENTS) or artifact.is_file()):
+        artifact_file = state.artifact_path(PipelineStage.MOMENTS) or artifact
+        moments = adapter.validate_json(artifact_file.read_text(encoding="utf-8"))
+        if not state.is_done(PipelineStage.MOMENTS):
+            state.mark_done(PipelineStage.MOMENTS, artifact_file)
+        return moments
+    try:
+        moments = _detect(source, transcript=transcript, detector=detector)
+        _ = artifact.write_bytes(adapter.dump_json(moments, indent=2))
+        state.mark_done(PipelineStage.MOMENTS, artifact)
+    except Exception:
+        state.mark_failed(PipelineStage.MOMENTS)
+        raise
+    else:
+        return moments
+
+
+def _resolve_selection_stage(
+    *,
+    transcript: Transcript,
+    moments: tuple[Moment, ...],
+    config: PipelineConfig,
+    model: LongVideoModel,
+    selector: SegmentSelector,
+    state: PipelineStateManager,
+    resume: bool,
+) -> SegmentSelection:
+    artifact = config.output_dir / "selection.json"
+    if resume and (state.is_done(PipelineStage.SELECT) or artifact.is_file()):
+        artifact_file = state.artifact_path(PipelineStage.SELECT) or artifact
+        selection = SegmentSelection.model_validate_json(artifact_file.read_text(encoding="utf-8"))
+        if not state.is_done(PipelineStage.SELECT):
+            state.mark_done(PipelineStage.SELECT, artifact_file)
+        return selection
+    try:
+        selection = _select(
+            transcript,
+            moments,
+            contract=config.contract,
+            model=model,
+            selector=selector,
+        )
+        _ = artifact.write_text(selection.model_dump_json(indent=2), encoding="utf-8")
+        state.mark_done(PipelineStage.SELECT, artifact)
+    except Exception:
+        state.mark_failed(PipelineStage.SELECT)
+        raise
+    else:
+        return selection
+
+
+def _resolve_intelligence_stages(
+    source: Path,
+    *,
+    model: LongVideoModel,
+    config: PipelineConfig,
+    dependencies: _Dependencies,
+    state: PipelineStateManager,
+    resume: bool,
+) -> tuple[Transcript | None, tuple[Moment, ...], SegmentSelection]:
+    if config.repost_mode:
+        return None, (), _full_video_selection(source, render=config.render)
+    transcript = _resolve_transcript_stage(
+        source,
+        config=config,
+        transcriber=dependencies.transcriber,
+        state=state,
+        resume=resume,
+    )
+    moments = _resolve_moments_stage(
+        source,
+        transcript=transcript,
+        config=config,
+        detector=dependencies.detector,
+        state=state,
+        resume=resume,
+    )
+    selection = _resolve_selection_stage(
+        transcript=transcript,
+        moments=moments,
+        config=config,
+        model=model,
+        selector=dependencies.selector,
+        state=state,
+        resume=resume,
+    )
+    return transcript, moments, selection
+
+
+def _resolve_clip(
+    source: Path,
+    *,
+    segment: Segment,
+    config: PipelineConfig,
+    registry: _CleanupRegistry,
+) -> Path:
+    passthrough = (
+        config.repost_mode and not config.audio_locked and not _needs_reframe(source, config.render)
+    )
+    if passthrough:
+        return _passthrough(
+            source,
+            output_dir=config.output_dir,
+            render=config.render,
+            registry=registry,
+        )
+    return _cut_segment(source, segment=segment, render=config.render, registry=registry)
+
+
+def _resolve_reframe_stage(
+    clip: Path,
+    *,
+    config: PipelineConfig,
+    dependencies: _Dependencies,
+    registry: _CleanupRegistry,
+    state: PipelineStateManager,
+) -> tuple[ReframeResult | None, Path]:
+    if config.repost_mode and not _needs_reframe(clip, config.render):
+        return None, clip
+    try:
+        reframe, reframed = _reframe(
+            clip,
+            reframer=_require_reframer(dependencies),
+            registry=registry,
+        )
+        state.mark_done(PipelineStage.REFRAME, reframed)
+    except Exception:
+        state.mark_failed(PipelineStage.REFRAME)
+        raise
+    else:
+        return reframe, reframed
+
+
+def _resolve_subtitles_and_burn_stage(
+    video: Path,
+    *,
+    transcript: Transcript | None,
+    segment: Segment,
+    dependencies: _Dependencies,
+    config: PipelineConfig,
+    registry: _CleanupRegistry,
+    state: PipelineStateManager,
+) -> tuple[Path | None, Path]:
+    if transcript is None:
+        final_video = _publish(video, output_dir=config.output_dir, registry=registry)
+        return None, final_video
+    try:
+        subtitles = _write_subtitles(
+            transcript,
+            segment=segment,
+            renderer=dependencies.subtitle_renderer,
+            output_dir=config.output_dir,
+            registry=registry,
+        )
+        final_video = _burn(
+            video,
+            subtitles=subtitles,
+            renderer=dependencies.subtitle_renderer,
+            output_dir=config.output_dir,
+        )
+        state.mark_done(PipelineStage.SUBTITLES, final_video)
+    except Exception:
+        state.mark_failed(PipelineStage.SUBTITLES)
+        raise
+    else:
+        return subtitles, final_video
+
+
 def _run_stages(
     url: str,
     *,
@@ -724,50 +1018,34 @@ def _run_stages(
     config: PipelineConfig,
     dependencies: _Dependencies,
     registry: _CleanupRegistry,
+    state: PipelineStateManager,
+    resume: bool = False,
 ) -> PipelineResult:
-    source = _download(url, config=config, downloader=dependencies.downloader, registry=registry)
-    if config.repost_mode:
-        # Repost/UGC: sin transcripción, sin momentos y sin LLM; el vídeo
-        # completo es el segmento.
-        transcript: Transcript | None = None
-        moments: tuple[Moment, ...] = ()
-        selection = _full_video_selection(source, render=config.render)
-    else:
-        transcript = _transcribe(source, transcriber=dependencies.transcriber)
-        moments = _detect(source, transcript=transcript, detector=dependencies.detector)
-        selection = _select(
-            transcript,
-            moments,
-            contract=config.contract,
-            model=model,
-            selector=dependencies.selector,
-        )
-    segment = _primary_segment(selection)
-    passthrough = (
-        config.repost_mode and not config.audio_locked and not _needs_reframe(source, config.render)
+    source = _resolve_source_stage(
+        url,
+        config=config,
+        downloader=dependencies.downloader,
+        registry=registry,
+        state=state,
+        resume=resume,
     )
-    if passthrough:
-        # Repost de un vídeo ya 9:16 sin audio externo: el segmento es el vídeo
-        # completo y se copia sin recodificar para preservar la calidad.
-        clip = _passthrough(
-            source,
-            output_dir=config.output_dir,
-            render=config.render,
-            registry=registry,
-        )
-    else:
-        clip = _cut_segment(source, segment=segment, render=config.render, registry=registry)
-    reframe: ReframeResult | None = None
-    reframed: Path
-    if config.repost_mode and not _needs_reframe(clip, config.render):
-        # El vídeo ya es 9:16: passthrough sin tocar la pista visual.
-        reframed = clip
-    else:
-        reframe, reframed = _reframe(
-            clip,
-            reframer=_require_reframer(dependencies),
-            registry=registry,
-        )
+    transcript, moments, selection = _resolve_intelligence_stages(
+        source,
+        model=model,
+        config=config,
+        dependencies=dependencies,
+        state=state,
+        resume=resume,
+    )
+    segment = _primary_segment(selection)
+    clip = _resolve_clip(source, segment=segment, config=config, registry=registry)
+    reframe, reframed = _resolve_reframe_stage(
+        clip,
+        config=config,
+        dependencies=dependencies,
+        registry=registry,
+        state=state,
+    )
     with_audio = (
         _inject_audio(
             reframed,
@@ -778,24 +1056,15 @@ def _run_stages(
         if config.audio_locked
         else reframed
     )
-    subtitles: Path | None
-    if transcript is not None:
-        subtitles = _write_subtitles(
-            transcript,
-            segment=segment,
-            renderer=dependencies.subtitle_renderer,
-            output_dir=config.output_dir,
-            registry=registry,
-        )
-        final_video = _burn(
-            with_audio,
-            subtitles=subtitles,
-            renderer=dependencies.subtitle_renderer,
-            output_dir=config.output_dir,
-        )
-    else:
-        subtitles = None
-        final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
+    subtitles, final_video = _resolve_subtitles_and_burn_stage(
+        with_audio,
+        transcript=transcript,
+        segment=segment,
+        dependencies=dependencies,
+        config=config,
+        registry=registry,
+        state=state,
+    )
     return PipelineResult(
         source=source,
         transcript=transcript,
@@ -1128,6 +1397,7 @@ def _inject_audio(
     config: PipelineConfig,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    resume: bool = False,
 ) -> Path:
     """Inyecta la pista externa reemplazando o mezclando la original.
 
@@ -1140,6 +1410,7 @@ def _inject_audio(
         config: Configuración con la pista, la proporción y el render.
         downloader: Descargador acotado para pistas entregadas por URL.
         registry: Registro de temporales para limpiar la pista y el resultado.
+        resume: Si es True, aprovecha la pista ya descargada si existe.
 
     Returns:
         La ruta del vídeo con la pista externa inyectada.
@@ -1148,7 +1419,7 @@ def _inject_audio(
         PipelineError: Si la pista no existe, no se configuró ninguna o ffmpeg
             falla.
     """
-    track = _resolve_audio_track(config, downloader=downloader, registry=registry)
+    track = _resolve_audio_track(config, downloader=downloader, registry=registry, resume=resume)
     destination = registry.register(_temporary_path(video.with_name("audio_injected.mp4")))
     argv = [
         config.render.ffmpeg,
@@ -1174,6 +1445,7 @@ def _resolve_audio_track(
     *,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    resume: bool = False,
 ) -> Path:
     """Resuelve la pista de audio externa, descargándola si llega por URL.
 
@@ -1181,6 +1453,7 @@ def _resolve_audio_track(
         config: Configuración con la ruta local o la URL de la pista.
         downloader: Descargador acotado que se usa cuando la pista es una URL.
         registry: Registro donde se anota la pista descargada como temporal.
+        resume: Si es True, aprovecha la pista ya descargada si existe.
 
     Returns:
         La ruta local de la pista de audio.
@@ -1189,6 +1462,7 @@ def _resolve_audio_track(
         PipelineError: Si se configuraron ambas fuentes, ninguna o la ruta no
             existe.
     """
+    _ = resume
     if config.audio_track_path is not None and config.audio_track_url is not None:
         msg = "audio_locked acepta audio_track_path o audio_track_url, no ambos"
         raise PipelineError(msg)
@@ -1198,7 +1472,9 @@ def _resolve_audio_track(
             raise PipelineError(msg)
         return config.audio_track_path
     if config.audio_track_url is not None:
-        destination = registry.register(_temporary_path(config.output_dir / "audio_track.mp3"))
+        destination = registry.register(
+            _temporary_path(config.output_dir / "audio_track.mp3"), is_artifact=True
+        )
         with _translated("descarga de audio"):
             _ = downloader.download_video(url=config.audio_track_url, destination=destination)
         return destination
