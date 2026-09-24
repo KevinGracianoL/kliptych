@@ -10,6 +10,7 @@ from kliptych.__main__ import main
 from kliptych.campaign_manager import CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import Segment
+from kliptych.exporter import DeliveryReport
 from kliptych.git_proposals import PullRequest
 from kliptych.intelligence import Archetype
 from kliptych.orchestrator import PipelineResult, SlideshowResult
@@ -21,6 +22,7 @@ _ = CampaignOutcome.model_rebuild(
         "PullRequest": PullRequest,
         "PipelineResult": PipelineResult,
         "SlideshowResult": SlideshowResult,
+        "DeliveryReport": DeliveryReport,
     }
 )
 

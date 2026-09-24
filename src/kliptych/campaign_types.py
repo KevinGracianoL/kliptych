@@ -24,6 +24,7 @@ class CampaignStatus(StrEnum):
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     MANUAL_REVIEW = "MANUAL_REVIEW"
+    BLOCKED = "BLOCKED"
 
 
 class Campaign(BaseModel):

@@ -70,6 +70,7 @@ def _export(
     pieces: Sequence[Piece] | None = None,
     destination: Path | None = None,
     gate: Gate | None = None,
+    approve_manual_review: bool = False,
 ) -> DeliveryReport:
     return export_delivery(
         contract=contract if contract is not None else make_contract(),
@@ -77,6 +78,7 @@ def _export(
         gate=gate if gate is not None else _gate(),
         assets=AssetRegistry(tmp_path),
         destination=tmp_path / "delivery" if destination is None else destination,
+        approve_manual_review=approve_manual_review,
     )
 
 
@@ -258,7 +260,37 @@ def test_hard_manual_review_rule_is_not_exported(tmp_path: Path) -> None:
     contract = make_contract(hard=[*ALL_HARD_RULES, "watermark.full_video"])
     report = _export(tmp_path, contract=contract, gate=gate)
     assert report.status is ExportStatus.BLOCKED
-    assert report.rejected[0].gate_status is GateStatus.MANUAL_REVIEW
+    assert report.rejected[0].gate_status is GateStatus.PENDING_REVIEW
+
+
+def test_pending_review_exported_when_approved(tmp_path: Path) -> None:
+    def manual_review(_context: GateContext) -> CheckOutcome:
+        return CheckOutcome(status=CheckStatus.MANUAL_REVIEW, evidence={"reason": "visual"})
+
+    gate = Gate(
+        FakeProbe(info=make_media()),
+        validators={**DEFAULT_VALIDATORS, "watermark.full_video": manual_review},
+    )
+    contract = make_contract(hard=[*ALL_HARD_RULES, "watermark.full_video"])
+
+    # Without approval, it is blocked
+    blocked = _export(tmp_path, contract=contract, gate=gate, approve_manual_review=False)
+    assert blocked.status is ExportStatus.BLOCKED
+    assert len(blocked.rejected) == 1
+    assert blocked.rejected[0].gate_status is GateStatus.PENDING_REVIEW
+
+    # With approval, it is exported
+    destination = tmp_path / "delivery_approved"
+    approved = _export(
+        tmp_path,
+        contract=contract,
+        gate=gate,
+        destination=destination,
+        approve_manual_review=True,
+    )
+    assert approved.status is ExportStatus.EXPORTED
+    assert len(approved.exported) == 1
+    assert approved.exported[0].gate_status is GateStatus.PENDING_REVIEW
 
 
 def test_partial_delivery_exports_only_passing_pieces(tmp_path: Path) -> None:

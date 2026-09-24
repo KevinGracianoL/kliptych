@@ -15,6 +15,7 @@ el primer uso.
 from __future__ import annotations
 
 from functools import cache
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,13 +25,17 @@ from kliptych.intelligence import Archetype
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
+    from kliptych.assets import AssetRegistry
     from kliptych.campaign_types import Campaign
-    from kliptych.contract import Contract
+    from kliptych.contract import Contract, Platform, PlatformRules
+    from kliptych.exporter import DeliveryReport
+    from kliptych.gate import Gate, Piece
     from kliptych.git_proposals import ProposalEngine, PullRequest
     from kliptych.intelligence import ArchetypeClassification, CampaignClassifier
     from kliptych.orchestrator import PipelineResult, SlideshowResult
+
+_MAX_PIECE_ID_LENGTH: int = 64
 
 
 class CampaignManagerError(Exception):
@@ -92,6 +97,7 @@ class CampaignOutcome(BaseModel):
     pull_request: PullRequest | None = None
     pipeline_result: PipelineResult | None = None
     slideshow_result: SlideshowResult | None = None
+    delivery_report: DeliveryReport | None = None
     error: str | None = None
 
 
@@ -103,6 +109,7 @@ def _resolve_outcome_model() -> None:
     que importa ``subprocess``. Se importan de forma diferida para que importar
     este controlador no cargue el motor de video; la resolución se cachea.
     """
+    from kliptych.exporter import DeliveryReport
     from kliptych.git_proposals import PullRequest
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
@@ -111,6 +118,7 @@ def _resolve_outcome_model() -> None:
             "PullRequest": PullRequest,
             "PipelineResult": PipelineResult,
             "SlideshowResult": SlideshowResult,
+            "DeliveryReport": DeliveryReport,
         }
     )
 
@@ -125,6 +133,9 @@ class CampaignManager:
         proposal_engine: ProposalEngine,
         video_orchestrator: VideoOrchestrator | None = None,
         slideshow_orchestrator: SlideshowOrchestrator | None = None,
+        gate: Gate | None = None,
+        assets: AssetRegistry | None = None,
+        destination: Path | None = None,
     ) -> None:
         """Configura el controlador y sus dependencias.
 
@@ -133,11 +144,17 @@ class CampaignManager:
             proposal_engine: Motor que materializa propuestas de Pull Request.
             video_orchestrator: Motor de video largo y slideshow; opcional.
             slideshow_orchestrator: Motor de slideshow alternativo; opcional.
+            gate: Gate configurado para verificar las entregas; opcional.
+            assets: Registro de assets del workspace; opcional.
+            destination: Directorio de destino del paquete de entrega; opcional.
         """
         self._classifier: CampaignClassifier = classifier
         self._proposal_engine: ProposalEngine = proposal_engine
         self._video_orchestrator: VideoOrchestrator | None = video_orchestrator
         self._slideshow_orchestrator: SlideshowOrchestrator | None = slideshow_orchestrator
+        self._gate: Gate | None = gate
+        self._assets: AssetRegistry | None = assets
+        self._destination: Path | None = destination
 
     def process(
         self,
@@ -147,6 +164,13 @@ class CampaignManager:
         url: str | None = None,
         images: Sequence[Path] | None = None,
         resume: bool = False,
+        gate: Gate | None = None,
+        assets: AssetRegistry | None = None,
+        destination: Path | None = None,
+        caption: str | None = None,
+        hashtags: Sequence[str] = (),
+        platform: Platform | None = None,
+        approve_manual_review: bool = False,
     ) -> CampaignOutcome:
         """Procesa la campaña según su arquetipo.
 
@@ -162,6 +186,13 @@ class CampaignManager:
             url: URL del vídeo fuente, requerida por el modo ``long_video``.
             images: Imágenes del slideshow, requeridas por el modo ``slideshow``.
             resume: Si es True, reanuda la ejecución desde checkpoints previos.
+            gate: Gate de validación; si se omite, usa el inyectado en el manager.
+            assets: Registro de assets; si se omite, usa el inyectado.
+            destination: Destino de la entrega; si se omite, usa el inyectado.
+            caption: Texto del caption; si se omite, se infiere del contrato.
+            hashtags: Hashtags de la pieza; si se omiten, se infieren del contrato.
+            platform: Plataforma específica a entregar; si se omite, entrega todas las del contrato.
+            approve_manual_review: Si es True, aprueba piezas en estado PENDING_REVIEW.
 
         Returns:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
@@ -183,7 +214,20 @@ class CampaignManager:
                 Archetype.NEW_ARCHETYPE,
             )
         if classification.archetype is Archetype.KNOWN:
-            return self._process_known(campaign, mode=mode, url=url, images=images, resume=resume)
+            return self._process_known(
+                campaign,
+                mode=mode,
+                url=url,
+                images=images,
+                resume=resume,
+                gate=gate,
+                assets=assets,
+                destination=destination,
+                caption=caption,
+                hashtags=hashtags,
+                platform=platform,
+                approve_manual_review=approve_manual_review,
+            )
         return self._process_proposal(campaign, contract, classification)
 
     def _process_known(
@@ -194,9 +238,29 @@ class CampaignManager:
         url: str | None,
         images: Sequence[Path] | None,
         resume: bool = False,
+        gate: Gate | None = None,
+        assets: AssetRegistry | None = None,
+        destination: Path | None = None,
+        caption: str | None = None,
+        hashtags: Sequence[str] = (),
+        platform: Platform | None = None,
+        approve_manual_review: bool = False,
     ) -> CampaignOutcome:
         try:
-            outcome = self._render_known(campaign, mode=mode, url=url, images=images, resume=resume)
+            outcome = self._render_known(
+                campaign,
+                mode=mode,
+                url=url,
+                images=images,
+                resume=resume,
+                gate=gate,
+                assets=assets,
+                destination=destination,
+                caption=caption,
+                hashtags=hashtags,
+                platform=platform,
+                approve_manual_review=approve_manual_review,
+            )
         except Exception as error:
             return _error_outcome(
                 campaign,
@@ -213,23 +277,78 @@ class CampaignManager:
         url: str | None,
         images: Sequence[Path] | None,
         resume: bool = False,
+        gate: Gate | None = None,
+        assets: AssetRegistry | None = None,
+        destination: Path | None = None,
+        caption: str | None = None,
+        hashtags: Sequence[str] = (),
+        platform: Platform | None = None,
+        approve_manual_review: bool = False,
     ) -> CampaignOutcome:
+        pipeline_result: PipelineResult | None = None
+        slideshow_result: SlideshowResult | None = None
         if mode == "long_video":
+            pipeline_result = self._run_long_video(url, resume=resume)
+            final_video = pipeline_result.final_video
+        elif mode == "slideshow":
+            slideshow_result = self._run_slideshow(images, resume=resume)
+            final_video = slideshow_result.final_video
+        else:
+            msg = f"modo de video no soportado: {mode!r}"
+            raise CampaignManagerError(msg)
+
+        effective_gate = gate if gate is not None else self._gate
+        effective_dest = destination if destination is not None else self._destination
+        effective_assets = assets if assets is not None else self._assets
+
+        if effective_gate is not None:
+            from kliptych.assets import AssetRegistry
+            from kliptych.exporter import ExportStatus, export_delivery
+
+            dest = effective_dest if effective_dest is not None else Path("delivery")
+            reg = effective_assets if effective_assets is not None else AssetRegistry(dest.parent)
+            contract = campaign.contract
+            if contract is None:
+                msg = f"la campaña {campaign.campaign_id} no tiene contrato validado"
+                raise CampaignManagerError(msg)
+
+            pieces = _build_pieces(
+                campaign=campaign,
+                contract=contract,
+                final_video=final_video,
+                caption=caption,
+                hashtags=hashtags,
+                platform=platform,
+            )
+            delivery_report = export_delivery(
+                contract=contract,
+                pieces=pieces,
+                gate=effective_gate,
+                assets=reg,
+                destination=dest,
+                approve_manual_review=approve_manual_review,
+            )
+            status = (
+                CampaignStatus.COMPLETED
+                if delivery_report.status is ExportStatus.EXPORTED
+                else CampaignStatus.BLOCKED
+            )
             return CampaignOutcome(
                 campaign_id=campaign.campaign_id,
                 archetype=Archetype.KNOWN,
-                status=CampaignStatus.COMPLETED,
-                pipeline_result=self._run_long_video(url, resume=resume),
+                status=status,
+                pipeline_result=pipeline_result,
+                slideshow_result=slideshow_result,
+                delivery_report=delivery_report,
             )
-        if mode == "slideshow":
-            return CampaignOutcome(
-                campaign_id=campaign.campaign_id,
-                archetype=Archetype.KNOWN,
-                status=CampaignStatus.COMPLETED,
-                slideshow_result=self._run_slideshow(images, resume=resume),
-            )
-        msg = f"modo de video no soportado: {mode!r}"
-        raise CampaignManagerError(msg)
+
+        return CampaignOutcome(
+            campaign_id=campaign.campaign_id,
+            archetype=Archetype.KNOWN,
+            status=CampaignStatus.COMPLETED,
+            pipeline_result=pipeline_result,
+            slideshow_result=slideshow_result,
+        )
 
     def _process_proposal(
         self,
@@ -285,6 +404,53 @@ class CampaignManager:
             msg = "no hay orquestador de slideshow configurado"
             raise CampaignManagerError(msg)
         return video_orchestrator.run_slideshow(images, resume=resume)
+
+
+def _piece_caption(brief: str, rules: PlatformRules, caption: str | None) -> str:
+    if caption is not None:
+        return caption
+    req_mentions = dict.fromkeys([*rules.required_mentions, *rules.caption_rules.must_mention])
+    mentions_str = " ".join(req_mentions)
+    tags_str = " ".join(dict.fromkeys(rules.required_hashtags))
+    first = f"{rules.caption_rules.first_line}\n" if rules.caption_rules.first_line else ""
+    composed = f"{first}{brief} {mentions_str} {tags_str}".strip()
+    return composed or (brief or "video")
+
+
+def _piece_id(campaign_id: str, platform: Platform, *, multiple_platforms: bool) -> str:
+    raw = f"{campaign_id}-{platform.value}" if multiple_platforms else campaign_id
+    return raw[:_MAX_PIECE_ID_LENGTH] if len(raw) > _MAX_PIECE_ID_LENGTH else raw
+
+
+def _build_pieces(
+    *,
+    campaign: Campaign,
+    contract: Contract,
+    final_video: Path,
+    caption: str | None,
+    hashtags: Sequence[str],
+    platform: Platform | None,
+) -> list[Piece]:
+    from kliptych.gate.models import Piece
+
+    platforms = [platform] if platform is not None else list(contract.platforms.keys())
+    multiple = len(platforms) > 1
+    pieces: list[Piece] = []
+    for plat in platforms:
+        plat_rules = contract.platforms[plat]
+        piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
+        piece_tags = tuple(hashtags) if hashtags else tuple(plat_rules.required_hashtags)
+        pieces.append(
+            Piece(
+                piece_id=_piece_id(campaign.campaign_id, plat, multiple_platforms=multiple),
+                platform=plat,
+                caption=piece_caption,
+                hashtags=piece_tags,
+                subtitle_text=None,
+                artifact_path=final_video,
+            )
+        )
+    return pieces
 
 
 def _error_outcome(campaign: Campaign, message: str, archetype: Archetype) -> CampaignOutcome:
