@@ -77,11 +77,42 @@ The Kliptych pipeline is organized into modular, decoupled layers with strict se
 ## Key Features
 
 - 🛡️ **Zero Auto-Merge Guarantee**: The AI proposes code; humans dispose. When Kliptych discovers new campaign variants, it authors a git branch, generates schemas, logs variations, and opens a GitHub PR. It contains zero methods to approve or merge pull requests—the human engineer retains ultimate production control.
-- 💾 **Checkpointing & Resumability**: High-volume video pipelines shouldn't restart from zero after an interruption. Every pipeline stage writes state checkpoints atomically (`.state.json`). Jobs resume instantly (`--resume`) from the last completed stage or restart clean (`--restart`).
+- 💾 **Atomic Checkpointing & Resumability**: Every pipeline stage commits state atomically (`mkstemp` + `Path.replace()`), surviving power loss and `kill -9`. On `--resume`, the engine validates `st_size > 0` and Pydantic schemas; corrupt artifacts (0 bytes or truncated JSON) trigger automatic single-stage regeneration.
+- 🎮 **Zero VRAM Contention (4GB Target)**: MediaPipe runs strictly on CPU, while `faster-whisper` (int8) and `h264_nvenc` use GPU sequentially, NOT simultaneously. Explicit `cuda.empty_cache()` is called after transcription completes before NVENC rendering begins, preventing OOM on 4GB VRAM.
 - ⚡ **Zero `shell=True` Security**: Every external invocation (`ffmpeg`, `ffprobe`, `yt-dlp`, `git`, `gh`) passes arguments as explicit lists (`list[str]`). Shell interpolation and injection vectors are completely eliminated from the codebase.
-- 🧪 **97%+ Test Coverage & Hermetic CI**: Tested across 980+ unit and integration tests under strict `-ra --cov-fail-under=90` enforcement. The CI suite runs with complete network isolation using loopback fixtures and recorded model replays.
-- 🧹 **Deterministic Cleanup & Atomic Writes**: All intermediate files (`.part`, `.ass`, temporary clips) are tracked via `_CleanupRegistry` and purged in `finally` blocks. Final delivery artifacts are swapped atomically via `Path.replace`.
+- 🧪 **97.42% Test Coverage & Hermetic CI**: Tested across 988 unit and integration tests under strict `-ra --cov-fail-under=90` enforcement. The CI suite runs with complete network isolation using loopback fixtures and recorded model replays.
+- 🧹 **Cleanup Registry & Storage Lifecycle**: On success, `_CleanupRegistry` purges ALL intermediate files; on failure, heavy artifacts (downloads, transcripts) are preserved for instant `--resume` recovery. The `gc.py` module (`kliptych clean --days N`) acts as a TTL-based garbage collector for abandoned failed runs.
 - 🧰 **Production CLI & Centralized Observability**: Full structured command suite (`env`, `ingest`, `run`, `campaign`, `clean`) with configurable logging levels (`--verbose`, `--quiet`) and automated disk garbage collection with TTL pruning.
+
+---
+
+## Checkpointing & Resumability
+
+High-volume video processing cannot afford to start from scratch when interrupted by system reboots, network drops, or unhandled exceptions. Kliptych implements an atomic, self-healing checkpointing and resume mechanism:
+
+- **Atomic State Writes**: Every pipeline stage writes its state checkpoints (`checkpoint.json`) and intermediate JSON manifests to a sibling temporary file via `tempfile.mkstemp` before committing them via `Path.replace()`. Sudden interruptions (`kill -9`, power loss) cannot corrupt or leave partially written state files on disk.
+- **Integrity Validation on Resume**: When resumed with `--resume`, the engine validates stage artifacts before skipping execution: it verifies physical file existence and non-zero size (`st_size > 0`), and executes Pydantic schema validation (`model_validate_json`).
+- **Targeted Single-Stage Regeneration**: If an artifact is corrupt (0 bytes, truncated JSON, or schema mismatch), only that individual stage is automatically invalidated and regenerated; all previously verified valid artifacts are safely reused.
+
+---
+
+## VRAM Lifecycle (Zero VRAM Contention)
+
+Kliptych is explicitly engineered to operate deterministically on consumer GPUs with a strict **4GB VRAM target**:
+
+- **Strict CPU/GPU Separation**: MediaPipe face detection and facial landmark tracking run strictly on the CPU, eliminating GPU memory footprint during subject tracking and reframe analysis.
+- **Sequential GPU Execution**: Heavy GPU workloads—speech transcription via `faster-whisper` (`small` int8) and hardware video encoding via `h264_nvenc`—use the GPU sequentially, NOT simultaneously.
+- **Explicit Memory Flush**: Explicit `cuda.empty_cache()` is called immediately after transcription completes, purging allocated VRAM before NVENC rendering begins. This avoids concurrent allocations and completely prevents Out-of-Memory (OOM) failures on 4GB targets.
+
+---
+
+## Cleanup Registry & Storage Lifecycle
+
+Kliptych coordinates temporary file management and failure recovery across three distinct tiers:
+
+- **Deterministic Success Purge**: On pipeline success, `_CleanupRegistry` purges ALL intermediate files (`.part` downloads, temporary audio/video clips, `.ass` subtitles, intermediate reframe renders) in `finally` blocks. Final delivery packages are published atomically via `Path.replace()`.
+- **Targeted Failure Preservation**: When a pipeline stage fails, `_CleanupRegistry` selectively purges ephemeral scratch files while deliberately preserving heavy artifacts (downloaded source media, extracted audio tracks, transcripts) for instant `--resume` recovery without re-downloading or re-transcribing.
+- **TTL Garbage Collection (`gc.py`)**: Abandoned failed runs or orphaned temporary workspaces are managed through `kliptych clean --days N` (implemented in `gc.py`), a TTL-based garbage collector that scans directory trees and safely reclaims disk space based on directory mtime thresholds.
 
 ---
 
