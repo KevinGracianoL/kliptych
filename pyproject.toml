@@ -130,6 +130,11 @@ ignore = [
     # documentada se traduce de inmediato a IngestError conservando la causa.
     "blind-except",
 ]
+"src/kliptych/intelligence.py" = [
+    # classify delega en _complete, que es quien lanza los errores; la sección
+    # Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/pipeline.py" = [
     # run_given_clips delega el ensamblado y la exportación; PipelineError se
     # lanza en el helper _resolved y la sección Raises documenta el contrato.
