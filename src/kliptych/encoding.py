@@ -51,3 +51,50 @@ def audio_and_container_arguments() -> tuple[str, ...]:
         Los argumentos de ffmpeg para audio AAC y ``faststart``.
     """
     return ("-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart")
+
+
+def audio_injection_arguments(*, mix_ratio: float) -> tuple[str, ...]:
+    """Devuelve los argumentos que reemplazan o mezclan la pista de audio.
+
+    Con ``mix_ratio`` igual o superior a ``1.0`` la pista externa reemplaza a la
+    original (``-map 1:a:0``) y ``-shortest`` recorta al vídeo. Con un valor
+    intermedio ambas pistas se mezclan con ``amix`` y un volumen proporcional:
+    ``1 - mix_ratio`` para la original y ``mix_ratio`` para la externa.
+
+    Args:
+        mix_ratio: Peso de la pista externa en la mezcla, en ``[0.0, 1.0]``.
+
+    Returns:
+        Los argumentos de ffmpeg posteriores a los dos ``-i`` de entrada.
+    """
+    if mix_ratio >= 1.0:
+        return (
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            *audio_and_container_arguments(),
+            "-shortest",
+        )
+    filter_graph = (
+        f"[0:a]volume={_volume(1.0 - mix_ratio)}[original];"
+        f"[1:a]volume={_volume(mix_ratio)}[external];"
+        "[original][external]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+    )
+    return (
+        "-filter_complex",
+        filter_graph,
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "copy",
+        *audio_and_container_arguments(),
+    )
+
+
+def _volume(value: float) -> str:
+    return f"{value:.3f}"

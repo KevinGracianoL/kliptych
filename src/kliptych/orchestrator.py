@@ -25,6 +25,7 @@ from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
+    audio_injection_arguments,
     video_encoder_arguments,
 )
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
@@ -85,6 +86,14 @@ class PipelineConfig:
             inyecta un reframer.
         download_timeout_s: Timeout máximo de la descarga, en segundos.
         download_max_size_bytes: Tamaño máximo del vídeo descargado, en bytes.
+        audio_locked: Si se debe inyectar una pista de audio externa en el vídeo
+            final (modo audio obligatorio).
+        audio_track_path: Pista de audio local a inyectar; mutuamente excluyente
+            con ``audio_track_url``.
+        audio_track_url: URL http/https de la pista de audio a descargar e
+            inyectar; mutuamente excluyente con ``audio_track_path``.
+        audio_mix_ratio: Peso de la pista externa: ``1.0`` la reemplaza, ``0.0``
+            deja la original y un valor intermedio las mezcla.
     """
 
     output_dir: Path
@@ -93,6 +102,20 @@ class PipelineConfig:
     face_model_path: Path | None = None
     download_timeout_s: float = 600.0
     download_max_size_bytes: int = 2 * 1024**3
+    audio_locked: bool = False
+    audio_track_path: Path | None = None
+    audio_track_url: str | None = None
+    audio_mix_ratio: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Valida la proporción de mezcla de la pista externa.
+
+        Raises:
+            ValueError: Si ``audio_mix_ratio`` queda fuera de ``[0.0, 1.0]``.
+        """
+        if not 0.0 <= self.audio_mix_ratio <= 1.0:
+            msg = f"audio_mix_ratio fuera de rango [0.0, 1.0]: {self.audio_mix_ratio}"
+            raise ValueError(msg)
 
 
 class LongVideoModel(Protocol):
@@ -345,6 +368,16 @@ def _run_stages(
     segment = _primary_segment(selection)
     clip = _cut_segment(source, segment=segment, render=config.render, registry=registry)
     reframe, reframed = _reframe(clip, reframer=dependencies.reframer, registry=registry)
+    with_audio = (
+        _inject_audio(
+            reframed,
+            config=config,
+            downloader=dependencies.downloader,
+            registry=registry,
+        )
+        if config.audio_locked
+        else reframed
+    )
     subtitles = _write_subtitles(
         transcript,
         segment=segment,
@@ -353,7 +386,7 @@ def _run_stages(
         registry=registry,
     )
     final_video = _burn(
-        reframed,
+        with_audio,
         subtitles=subtitles,
         renderer=dependencies.subtitle_renderer,
         output_dir=config.output_dir,
@@ -466,6 +499,90 @@ def _reframe(
         result = reframer.analyze(clip)
         _ = reframer.render(video=clip, destination=destination, result=result)
     return result, destination
+
+
+def _inject_audio(
+    video: Path,
+    *,
+    config: PipelineConfig,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Inyecta la pista externa reemplazando o mezclando la original.
+
+    La pista se resuelve desde ``audio_track_path`` o ``audio_track_url`` y el
+    render escribe en un temporal hermano registrado para limpieza. El vídeo se
+    copia y solo se recodifica el audio.
+
+    Args:
+        video: Vídeo reframeado sin la pista externa.
+        config: Configuración con la pista, la proporción y el render.
+        downloader: Descargador acotado para pistas entregadas por URL.
+        registry: Registro de temporales para limpiar la pista y el resultado.
+
+    Returns:
+        La ruta del vídeo con la pista externa inyectada.
+
+    Raises:
+        PipelineError: Si la pista no existe, no se configuró ninguna o ffmpeg
+            falla.
+    """
+    track = _resolve_audio_track(config, downloader=downloader, registry=registry)
+    destination = registry.register(_temporary_path(video.with_name("audio_injected.mp4")))
+    argv = [
+        config.render.ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(video),
+        "-i",
+        str(track),
+    ]
+    argv += list(audio_injection_arguments(mix_ratio=config.audio_mix_ratio))
+    argv.append(str(destination))
+    with _translated("inyección de audio"):
+        _run_ffmpeg(argv, render=config.render)
+    return destination
+
+
+def _resolve_audio_track(
+    config: PipelineConfig,
+    *,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Resuelve la pista de audio externa, descargándola si llega por URL.
+
+    Args:
+        config: Configuración con la ruta local o la URL de la pista.
+        downloader: Descargador acotado que se usa cuando la pista es una URL.
+        registry: Registro donde se anota la pista descargada como temporal.
+
+    Returns:
+        La ruta local de la pista de audio.
+
+    Raises:
+        PipelineError: Si se configuraron ambas fuentes, ninguna o la ruta no
+            existe.
+    """
+    if config.audio_track_path is not None and config.audio_track_url is not None:
+        msg = "audio_locked acepta audio_track_path o audio_track_url, no ambos"
+        raise PipelineError(msg)
+    if config.audio_track_path is not None:
+        if not config.audio_track_path.is_file():
+            msg = f"la pista de audio no existe: {config.audio_track_path}"
+            raise PipelineError(msg)
+        return config.audio_track_path
+    if config.audio_track_url is not None:
+        destination = registry.register(_temporary_path(config.output_dir / "audio_track.mp3"))
+        with _translated("descarga de audio"):
+            _ = downloader.download_video(url=config.audio_track_url, destination=destination)
+        return destination
+    msg = "audio_locked requiere audio_track_path o audio_track_url"
+    raise PipelineError(msg)
 
 
 def _write_subtitles(
