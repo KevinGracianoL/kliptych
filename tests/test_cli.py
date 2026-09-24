@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from kliptych.__main__ import main
-from kliptych.campaign_manager import CampaignManager, CampaignOutcome
+from kliptych.campaign_manager import CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.git_proposals import PullRequest
 from kliptych.intelligence import Archetype

@@ -2,23 +2,31 @@ r"""Punto de entrada de línea de comandos de Kliptych.
 
 La salida JSON es ASCII-safe (escapes ``\uXXXX``): así stdout y stderr se
 pueden redirigir a otro proceso sin depender del codepage de la consola.
+A partir de F1-PR1, todo output pasa por logging (prohibido ``print()``).
 """
 
 import argparse
 import json
+import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 from pydantic import ValidationError
 
 from kliptych import __version__
 from kliptych.assembler import AssembleError
+from kliptych.campaign_manager import CampaignManager, CampaignOutcome
+from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
+from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
+from kliptych.intelligence import LLMCampaignClassifier
+from kliptych.logging_setup import setup_logging
 from kliptych.pipeline import PipelineError, RunRequest, RunResult, run_given_clips
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
@@ -30,12 +38,31 @@ from kliptych.runtime import (
     RecordedModel,
 )
 
+logger = logging.getLogger("kliptych.cli")
 
-def main(argv: Sequence[str] | None = None) -> int:
+
+@runtime_checkable
+class _CampaignManagerProtocol(Protocol):
+    def process(
+        self,
+        campaign: Campaign,
+        *,
+        mode: str,
+        url: str | None,
+        images: Sequence[Path] | None,
+    ) -> CampaignOutcome: ...
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    manager: _CampaignManagerProtocol | None = None,
+) -> int:
     """Ejecuta la CLI de Kliptych.
 
     Args:
         argv: Argumentos de línea de comandos; por defecto ``sys.argv``.
+        manager: CampaignManager inyectable para tests (DI).
 
     Returns:
         Código de salida del proceso (``0`` cuando la ejecución fue válida).
@@ -45,6 +72,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Pipeline headless de Kliptych.",
     )
     _ = parser.add_argument("--version", action="version", version=__version__)
+    _ = parser.add_argument("--verbose", "-v", action="store_true", help="activa logging DEBUG")
+    _ = parser.add_argument("--quiet", "-q", action="store_true", help="solo muestra ERROR")
     subcommands = parser.add_subparsers(dest="command")
     _ = subcommands.add_parser("env", help="detecta el entorno local y lo imprime como JSON")
     ingest_parser = subcommands.add_parser(
@@ -68,39 +97,98 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="raíz del workspace (por defecto KLIPTYCH_ROOT o el directorio actual)",
     )
+    campaign_parser = subcommands.add_parser(
+        "campaign", help="procesa una campaña mediante clasificación y enrutamiento inteligente"
+    )
+    _ = campaign_parser.add_argument("brief", help="ruta del brief (txt, md, pdf, docx)")
+    _ = campaign_parser.add_argument("--out", required=True, help="directorio de salida")
+    _ = campaign_parser.add_argument(
+        "--mode",
+        default="long_video",
+        choices=["long_video", "repost", "slideshow"],
+        help="modo de procesamiento (default: long_video)",
+    )
+    _ = campaign_parser.add_argument(
+        "--url", default=None, help="URL del vídeo fuente (modo long_video)"
+    )
     args = parser.parse_args(argv)
+    setup_logging(
+        verbose=cast("bool", getattr(args, "verbose", False)),
+        quiet=cast("bool", getattr(args, "quiet", False)),
+    )
     command = cast("str | None", getattr(args, "command", None))
     if command == "env":
-        report = detect_environment(SubprocessRunner())
-        print(json.dumps(report.model_dump(mode="json"), indent=2))
-        return 0
+        return _cmd_env()
     if command == "ingest":
-        brief_path = cast("str", getattr(args, "path", ""))
-        try:
-            brief = (
-                ingest_bytes(sys.stdin.buffer.read(MAX_BRIEF_BYTES + 1), source="<stdin>")
-                if brief_path == "-"
-                else ingest_file(Path(brief_path))
-            )
-        except IngestError as error:
-            print(json.dumps({"error": str(error)}, indent=2), file=sys.stderr)
-            return 1
-        print(
-            json.dumps(
-                {
-                    "source": brief.source,
-                    "media_type": brief.media_type,
-                    "sha256": brief.sha256,
-                    "chars": len(brief.text),
-                    "text": brief.text,
-                },
-                indent=2,
-            )
-        )
-        return 0
+        return _cmd_ingest(args)
     if command == "run":
         return _run_command(args)
+    if command == "campaign":
+        return _cmd_campaign(args, manager=manager)
     parser.print_help()
+    return 0
+
+
+def _cmd_env() -> int:
+    report = detect_environment(SubprocessRunner())
+    _ = sys.stdout.write(json.dumps(report.model_dump(mode="json"), indent=2) + "\n")
+    return 0
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    brief_path = cast("str", getattr(args, "path", ""))
+    try:
+        brief = (
+            ingest_bytes(sys.stdin.buffer.read(MAX_BRIEF_BYTES + 1), source="<stdin>")
+            if brief_path == "-"
+            else ingest_file(Path(brief_path))
+        )
+    except IngestError as error:
+        _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
+        return 1
+    _ = sys.stdout.write(
+        json.dumps(
+            {
+                "source": brief.source,
+                "media_type": brief.media_type,
+                "sha256": brief.sha256,
+                "chars": len(brief.text),
+                "text": brief.text,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol | None) -> int:
+    brief_path = cast("str", getattr(args, "brief", ""))
+    mode = cast("str", getattr(args, "mode", "long_video"))
+    url = cast("str | None", getattr(args, "url", None))
+    try:
+        brief = ingest_file(Path(brief_path))
+    except IngestError:
+        logger.exception("Error al ingerir el brief de campaña")
+        return 1
+    logger.info("Procesando campaña %s en modo %s", Path(brief_path).name, mode)
+    campaign = Campaign(
+        campaign_id=brief.sha256[:12],
+        brief=brief.text,
+        status=CampaignStatus.PENDING,
+    )
+    active_manager = manager if manager is not None else _build_campaign_manager()
+    result = active_manager.process(campaign, mode=mode, url=url, images=None)
+    if result.error is not None:
+        logger.error("La campaña falló: %s", result.error)
+        return 1
+    if result.pull_request is not None:
+        logger.info("Propuesta creada: %s", result.pull_request.url)
+        return 0
+    if result.pipeline_result is not None:
+        logger.info("Video final: %s", result.pipeline_result.final_video)
+        return 0
+    logger.info("Estado: %s", result.status.value)
     return 0
 
 
@@ -124,9 +212,9 @@ def _run_command(args: argparse.Namespace) -> int:
         )
         result = run_given_clips(model=model, settings=settings, request=request)
     except (IngestError, ModelError, PipelineError, AssembleError, ExportError) as error:
-        print(json.dumps({"error": str(error)}, indent=2), file=sys.stderr)
+        _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
         return 1
-    print(json.dumps(_run_payload(result), indent=2))
+    _ = sys.stdout.write(json.dumps(_run_payload(result), indent=2) + "\n")
     return 0
 
 
@@ -147,6 +235,29 @@ def _build_model(recorded: str | None) -> tuple[CampaignModel, str]:
         return model, RecordedModel.model_version
     backend = OpenAIChatModel.from_env()
     return backend, backend.model_version
+
+
+def _build_campaign_manager() -> _CampaignManagerProtocol:
+    source = os.environ
+    missing = [
+        name
+        for name in ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
+        if not source.get(name)
+    ]
+    if missing:
+        msg = f"faltan variables de entorno: {', '.join(missing)}"
+        raise RuntimeError(msg)
+    classifier = LLMCampaignClassifier(
+        base_url=source["KLIPTYCH_LLM_BASE_URL"],
+        api_key=source["KLIPTYCH_LLM_API_KEY"],
+        model=source["KLIPTYCH_LLM_MODEL"],
+    )
+    repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
+    provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
+    return CampaignManager(
+        classifier=classifier,
+        proposal_engine=ProposalEngine(provider=provider),
+    )
 
 
 def _run_payload(result: RunResult) -> dict[str, object]:
