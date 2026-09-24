@@ -81,6 +81,21 @@ ignore = [
     # Raises documenta el contrato público.
     "docstring-extraneous-exception",
 ]
+"src/kliptych/orchestrator.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # Frontera de etapa: cualquier fallo externo se traduce a PipelineError
+    # conservando la causa y se re-lanza de inmediato.
+    "blind-except",
+    # run_long_video compone los módulos C2-C4 con dependencias inyectables.
+    "too-many-arguments",
+    # las etapas delegan en helpers que lanzan PipelineError; la sección Raises
+    # documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/segment.py" = [
     # build_prompt delega en _bounds_from, que lanza SegmentSelectionError; la
     # sección Raises documenta el contrato público.
@@ -228,6 +243,19 @@ ignore = [
     # comando documentado en el README existe.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_orchestrator.py" = [
+    # subprocess se usa solo para CompletedProcess/TimeoutExpired con ffmpeg
+    # simulado; lista de argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_orchestrator_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético local.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
 ]
 "tests/test_pipeline.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
