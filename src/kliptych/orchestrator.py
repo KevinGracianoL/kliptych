@@ -443,7 +443,20 @@ def _run_stages(
             selector=dependencies.selector,
         )
     segment = _primary_segment(selection)
-    clip = _cut_segment(source, segment=segment, render=config.render, registry=registry)
+    passthrough = (
+        config.repost_mode and not config.audio_locked and not _needs_reframe(source, config.render)
+    )
+    if passthrough:
+        # Repost de un vídeo ya 9:16 sin audio externo: el segmento es el vídeo
+        # completo y se copia sin recodificar para preservar la calidad.
+        clip = _passthrough(
+            source,
+            output_dir=config.output_dir,
+            render=config.render,
+            registry=registry,
+        )
+    else:
+        clip = _cut_segment(source, segment=segment, render=config.render, registry=registry)
     reframe: ReframeResult | None = None
     reframed: Path
     if config.repost_mode and not _needs_reframe(clip, config.render):
@@ -531,7 +544,7 @@ def _probe_video(video: Path, *, render: RenderConfig) -> _VideoInfo:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height:format=duration",
+        "stream=width,height:stream_side_data=rotation:format=duration",
         "-of",
         "default=noprint_wrappers=1",
         str(video),
@@ -560,6 +573,9 @@ def _probe_video(video: Path, *, render: RenderConfig) -> _VideoInfo:
     width = _probe_dimension(fields.get("width"), video=video)
     height = _probe_dimension(fields.get("height"), video=video)
     duration_s = _probe_duration(fields.get("duration"), video=video)
+    rotation = _probe_rotation(fields.get("rotation"))
+    if rotation in {90, 270, -90}:
+        width, height = height, width
     if width <= 0 or height <= 0:
         msg = f"dimensiones inválidas en {video}: {width}x{height}"
         raise PipelineError(msg)
@@ -591,6 +607,24 @@ def _probe_duration(raw: str | None, *, video: Path) -> float:
     except ValueError:
         msg = f"no se pudo leer la duración de {video}: {raw!r}"
         raise PipelineError(msg) from None
+
+
+def _probe_rotation(raw: str | None) -> int:
+    """Parsea el ángulo de rotación de los metadatos del stream.
+
+    Args:
+        raw: Valor crudo del campo ``rotation`` de la Display Matrix, o ``None``
+            si no aparece.
+
+    Returns:
+        El ángulo de rotación en grados, o ``0`` si falta o no es un entero.
+    """
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
 
 
 def _is_vertical(width: int, height: int) -> bool:
@@ -729,6 +763,48 @@ def _cut_segment(
     argv += list(audio_and_container_arguments())
     argv.append(str(destination))
     with _translated("corte del segmento"):
+        _run_ffmpeg(argv, render=render)
+    return destination
+
+
+def _passthrough(
+    video: Path,
+    *,
+    output_dir: Path,
+    render: RenderConfig,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Copia el vídeo sin recodificar (stream copy).
+
+    Args:
+        video: Ruta del vídeo fuente ``9:16`` que se copia tal cual.
+        output_dir: Directorio de salida donde se crea el temporal.
+        render: Configuración con el binario y el timeout del render.
+        registry: Registro del temporal para limpieza.
+
+    Returns:
+        La ruta del vídeo copiado sin recodificar.
+
+    Raises:
+        PipelineError: Si ffmpeg no está disponible o falla.
+    """
+    destination = registry.register(_temporary_path(output_dir / "passthrough.mp4"))
+    argv = [
+        render.ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(video),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+    with _translated("passthrough"):
         _run_ffmpeg(argv, render=render)
     return destination
 

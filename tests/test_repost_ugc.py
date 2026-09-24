@@ -164,9 +164,10 @@ def _reframe_result() -> ReframeResult:
 
 @dataclass
 class _Harness:
-    """Bitácora de llamadas y respuestas simuladas del sondeo."""
+    """Bitácora de llamadas, comandos y respuestas simuladas del sondeo."""
 
     events: list[str] = field(default_factory=list)
+    commands: list[list[str]] = field(default_factory=list)
     probe_stdout: str = _DEFAULT_PROBE
     probe_returncode: int = 0
     ffmpeg_returncode: int = 0
@@ -281,6 +282,7 @@ class _SubtitleRenderer:
 def _ffmpeg(harness: _Harness) -> Callable[..., object]:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
+        harness.commands.append(list(argv))
         if str(argv[0]).lower().endswith("ffprobe"):
             harness.events.append("probe")
             return subprocess.CompletedProcess(
@@ -293,8 +295,10 @@ def _ffmpeg(harness: _Harness) -> Callable[..., object]:
             tag = "cut"
         elif "-filter_complex" in argv:
             tag = "inject_mix"
-        else:
+        elif "-map" in argv:
             tag = "inject_replace"
+        else:
+            tag = "passthrough"
         harness.events.append(tag)
         _ = Path(argv[-1]).write_bytes(b"render")
         return subprocess.CompletedProcess(
@@ -367,7 +371,14 @@ def test_repost_skips_transcribe_detect_and_select(
     harness = _Harness()
     _install(monkeypatch, harness)
     result = _run(harness.events, _config(tmp_path))
-    assert harness.events == [f"download:{_URL}", "probe", "cut", "probe"]
+    assert harness.events == [
+        f"download:{_URL}",
+        "probe",
+        "probe",
+        "passthrough",
+        "probe",
+    ]
+    assert "cut" not in harness.events
     assert "transcribe" not in harness.events
     assert "detect" not in harness.events
     assert "build_prompt" not in harness.events
@@ -392,6 +403,26 @@ def test_repost_skips_reframe_when_vertical(
     assert "analyze" not in harness.events
     assert "render" not in harness.events
     assert result.reframe is None
+
+
+def test_repost_vertical_uses_stream_copy_passthrough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness(probe_stdout="width=1080\nheight=1920\nduration=2.000000\n")
+    _install(monkeypatch, harness)
+    result = _run(harness.events, _config(tmp_path))
+    assert "cut" not in harness.events
+    assert "passthrough" in harness.events
+    copies = [
+        argv for argv in harness.commands if "-c" in argv and argv[argv.index("-c") + 1] == "copy"
+    ]
+    assert len(copies) == 1
+    argv = copies[0]
+    assert "-i" in argv
+    assert argv[argv.index("-i") + 1] == str(tmp_path / "out" / "source.mp4")
+    assert "+faststart" in argv
+    assert result.final_video.is_file()
+    assert _leftovers(tmp_path / "out") == []
 
 
 def test_repost_reframes_when_not_vertical(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -495,6 +526,34 @@ def test_probe_video_reads_dimensions_and_duration(
     assert info.width == 640
     assert info.height == 360
     assert info.duration_s == pytest.approx(3.5)
+
+
+@pytest.mark.parametrize(
+    ("rotation_line", "expected_width", "expected_height"),
+    [
+        ("rotation=90\n", 1080, 1920),
+        ("rotation=270\n", 1080, 1920),
+        ("rotation=-90\n", 1080, 1920),
+        ("rotation=0\n", 1920, 1080),
+        ("rotation=abc\n", 1920, 1080),
+    ],
+)
+def test_probe_video_swaps_dimensions_for_rotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rotation_line: str,
+    expected_width: int,
+    expected_height: int,
+) -> None:
+    monkeypatch.setattr(
+        "kliptych.orchestrator.subprocess.run",
+        _probe_runner(f"width=1920\nheight=1080\n{rotation_line}duration=2.000000\n"),
+    )
+    info = _probe_video(tmp_path / "clip.mp4", render=RenderConfig())
+    assert info.width == expected_width
+    assert info.height == expected_height
+    assert info.duration_s == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize(
