@@ -426,13 +426,20 @@ def _validate_slideshow(
 
     Raises:
         PipelineError: Si la duración no es positiva, ``audio_locked`` está
-            desactivado o no hay imágenes.
+            desactivado, ``audio_mix_ratio`` es menor que ``1.0`` o no hay
+            imágenes.
     """
     if slide_duration_s <= 0:
         msg = f"la duración por slide debe ser positiva: {slide_duration_s}"
         raise PipelineError(msg)
     if not config.audio_locked:
         msg = "el slideshow requiere audio_locked=True"
+        raise PipelineError(msg)
+    if config.audio_mix_ratio < 1.0:
+        msg = (
+            "el slideshow no tiene pista de audio original; requiere "
+            "audio_mix_ratio >= 1.0 (reemplazo total del audio)"
+        )
         raise PipelineError(msg)
     if not images:
         msg = "el slideshow requiere al menos una imagen"

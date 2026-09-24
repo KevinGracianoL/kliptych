@@ -142,6 +142,7 @@ def _config(
     *,
     audio_locked: bool = True,
     audio_track_path: Path | None = None,
+    audio_mix_ratio: float = 1.0,
 ) -> PipelineConfig:
     return PipelineConfig(
         output_dir=tmp_path / "out",
@@ -149,6 +150,7 @@ def _config(
         render=RenderConfig(),
         audio_locked=audio_locked,
         audio_track_path=audio_track_path,
+        audio_mix_ratio=audio_mix_ratio,
     )
 
 
@@ -185,6 +187,12 @@ def test_rejects_non_positive_slide_duration(tmp_path: Path) -> None:
 def test_requires_audio_locked(tmp_path: Path) -> None:
     config = _config(tmp_path, audio_locked=False)
     with pytest.raises(PipelineError, match="audio_locked"):
+        _ = _run(_images(tmp_path), config)
+
+
+def test_rejects_mix_ratio_below_one(tmp_path: Path) -> None:
+    config = _config(tmp_path, audio_locked=True, audio_mix_ratio=0.5)
+    with pytest.raises(PipelineError, match=r"audio_mix_ratio >= 1\.0"):
         _ = _run(_images(tmp_path), config)
 
 
