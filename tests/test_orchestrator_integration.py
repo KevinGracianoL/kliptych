@@ -187,5 +187,6 @@ def test_run_long_video_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert media.width / media.height == pytest.approx(9 / 16, abs=0.02)
     leftovers = [path.name for path in output_dir.iterdir() if ".part-" in path.name]
     assert leftovers == []
+    assert result.subtitles is not None
     assert not result.subtitles.exists()
     assert result.cleaning

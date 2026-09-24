@@ -197,6 +197,19 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"tests/test_repost_ugc.py" = [
+    # subprocess se usa solo para CompletedProcess/TimeoutExpired con ffmpeg y
+    # ffprobe simulados; lista de argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_repost_ugc_integration.py" = [
+    # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
+    # generar los fixtures sintéticos y medir la duración del audio.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "tests/test_audio_locked_integration.py" = [
     # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
     # generar los fixtures sintéticos y medir la duración del audio.
