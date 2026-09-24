@@ -1,5 +1,3 @@
-"""Versión del paquete resuelta desde la metadata instalada."""
+"""Versión del paquete Kliptych."""
 
-from importlib.metadata import version
-
-__version__ = version("kliptych")
+__version__ = "1.0.0"
