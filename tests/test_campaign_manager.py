@@ -642,6 +642,67 @@ def test_known_route_with_gate_and_valid_video_exports_successfully(tmp_path: Pa
     assert (destination / "delivery_report.json").exists()
 
 
+def test_known_route_batch_segments_export_all_valid_pieces(tmp_path: Path) -> None:
+    v0 = tmp_path / "final_00.mp4"
+    v1 = tmp_path / "final_01.mp4"
+    v2 = tmp_path / "final_02.mp4"
+    _ = v0.write_bytes(b"content 0")
+    _ = v1.write_bytes(b"content 1")
+    _ = v2.write_bytes(b"content 2")
+
+    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    campaign = Campaign(campaign_id="camp-batch", brief="brief crudo", contract=contract)
+    classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
+    video_orch = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=Path("source.mp4"),
+            transcript=None,
+            moments=(),
+            selection=SegmentSelection(
+                segments=(
+                    Segment(start_s=0.0, end_s=1.0),
+                    Segment(start_s=1.0, end_s=2.0),
+                    Segment(start_s=2.0, end_s=3.0),
+                ),
+                rationale="batch",
+            ),
+            reframe=None,
+            subtitles=None,
+            final_video=v0,
+            final_videos=(v0, v1, v2),
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    destination = tmp_path / "delivery"
+    assets = AssetRegistry(tmp_path)
+
+    manager = _manager(
+        classifier=classifier,
+        video=video_orch,
+        gate=gate,
+        assets=assets,
+        destination=destination,
+    )
+    outcome = manager.process(
+        campaign,
+        mode="long_video",
+        url=_VIDEO_URL,
+        caption="Mira esto @marca #marca",
+        hashtags=("#marca",),
+    )
+    assert outcome.status is CampaignStatus.COMPLETED
+    assert outcome.delivery_report is not None
+    assert outcome.delivery_report.status is ExportStatus.EXPORTED
+    assert len(outcome.delivery_report.exported) == 3
+    for exp in outcome.delivery_report.exported:
+        assert exp.gate_status is GateStatus.PASSED
+    assert (destination / "camp-test" / "tiktok" / "camp-batch-00.mp4").exists()
+    assert (destination / "camp-test" / "tiktok" / "camp-batch-01.mp4").exists()
+    assert (destination / "camp-test" / "tiktok" / "camp-batch-02.mp4").exists()
+
+
 def test_known_route_with_manual_review_requires_approval(tmp_path: Path) -> None:
     video_path = tmp_path / "rendered.mp4"
     _ = video_path.write_bytes(b"rendered video content")

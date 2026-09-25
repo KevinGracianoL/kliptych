@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Platform, Segment
+from kliptych.contract import ContractDraft, Platform, Segment
 from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus
 from kliptych.resolver import (
     IssueCode,
+    ProvenanceError,
     ResolutionResult,
     ResolutionStatus,
     resolve_contract,
@@ -896,3 +897,117 @@ def test_resolve_segments_empty_for_non_long_video(tmp_path: Path) -> None:
     assert result.contract is not None
     assert result.contract.segments == ()
     assert [issue for issue in result.issues if issue.field.startswith("segments")] == []
+
+
+def _valid_provenance_draft(brief: str, **overrides: object) -> ContractDraft:
+    def _cand(value: object, quote: str) -> dict[str, object]:
+        start = brief.index(quote)
+        end = start + len(quote)
+        return {
+            "value": value,
+            "evidence": {"quote": quote, "start": start, "end": end, "location": "brief.md#l1"},
+            "confidence": "explicit",
+        }
+
+    data: dict[str, object] = {
+        "schema_version": "1.1",
+        "campaign_id": _cand("camp-01", "camp-01"),
+        "format": _cand("video", "video"),
+        "mode": _cand("given_clips", "given_clips"),
+        "platforms": {
+            "tiktok": {
+                "duration": {"min_s": _cand(8, "8s")},
+                "required_hashtags": _cand(["#marca"], "#marca"),
+                "required_mentions": _cand(["@marca"], "@marca"),
+            }
+        },
+        "languages": {"source": _cand("es", "es"), "caption": _cand("es", "es")},
+        "watermark": {
+            "required": _cand(value=False, quote="no_watermark"),
+            "visible_full_video": _cand(value=False, quote="no_watermark"),
+        },
+        "rules": {
+            "hard": _cand(
+                ["duration.min", "caption.required_hashtag", "caption.required_mention"],
+                "hard_rules",
+            ),
+            "recommended": _cand([], "no_rec"),
+            "manual_review": _cand([], "no_rev"),
+        },
+        "assets": {"required": [], "optional": []},
+    }
+    data.update(overrides)
+    return ContractDraft.model_validate(data)
+
+
+_BRIEF_TEXT = (
+    "ID: camp-01 | format: video | mode: given_clips | min: 8s | "
+    "tags: #marca | mentions: @marca | lang: es | wm: no_watermark | "
+    "rules: hard_rules | no_rec | no_rev"
+)
+
+
+def test_resolve_contract_verifies_brief_provenance(tmp_path: Path) -> None:
+    draft = _valid_provenance_draft(_BRIEF_TEXT)
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_BRIEF_TEXT)
+    assert result.status is ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert result.contract.campaign_id == "camp-01"
+
+
+def test_resolve_contract_rejects_fabricated_quote(tmp_path: Path) -> None:
+    draft = _valid_provenance_draft(
+        _BRIEF_TEXT,
+        campaign_id={
+            "value": "camp-01",
+            "evidence": {
+                "quote": "campaña_fantasma_inventada",
+                "start": 0,
+                "end": len("campaña_fantasma_inventada"),
+                "location": "l1",
+            },
+            "confidence": "explicit",
+        },
+    )
+    with pytest.raises(ProvenanceError, match=r"fabricada|no existe"):
+        _ = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_BRIEF_TEXT)
+
+
+def test_resolve_contract_rejects_misaligned_offset(tmp_path: Path) -> None:
+    start = _BRIEF_TEXT.index("camp-01") + 2
+    end = start + len("camp-01")
+    draft = _valid_provenance_draft(
+        _BRIEF_TEXT,
+        campaign_id={
+            "value": "camp-01",
+            "evidence": {
+                "quote": "camp-01",
+                "start": start,
+                "end": end,
+                "location": "l1",
+            },
+            "confidence": "explicit",
+        },
+    )
+    with pytest.raises(ProvenanceError, match=r"desalinead|no coincide|esperaba"):
+        _ = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_BRIEF_TEXT)
+
+
+def test_resolve_contract_rejects_out_of_bounds_offset(tmp_path: Path) -> None:
+    start = len(_BRIEF_TEXT) + 10
+    end = start + len("camp-01")
+    draft = _valid_provenance_draft(
+        _BRIEF_TEXT,
+        campaign_id={
+            "value": "camp-01",
+            "evidence": {
+                "quote": "camp-01",
+                "start": start,
+                "end": end,
+                "location": "l1",
+            },
+            "confidence": "explicit",
+        },
+    )
+    with pytest.raises(ProvenanceError, match=r"rango|longitud"):
+        _ = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_BRIEF_TEXT)

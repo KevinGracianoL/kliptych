@@ -289,10 +289,12 @@ class CampaignManager:
         slideshow_result: SlideshowResult | None = None
         if mode == "long_video":
             pipeline_result = self._run_long_video(url, resume=resume)
-            final_video = pipeline_result.final_video
+            final_videos = getattr(pipeline_result, "final_videos", (pipeline_result.final_video,))
         elif mode == "slideshow":
             slideshow_result = self._run_slideshow(images, resume=resume)
-            final_video = slideshow_result.final_video
+            final_videos = getattr(
+                slideshow_result, "final_videos", (slideshow_result.final_video,)
+            )
         else:
             msg = f"modo de video no soportado: {mode!r}"
             raise CampaignManagerError(msg)
@@ -315,7 +317,7 @@ class CampaignManager:
             pieces = _build_pieces(
                 campaign=campaign,
                 contract=contract,
-                final_video=final_video,
+                final_videos=final_videos,
                 caption=caption,
                 hashtags=hashtags,
                 platform=platform,
@@ -417,8 +419,15 @@ def _piece_caption(brief: str, rules: PlatformRules, caption: str | None) -> str
     return composed or (brief or "video")
 
 
-def _piece_id(campaign_id: str, platform: Platform, *, multiple_platforms: bool) -> str:
-    raw = f"{campaign_id}-{platform.value}" if multiple_platforms else campaign_id
+def _piece_id(
+    campaign_id: str,
+    platform: Platform,
+    *,
+    multiple_platforms: bool,
+    index: int | None = None,
+) -> str:
+    base = f"{campaign_id}-{platform.value}" if multiple_platforms else campaign_id
+    raw = f"{base}-{index:02d}" if index is not None else base
     return raw[:_MAX_PIECE_ID_LENGTH] if len(raw) > _MAX_PIECE_ID_LENGTH else raw
 
 
@@ -426,30 +435,47 @@ def _build_pieces(
     *,
     campaign: Campaign,
     contract: Contract,
-    final_video: Path,
+    final_video: Path | None = None,
+    final_videos: Sequence[Path] | None = None,
     caption: str | None,
     hashtags: Sequence[str],
     platform: Platform | None,
 ) -> list[Piece]:
     from kliptych.gate.models import Piece
 
+    if final_videos is not None:
+        videos = tuple(final_videos)
+    elif final_video is not None:
+        videos = (final_video,)
+    else:
+        msg = "se requiere al menos un video para construir las piezas"
+        raise CampaignManagerError(msg)
+
     platforms = [platform] if platform is not None else list(contract.platforms.keys())
-    multiple = len(platforms) > 1
+    multiple_platforms = len(platforms) > 1
+    multiple_videos = len(videos) > 1
     pieces: list[Piece] = []
-    for plat in platforms:
-        plat_rules = contract.platforms[plat]
-        piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
-        piece_tags = tuple(hashtags) if hashtags else tuple(plat_rules.required_hashtags)
-        pieces.append(
-            Piece(
-                piece_id=_piece_id(campaign.campaign_id, plat, multiple_platforms=multiple),
-                platform=plat,
-                caption=piece_caption,
-                hashtags=piece_tags,
-                subtitle_text=None,
-                artifact_path=final_video,
+    for vid_idx, video in enumerate(videos):
+        index_for_id = vid_idx if multiple_videos else None
+        for plat in platforms:
+            plat_rules = contract.platforms[plat]
+            piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
+            piece_tags = tuple(hashtags) if hashtags else tuple(plat_rules.required_hashtags)
+            pieces.append(
+                Piece(
+                    piece_id=_piece_id(
+                        campaign.campaign_id,
+                        plat,
+                        multiple_platforms=multiple_platforms,
+                        index=index_for_id,
+                    ),
+                    platform=plat,
+                    caption=piece_caption,
+                    hashtags=piece_tags,
+                    subtitle_text=None,
+                    artifact_path=video,
+                )
             )
-        )
     return pieces
 
 

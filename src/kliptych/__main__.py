@@ -206,11 +206,11 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 def _extract_contract(brief_text: str) -> Contract | None:
     try:
         draft = ContractDraft.model_validate_json(brief_text)
-        return resolve_contract(draft, registry=AssetRegistry(Path.cwd())).contract
-    except (ValidationError, ValueError):
-        pass
-    try:
-        return Contract.model_validate_json(brief_text)
+        return resolve_contract(
+            draft,
+            registry=AssetRegistry(Path.cwd()),
+            brief_text=brief_text,
+        ).contract
     except (ValidationError, ValueError):
         return None
 

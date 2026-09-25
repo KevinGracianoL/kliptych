@@ -408,6 +408,35 @@ def test_run_long_video_returns_result(tmp_path: Path, monkeypatch: pytest.Monke
     assert result.cleaning
 
 
+def test_run_long_video_batch_produces_all_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness()
+    injectables = _install(monkeypatch, harness)
+    three_segments = SegmentSelection(
+        segments=(
+            Segment(start_s=0.0, end_s=1.0),
+            Segment(start_s=1.0, end_s=2.0),
+            Segment(start_s=2.0, end_s=3.0),
+        ),
+        rationale="tres tramos",
+    )
+
+    def _fake_parse(_raw: object) -> SegmentSelection:
+        return three_segments
+
+    monkeypatch.setattr(injectables.selector, "parse_response", _fake_parse)
+    result = _run(tmp_path, injectables)
+    assert isinstance(result, PipelineResult)
+    assert len(result.final_videos) == 3
+    assert result.final_videos[0] == tmp_path / "out" / "final_00.mp4"
+    assert result.final_videos[1] == tmp_path / "out" / "final_01.mp4"
+    assert result.final_videos[2] == tmp_path / "out" / "final_02.mp4"
+    assert result.final_video == result.final_videos[0]
+    for video in result.final_videos:
+        assert video.is_file()
+
+
 def test_run_long_video_stage_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     harness = _Harness()
     injectables = _install(monkeypatch, harness)
