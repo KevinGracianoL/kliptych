@@ -8,6 +8,7 @@ con su artefacto correspondiente para garantizar idempotencia en la reanudación
 import os
 import tempfile
 import uuid
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -50,6 +51,8 @@ class PipelineCheckpoint(BaseModel):
     created_at: str
     updated_at: str
     input_fingerprint: str | None = None
+    source_content_hash: str | None = None
+    segment_coords: tuple[tuple[float, float], ...] = ()
 
 
 class PipelineStateManager:
@@ -123,6 +126,44 @@ class PipelineStateManager:
             fingerprint: El digest SHA-256 de las entradas del pipeline.
         """
         self.checkpoint.input_fingerprint = fingerprint
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
+    def set_segment_coords(self, coords: Sequence[tuple[float, float]]) -> None:
+        """Asigna y persiste las coordenadas de los segmentos seleccionados.
+
+        Args:
+            coords: Secuencia de pares (start_s, end_s).
+        """
+        self.checkpoint.segment_coords = tuple((float(s), float(e)) for s, e in coords)
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
+    def set_source_content_hash(self, content_hash: str) -> None:
+        """Asigna y persiste la firma de contenido del video fuente.
+
+        Args:
+            content_hash: Hash o firma del contenido del archivo fuente.
+        """
+        self.checkpoint.source_content_hash = content_hash
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
+    def invalidate_downstream_stages(self) -> None:
+        """Invalida las etapas dependientes del video fuente."""
+        downstream = [
+            PipelineStage.TRANSCRIBE,
+            PipelineStage.MOMENTS,
+            PipelineStage.SELECT,
+            PipelineStage.REFRAME,
+            PipelineStage.SUBTITLES,
+            PipelineStage.COMPLETED,
+        ]
+        for stage in downstream:
+            stage_name = stage.value
+            _ = self.checkpoint.stages.pop(stage_name, None)
+            _ = self.checkpoint.artifacts.pop(stage_name, None)
+        self.checkpoint.segment_coords = ()
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 

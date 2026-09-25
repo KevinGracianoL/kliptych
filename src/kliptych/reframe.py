@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
+    run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
 
@@ -956,30 +957,13 @@ def _run_ffmpeg(
     temporary: Path,
     render: RenderConfig,
 ) -> None:
-    try:
-        completed = subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            timeout=render.timeout_s,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg no está disponible: {render.ffmpeg}"
-        raise ReframeError(msg) from error
-    except subprocess.TimeoutExpired as error:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
-        raise ReframeError(msg) from error
-    except OSError as error:
-        _remove_quietly(temporary)
-        msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
-        raise ReframeError(msg) from error
-    if completed.returncode != 0:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-        raise ReframeError(msg)
+    run_ffmpeg_with_fallback(
+        argv,
+        render=render,
+        temporary=temporary,
+        error_cls=ReframeError,
+        runner=subprocess.run,
+    )
 
 
 def _temporary_path(destination: Path) -> Path:

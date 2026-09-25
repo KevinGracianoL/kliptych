@@ -7,7 +7,9 @@
 5. Procedencia real brief_text vs ContractDraft: rechazo de citas alteradas.
 """
 
+import subprocess
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import override
@@ -39,16 +41,21 @@ from kliptych.contract import (
 from kliptych.contract.draft import ContractDraft, DurationDraft, PlatformDraft
 from kliptych.contract.evidence import Confidence, SourceEvidence
 from kliptych.contract.schema import Segment
+from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
-from kliptych.gate import Gate, GateStatus, Piece
+from kliptych.gate import CheckStatus, Gate, GateStatus, Piece
+from kliptych.gate.checks import DEFAULT_VALIDATORS, CheckOutcome, GateContext
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
+from kliptych.manifest import RunManifest, read_manifest, write_manifest
 from kliptych.orchestrator import PipelineResult, SlideshowResult
 from kliptych.pipeline import PipelineError, RunRequest, run_given_clips
+from kliptych.reframe import ReframeError
 from kliptych.resolver import ProvenanceError, resolve_contract
 from kliptych.runtime import CampaignModel, Caption, PieceContext
 from kliptych.segment import SegmentSelection
+from kliptych.subtitles import SubtitleError
 from tests.support import FakeProbe, make_contract, make_media, make_piece
 
 
@@ -170,8 +177,9 @@ def test_cli_campaign_exits_one_on_blocked_status_despite_pipeline_success(tmp_p
             url: str | None = None,
             resume: bool = False,
             approve_manual_review: bool = False,
+            approved_by: str | None = None,
         ) -> CampaignOutcome:
-            _ = (campaign, mode, url, resume, approve_manual_review)
+            _ = (campaign, mode, url, resume, approve_manual_review, approved_by)
             return blocked_outcome
 
     brief_file = tmp_path / "brief.txt"
@@ -195,6 +203,7 @@ def test_cli_campaign_help_exposes_approve_manual_review() -> None:
     assert exc_info.value.code == 0
     help_text = stream.getvalue()
     assert "--approve-manual-review" in help_text
+    assert "--approved-by" in help_text
 
 
 def test_cli_run_help_exposes_approve_manual_review() -> None:
@@ -204,6 +213,75 @@ def test_cli_run_help_exposes_approve_manual_review() -> None:
     assert exc_info.value.code == 0
     help_text = stream.getvalue()
     assert "--approve-manual-review" in help_text
+    assert "--approved-by" in help_text
+
+
+def test_cli_campaign_approved_by_defaults_and_explicit(tmp_path: Path) -> None:
+    """Verifica que --approve-manual-review asigne cli-operator o el valor explícito."""
+
+    class RecordingManager:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def process(
+            self,
+            campaign: Campaign,
+            *,
+            mode: str = "long_video",
+            url: str | None = None,
+            resume: bool = False,
+            approve_manual_review: bool = False,
+            approved_by: str | None = None,
+        ) -> CampaignOutcome:
+            _ = (mode, url, resume)
+            self.calls.append(
+                {
+                    "approve_manual_review": approve_manual_review,
+                    "approved_by": approved_by,
+                }
+            )
+            return CampaignOutcome(
+                campaign_id=campaign.campaign_id,
+                archetype=Archetype.KNOWN,
+                status=CampaignStatus.COMPLETED,
+            )
+
+    brief_file = tmp_path / "brief.txt"
+    _ = brief_file.write_text("texto del brief", encoding="utf-8")
+
+    # 1. Con --approve-manual-review sin --approved-by -> default "cli-operator"
+    mgr1 = RecordingManager()
+    code1 = main(
+        [
+            "campaign",
+            str(brief_file),
+            "--out",
+            str(tmp_path / "out1"),
+            "--approve-manual-review",
+        ],
+        manager=mgr1,
+    )
+    assert code1 == 0
+    assert mgr1.calls[0]["approve_manual_review"] is True
+    assert mgr1.calls[0]["approved_by"] == "cli-operator"
+
+    # 2. Con --approve-manual-review y --approved-by "auditor-x"
+    mgr2 = RecordingManager()
+    code2 = main(
+        [
+            "campaign",
+            str(brief_file),
+            "--out",
+            str(tmp_path / "out2"),
+            "--approve-manual-review",
+            "--approved-by",
+            "auditor-x",
+        ],
+        manager=mgr2,
+    )
+    assert code2 == 0
+    assert mgr2.calls[0]["approve_manual_review"] is True
+    assert mgr2.calls[0]["approved_by"] == "auditor-x"
 
 
 # ---------------------------------------------------------------------------
@@ -395,3 +473,155 @@ def test_pipeline_and_cli_reject_altered_quotes_against_real_brief(tmp_path: Pat
         ]
     )
     assert code == 1
+
+
+def test_vector_5_json_brief_rejected_in_run_and_campaign(tmp_path: Path) -> None:
+    """Verifica que un brief JSON sea rechazado para evitar auto-validación."""
+    json_brief = tmp_path / "brief.txt"
+    _ = json_brief.write_text('{"campaign_id": "test", "format": "video"}', encoding="utf-8")
+
+    # En campaign debe retornar 1
+    campaign_code = main(["campaign", "--brief", str(json_brief), "--out", str(tmp_path / "out1")])
+    assert campaign_code == 1
+
+    # En run debe retornar 1
+    run_code = main(["run", "--brief", str(json_brief), "--out", str(tmp_path / "out2")])
+    assert run_code == 1
+
+
+def test_audit_10_traceability_in_manual_approval(tmp_path: Path) -> None:
+    """Verifica que al aprobar una pieza PENDING_REVIEW se registre trazabilidad auditable."""
+
+    def manual_review(_context: GateContext) -> CheckOutcome:
+        return CheckOutcome(status=CheckStatus.MANUAL_REVIEW, evidence={"reason": "visual"})
+
+    probe = FakeProbe(info=make_media(duration_s=15.0, has_video=True, has_audio=True))
+    gate = Gate(
+        probe,
+        validators={**DEFAULT_VALIDATORS, "watermark.full_video": manual_review},
+    )
+    contract = make_contract(
+        hard=[
+            "duration.min",
+            "caption.required_hashtag",
+            "caption.required_mention",
+            "watermark.full_video",
+        ]
+    )
+
+    piece = _valid_piece(tmp_path)
+    dest = tmp_path / "delivery_trace"
+
+    report = export_delivery(
+        contract=contract,
+        pieces=[piece],
+        gate=gate,
+        assets=AssetRegistry(tmp_path),
+        destination=dest,
+        approve_manual_review=True,
+        approved_by="auditor-jane",
+    )
+
+    assert report.status is ExportStatus.EXPORTED
+    assert "watermark.full_video" in report.manually_approved_rules
+    assert report.approved_by == "auditor-jane"
+    assert report.approved_at_utc is not None
+    _ = datetime.fromisoformat(report.approved_at_utc)
+
+    assert len(report.exported) == 1
+    exp = report.exported[0]
+    assert "watermark.full_video" in exp.manually_approved_rules
+    assert exp.approved_by == "auditor-jane"
+    assert exp.approved_at_utc == report.approved_at_utc
+
+    # Verificar delivery_report.json persistido
+    report_file = dest / "delivery_report.json"
+    data = report_file.read_text(encoding="utf-8")
+    assert '"manually_approved_rules"' in data
+    assert '"watermark.full_video"' in data
+    assert '"auditor-jane"' in data
+
+    # Verificar también que write_manifest / RunManifest registre estos campos
+    run_dir = tmp_path / "run_test"
+    manifest = RunManifest(
+        run_id="run-1",
+        started_at=datetime.now(UTC),
+        environment=detect_environment(SubprocessRunner()),
+        manually_approved_rules=report.manually_approved_rules,
+        approved_by=report.approved_by,
+        approved_at_utc=report.approved_at_utc,
+    )
+    m_path = write_manifest(manifest, run_dir)
+    loaded = read_manifest(m_path)
+    assert loaded.manually_approved_rules == ("watermark.full_video",)
+    assert loaded.approved_by == "auditor-jane"
+    assert loaded.approved_at_utc == report.approved_at_utc
+
+
+def test_audit_14_nvenc_fallback_in_reframe_and_subtitles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifica que reframe y subtitles usen fallback h264_nvenc -> libx264 ante fallos de NVENC."""
+    calls: list[list[str]] = []
+
+    def mock_subprocess_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        calls.append(list(cmd))
+        if "h264_nvenc" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, returncode=1, stdout="", stderr="CUDA out of memory error"
+            )
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+
+    render = RenderConfig(nvenc_available=True)
+    temp_reframe = tmp_path / "temp_reframe.mp4"
+    _ = temp_reframe.write_bytes(b"temp")
+
+    # 1. Probar fallback con ReframeError
+    reframe_cmd = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "out.mp4",
+    ]
+    run_ffmpeg_with_fallback(
+        reframe_cmd, temporary=temp_reframe, render=render, error_cls=ReframeError
+    )
+    assert len(calls) == 2
+    assert "h264_nvenc" in calls[0]
+    assert "libx264" in calls[1]
+
+    # 2. Probar fallback con SubtitleError
+    calls.clear()
+    temp_subtitles = tmp_path / "temp_sub.mp4"
+    _ = temp_subtitles.write_bytes(b"temp")
+    subtitles_cmd = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "out.mp4",
+    ]
+    run_ffmpeg_with_fallback(
+        subtitles_cmd, temporary=temp_subtitles, render=render, error_cls=SubtitleError
+    )
+    assert len(calls) == 2
+    assert "h264_nvenc" in calls[0]
+    assert "libx264" in calls[1]

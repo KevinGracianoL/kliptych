@@ -171,6 +171,7 @@ class CampaignManager:
         hashtags: Sequence[str] = (),
         platform: Platform | None = None,
         approve_manual_review: bool = False,
+        approved_by: str | None = None,
     ) -> CampaignOutcome:
         """Procesa la campaña según su arquetipo.
 
@@ -193,6 +194,7 @@ class CampaignManager:
             hashtags: Hashtags de la pieza; si se omiten, se infieren del contrato.
             platform: Plataforma específica a entregar; si se omite, entrega todas las del contrato.
             approve_manual_review: Si es True, aprueba piezas en estado PENDING_REVIEW.
+            approved_by: Identificador del operador o sistema que aprueba la revisión manual.
 
         Returns:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
@@ -227,6 +229,7 @@ class CampaignManager:
                 hashtags=hashtags,
                 platform=platform,
                 approve_manual_review=approve_manual_review,
+                approved_by=approved_by,
             )
         return self._process_proposal(campaign, contract, classification)
 
@@ -245,6 +248,7 @@ class CampaignManager:
         hashtags: Sequence[str] = (),
         platform: Platform | None = None,
         approve_manual_review: bool = False,
+        approved_by: str | None = None,
     ) -> CampaignOutcome:
         try:
             outcome = self._render_known(
@@ -260,6 +264,7 @@ class CampaignManager:
                 hashtags=hashtags,
                 platform=platform,
                 approve_manual_review=approve_manual_review,
+                approved_by=approved_by,
             )
         except Exception as error:
             return _error_outcome(
@@ -284,6 +289,7 @@ class CampaignManager:
         hashtags: Sequence[str] = (),
         platform: Platform | None = None,
         approve_manual_review: bool = False,
+        approved_by: str | None = None,
     ) -> CampaignOutcome:
         pipeline_result: PipelineResult | None = None
         slideshow_result: SlideshowResult | None = None
@@ -332,6 +338,7 @@ class CampaignManager:
             assets=reg,
             destination=dest,
             approve_manual_review=approve_manual_review,
+            approved_by=approved_by,
         )
         status = (
             CampaignStatus.COMPLETED

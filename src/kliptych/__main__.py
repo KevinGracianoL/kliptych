@@ -57,6 +57,7 @@ class _CampaignManagerProtocol(Protocol):
         url: str | None = None,
         resume: bool = False,
         approve_manual_review: bool = False,
+        approved_by: str | None = None,
     ) -> CampaignOutcome: ...
 
 
@@ -117,6 +118,11 @@ def main(
         action="store_true",
         help="aprueba piezas con advertencias de revisión manual en el Gate",
     )
+    _ = run_parser.add_argument(
+        "--approved-by",
+        default=None,
+        help="identificador del operador o sistema que aprueba la revisión manual",
+    )
     run_group = run_parser.add_mutually_exclusive_group()
     _ = run_group.add_argument(
         "--resume",
@@ -154,6 +160,11 @@ def main(
         "--approve-manual-review",
         action="store_true",
         help="aprueba piezas con advertencias de revisión manual en el Gate",
+    )
+    _ = campaign_parser.add_argument(
+        "--approved-by",
+        default=None,
+        help="identificador del operador o sistema que aprueba la revisión manual",
     )
     campaign_group = campaign_parser.add_mutually_exclusive_group()
     _ = campaign_group.add_argument(
@@ -231,16 +242,17 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _extract_contract(draft_text: str, *, brief_text: str) -> Contract | None:
-    try:
-        draft = ContractDraft.model_validate_json(draft_text)
-        return resolve_contract(
-            draft,
-            registry=AssetRegistry(Path.cwd()),
-            brief_text=brief_text,
-        ).contract
-    except (ValidationError, ValueError):
-        return None
+def _is_json_document(text: str) -> bool:
+    stripped = text.strip()
+    if (stripped.startswith("{") and stripped.endswith("}")) or (
+        stripped.startswith("[") and stripped.endswith("]")
+    ):
+        try:
+            parsed = cast("object", json.loads(stripped))
+            return isinstance(parsed, (dict, list))
+        except (ValueError, TypeError):
+            return False
+    return False
 
 
 def _load_campaign_contract(
@@ -248,7 +260,7 @@ def _load_campaign_contract(
     contract_draft_path: str | None,
 ) -> tuple[Contract | None, str | None]:
     if contract_draft_path is None:
-        return _extract_contract(brief_text, brief_text=brief_text), None
+        return None, None
     try:
         draft_text = Path(contract_draft_path).read_text(encoding="utf-8")
         draft = ContractDraft.model_validate_json(draft_text)
@@ -304,6 +316,13 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     except IngestError:
         logger.exception("Error al ingerir el brief de campaña")
         return 1
+    if Path(brief_path).suffix.lower() == ".json" or _is_json_document(brief.text):
+        msg = (
+            "Error de procedencia: el brief no puede ser un archivo JSON; "
+            "se requiere documento fuente markdown/texto y --contract-draft por separado"
+        )
+        logger.error("%s", msg)
+        return 1
     logger.info(
         "Procesando campaña %s en modo %s",
         Path(brief_path).name,
@@ -338,6 +357,9 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     url = cast("str | None", getattr(args, "url", None))
     resume = cast("bool", getattr(args, "resume", False))
     approve_manual_review = cast("bool", getattr(args, "approve_manual_review", False))
+    approved_by = cast("str | None", getattr(args, "approved_by", None))
+    if approve_manual_review and not approved_by:
+        approved_by = "cli-operator"
 
     result = active_manager.process(
         campaign,
@@ -345,8 +367,30 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
         url=url,
         resume=resume,
         approve_manual_review=approve_manual_review,
+        approved_by=approved_by,
     )
     return _handle_campaign_result(result)
+
+
+def _load_run_brief(brief_path: str) -> str:
+    brief = ingest_file(Path(brief_path))
+    if Path(brief_path).suffix.lower() == ".json" or _is_json_document(brief.text):
+        msg = (
+            "Error de procedencia: el brief no puede ser un archivo JSON; "
+            "se requiere documento fuente markdown/texto"
+        )
+        raise IngestError(msg)
+    return brief.text
+
+
+def _load_contract_draft_file(path_str: str | None) -> tuple[ContractDraft | None, str | None]:
+    if path_str is None:
+        return None, None
+    try:
+        text = Path(path_str).read_text(encoding="utf-8")
+        return ContractDraft.model_validate_json(text), None
+    except (ValidationError, OSError, ValueError) as error:
+        return None, f"Error en contract_draft: {error}"
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -362,26 +406,24 @@ def _run_command(args: argparse.Namespace) -> int:
     out = cast("str", getattr(args, "out", ""))
     recorded = cast("str | None", getattr(args, "recorded", None))
     root = cast("str | None", getattr(args, "root", None))
-    contract_draft_path = cast("str | None", getattr(args, "contract_draft", None))
     approve_manual_review = cast("bool", getattr(args, "approve_manual_review", False))
+    approved_by = cast("str | None", getattr(args, "approved_by", None))
+    if approve_manual_review and not approved_by:
+        approved_by = "cli-operator"
 
-    contract_draft: ContractDraft | None = None
-    if contract_draft_path is not None:
-        try:
-            draft_text = Path(contract_draft_path).read_text(encoding="utf-8")
-            contract_draft = ContractDraft.model_validate_json(draft_text)
-        except (ValidationError, OSError, ValueError) as error:
-            _ = sys.stderr.write(
-                json.dumps({"error": f"Error en contract_draft: {error}"}, indent=2) + "\n"
-            )
-            return 1
+    contract_draft, draft_err = _load_contract_draft_file(
+        cast("str | None", getattr(args, "contract_draft", None))
+    )
+    if draft_err is not None:
+        _ = sys.stderr.write(json.dumps({"error": draft_err}, indent=2) + "\n")
+        return 1
 
     try:
-        brief = ingest_file(Path(brief_path))
+        brief_text = _load_run_brief(brief_path)
         model, model_version = _build_model(recorded)
         settings = Settings.from_root(Path(root)) if root is not None else Settings.from_env()
         request = RunRequest(
-            brief=brief.text,
+            brief=brief_text,
             destination=Path(out),
             environment=detect_environment(SubprocessRunner()),
             model_version=model_version,
@@ -389,6 +431,7 @@ def _run_command(args: argparse.Namespace) -> int:
             caption_prompt_version=CAPTION_PROMPT_VERSION,
             brief_path=Path(brief_path),
             approve_manual_review=approve_manual_review,
+            approved_by=approved_by,
             contract_draft=contract_draft,
         )
         result = run_given_clips(model=model, settings=settings, request=request)
