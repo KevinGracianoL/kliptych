@@ -234,11 +234,8 @@ def test_rejected_piece_is_not_exported_and_keeps_full_gate_result(tmp_path: Pat
     assert rejected.gate.contract_sha256 == contract_digest(contract)
     assert rejected.gate.artifact_sha256 == sha256(b"video").hexdigest()
     assert any(check.id == "caption.required_mention" for check in rejected.gate.checks)
-    assert not (destination / _CAMPAIGN).exists()
-
-    written = _parse((destination / "delivery_report.json").read_text(encoding="utf-8"))
-    assert written["status"] == "blocked"
-    assert written["schema_version"] == "1.1"
+    assert not destination.exists()
+    assert report.published_dir is None
 
 
 def test_unsupported_rule_is_not_exported(tmp_path: Path) -> None:
@@ -304,9 +301,8 @@ def test_partial_delivery_exports_only_passing_pieces(tmp_path: Path) -> None:
     assert report.status is ExportStatus.PARTIAL
     assert [piece.piece_id for piece in report.exported] == ["piece-01"]
     assert [piece.piece_id for piece in report.rejected] == ["piece-02"]
-    root = destination / _CAMPAIGN / "tiktok"
-    assert (root / "piece-01.mp4").exists()
-    assert not (root / "piece-02.mp4").exists()
+    assert report.published_dir is None
+    assert not destination.exists()
 
 
 def test_rejects_unsafe_campaign_id(tmp_path: Path) -> None:
@@ -468,15 +464,24 @@ def test_reexport_removes_stale_artifacts(tmp_path: Path) -> None:
     first = _export(tmp_path, pieces=[good], destination=destination)
     assert first.status is ExportStatus.EXPORTED
 
+    # Re-export blocked leaves previous package untouched
     rejected_piece = make_piece(_artifact(tmp_path), caption="sin mención #marca")
     second = _export(tmp_path, pieces=[rejected_piece], destination=destination)
     assert second.status is ExportStatus.BLOCKED
+    assert second.published_dir is None
     root = destination / _CAMPAIGN / "tiktok"
-    assert not (root / "piece-01.mp4").exists()
-    assert not (root / "piece-01.metadata.json").exists()
-    assert not (root / "piece-01.gate.json").exists()
+    assert (root / "piece-01.mp4").exists()
     written = _parse((destination / "delivery_report.json").read_text(encoding="utf-8"))
-    assert written["status"] == "blocked"
+    assert written["status"] == "exported"
+
+    # Re-export with another valid piece replaces package and removes stale artifacts
+    piece2 = make_piece(_artifact(tmp_path, "good2.mp4"), caption="mira @marca #marca").model_copy(
+        update={"piece_id": "piece-02"}
+    )
+    third = _export(tmp_path, pieces=[piece2], destination=destination)
+    assert third.status is ExportStatus.EXPORTED
+    assert (root / "piece-02.mp4").exists()
+    assert not (root / "piece-01.mp4").exists()
 
 
 def test_reexport_failure_keeps_previous_package(
@@ -507,12 +512,20 @@ def test_package_bytes_are_deterministic(tmp_path: Path) -> None:
     _ = _export(tmp_path, pieces=[piece], destination=first)
     _ = _export(tmp_path, pieces=[piece], destination=second)
     for relative in (
-        "delivery_report.json",
         "camp-test/tiktok/piece-01.mp4",
         "camp-test/tiktok/piece-01.metadata.json",
         "camp-test/tiktok/piece-01.gate.json",
     ):
         assert (first / relative).read_bytes() == (second / relative).read_bytes()
+    first_report = DeliveryReport.model_validate_json(
+        (first / "delivery_report.json").read_text(encoding="utf-8")
+    )
+    second_report = DeliveryReport.model_validate_json(
+        (second / "delivery_report.json").read_text(encoding="utf-8")
+    )
+    assert first_report.model_dump(exclude={"published_dir"}) == second_report.model_dump(
+        exclude={"published_dir"}
+    )
 
 
 def test_report_lists_post_publication_reminders(tmp_path: Path) -> None:

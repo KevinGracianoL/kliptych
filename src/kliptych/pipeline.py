@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kliptych.assembler import FFmpegAssembler
 from kliptych.assets import AssetNotFoundError, AssetRegistry
 from kliptych.config import Settings
-from kliptych.contract import Contract, Mode, contract_digest
+from kliptych.contract import Contract, ContractDraft, Mode, contract_digest
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
 from kliptych.gate import Gate, GateResult, Piece
@@ -27,6 +27,7 @@ from kliptych.hashing import brief_key, sha256_file
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
 from kliptych.resolver import (
     IssueCode,
+    ProvenanceError,
     ResolutionIssue,
     ResolutionResult,
     ResolutionStatus,
@@ -97,6 +98,8 @@ class RunRequest:
     gate: Gate | None = None
     registry: AssetRegistry | None = None
     brief_path: Path | None = None
+    approve_manual_review: bool = False
+    contract_draft: ContractDraft | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +140,16 @@ def run_given_clips(
     started_at = datetime.now(UTC)
     identifier = request.run_id if request.run_id is not None else _run_id(started_at)
     registry = request.registry if request.registry is not None else AssetRegistry(settings.root)
-    resolution = resolve_contract(model.extract_contract(request.brief), registry=registry)
+    draft = (
+        request.contract_draft
+        if request.contract_draft is not None
+        else model.extract_contract(request.brief)
+    )
+    try:
+        resolution = resolve_contract(draft, registry=registry, brief_text=request.brief)
+    except ProvenanceError as error:
+        msg = f"error de procedencia en el contrato: {error}"
+        raise PipelineError(msg) from error
     context = _RunContext(
         request=request,
         identifier=identifier,
@@ -260,6 +272,7 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
         gate=context.engine,
         assets=context.registry,
         destination=context.request.destination,
+        approve_manual_review=context.request.approve_manual_review,
     )
     return RunResult(
         run_id=context.identifier,

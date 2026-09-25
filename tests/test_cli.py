@@ -51,6 +51,9 @@ class FakeCampaignManager:
         url: str | None = None,
         images: Sequence[Path] | None = None,
         resume: bool = False,
+        destination: Path | None = None,
+        approve_manual_review: bool = False,
+        **kwargs: object,
     ) -> CampaignOutcome:
         self.calls.append(
             {
@@ -59,6 +62,9 @@ class FakeCampaignManager:
                 "url": url,
                 "images": images,
                 "resume": resume,
+                "destination": destination,
+                "approve_manual_review": approve_manual_review,
+                **kwargs,
             }
         )
         return self.outcome

@@ -18,10 +18,12 @@ import pytest
 
 from kliptych import orchestrator
 from kliptych.__main__ import main
+from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import Contract, Segment
 from kliptych.encoding import RenderConfig
+from kliptych.gate import Gate
 from kliptych.gc import clean_temporary_directories
 from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
 from kliptych.moments import (
@@ -55,6 +57,7 @@ from kliptych.transcribe import (
     TranscriptionError,
     Word,
 )
+from tests.support import FakeProbe, make_media
 
 if TYPE_CHECKING:
     from kliptych.git_proposals import ProposalEngine
@@ -750,9 +753,10 @@ class _DummyProposalEngine:
 
 
 class _MockVideoOrchestrator:
-    def __init__(self) -> None:
+    def __init__(self, final_video: Path | None = None) -> None:
         self.long_video_kwargs: list[dict[str, object]] = []
         self.slideshow_kwargs: list[dict[str, object]] = []
+        self.final_video: Path = final_video if final_video is not None else Path("final.mp4")
 
     def run_long_video(self, url: str, **kwargs: object) -> PipelineResult:
         self.long_video_kwargs.append({"url": url, **kwargs})
@@ -765,7 +769,7 @@ class _MockVideoOrchestrator:
             ),
             reframe=None,
             subtitles=None,
-            final_video=Path("final.mp4"),
+            final_video=self.final_video,
             cleaning=(),
         )
 
@@ -773,20 +777,27 @@ class _MockVideoOrchestrator:
         self.slideshow_kwargs.append({"images": images, **kwargs})
         return SlideshowResult(
             images=tuple(images),
-            slideshow_video=Path("slideshow.mp4"),
-            final_video=Path("final.mp4"),
+            slideshow_video=self.final_video,
+            final_video=self.final_video,
             subtitles=None,
             cleaning=(),
         )
 
 
 def test_campaign_manager_propagates_resume_flag(tmp_path: Path) -> None:
-    video_orchestrator = _MockVideoOrchestrator()
+    video_path = tmp_path / "final.mp4"
+    _ = video_path.write_bytes(b"video payload")
+    video_orchestrator = _MockVideoOrchestrator(final_video=video_path)
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
     proposal_engine = cast("ProposalEngine", cast("object", _DummyProposalEngine()))
     manager = CampaignManager(
         classifier=_DummyClassifier(),
         proposal_engine=proposal_engine,
         video_orchestrator=video_orchestrator,
+        gate=gate,
+        destination=tmp_path / "delivery",
+        assets=AssetRegistry(tmp_path),
     )
     campaign = Campaign(
         campaign_id="test-camp",
@@ -826,8 +837,11 @@ def test_cli_resume_and_restart_flags(tmp_path: Path) -> None:
             url: str | None = None,
             images: Sequence[Path] | None = None,
             resume: bool = False,
+            destination: Path | None = None,
+            approve_manual_review: bool = False,
+            **kwargs: object,
         ) -> CampaignOutcome:
-            _ = (campaign, mode, url, images)
+            _ = (campaign, mode, url, images, destination, approve_manual_review, kwargs)
             self.last_resume = resume
             return CampaignOutcome(
                 campaign_id="test",

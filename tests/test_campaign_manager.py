@@ -210,11 +210,12 @@ def _pipeline_result() -> PipelineResult:
     )
 
 
-def _slideshow_result() -> SlideshowResult:
+def _slideshow_result(video_path: Path | None = None) -> SlideshowResult:
+    target = video_path if video_path is not None else Path("final.mp4")
     return SlideshowResult(
         images=(_IMAGE,),
-        slideshow_video=Path("slideshow.mp4"),
-        final_video=Path("final.mp4"),
+        slideshow_video=target,
+        final_video=target,
         subtitles=None,
         cleaning=(),
     )
@@ -283,18 +284,49 @@ def test_outcome_requires_non_empty_campaign_id() -> None:
         _ = _outcome(campaign_id="", archetype="KNOWN", status="COMPLETED")
 
 
-def test_known_routes_to_long_video_and_creates_no_proposal() -> None:
+def test_known_routes_to_long_video_and_creates_no_proposal(tmp_path: Path) -> None:
+    video_path = tmp_path / "final.mp4"
+    _ = video_path.write_bytes(b"video content")
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
-    video = FakeVideoOrchestrator(pipeline_result=_pipeline_result())
+    video = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=video_path,
+            transcript=None,
+            moments=(),
+            selection=_selection(),
+            reframe=None,
+            subtitles=None,
+            final_video=video_path,
+            cleaning=(),
+        )
+    )
     provider = FakeGitProvider()
-    manager = _manager(classifier=classifier, provider=provider, video=video)
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    destination = tmp_path / "delivery"
+    assets = AssetRegistry(tmp_path)
+    manager = _manager(
+        classifier=classifier,
+        provider=provider,
+        video=video,
+        gate=gate,
+        destination=destination,
+        assets=assets,
+    )
 
-    outcome = manager.process(_campaign(), mode="long_video", url=_VIDEO_URL)
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+    )
+    outcome = manager.process(campaign, mode="long_video", url=_VIDEO_URL)
 
     assert video.long_video_calls == [_VIDEO_URL]
     assert outcome.archetype is Archetype.KNOWN
     assert outcome.status is CampaignStatus.COMPLETED
-    assert outcome.pipeline_result == _pipeline_result()
+    assert outcome.pipeline_result is not None
+    assert outcome.delivery_report is not None
+    assert outcome.delivery_report.status is ExportStatus.EXPORTED
     assert outcome.slideshow_result is None
     assert outcome.pull_request is None
     assert outcome.error is None
@@ -302,11 +334,36 @@ def test_known_routes_to_long_video_and_creates_no_proposal() -> None:
     assert provider.opened == []
 
 
-def test_classifier_receives_brief_and_contract() -> None:
-    campaign = _campaign()
+def test_classifier_receives_brief_and_contract(tmp_path: Path) -> None:
+    video_path = tmp_path / "final.mp4"
+    _ = video_path.write_bytes(b"video content")
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+    )
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
-    video = FakeVideoOrchestrator(pipeline_result=_pipeline_result())
-    manager = _manager(classifier=classifier, video=video)
+    video = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=video_path,
+            transcript=None,
+            moments=(),
+            selection=_selection(),
+            reframe=None,
+            subtitles=None,
+            final_video=video_path,
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    manager = _manager(
+        classifier=classifier,
+        video=video,
+        gate=gate,
+        destination=tmp_path / "delivery",
+        assets=AssetRegistry(tmp_path),
+    )
 
     _ = manager.process(campaign, mode="long_video", url=_VIDEO_URL)
 
@@ -461,32 +518,65 @@ def test_unsupported_mode_returns_error_without_video_call() -> None:
     assert video.slideshow_calls == []
 
 
-def test_slideshow_mode_uses_slideshow_orchestrator() -> None:
+def test_slideshow_mode_uses_slideshow_orchestrator(tmp_path: Path) -> None:
+    video_path = tmp_path / "slideshow.mp4"
+    _ = video_path.write_bytes(b"slideshow video")
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
-    video = FakeVideoOrchestrator(pipeline_result=_pipeline_result())
-    slideshow = FakeSlideshowOrchestrator(slideshow_result=_slideshow_result())
-    manager = _manager(classifier=classifier, video=video, slideshow=slideshow)
+    video = FakeVideoOrchestrator()
+    slideshow_res = _slideshow_result(video_path)
+    slideshow = FakeSlideshowOrchestrator(slideshow_result=slideshow_res)
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    manager = _manager(
+        classifier=classifier,
+        video=video,
+        slideshow=slideshow,
+        gate=gate,
+        destination=tmp_path / "delivery",
+        assets=AssetRegistry(tmp_path),
+    )
 
-    outcome = manager.process(_campaign(), mode="slideshow", images=(_IMAGE,))
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+    )
+    outcome = manager.process(campaign, mode="slideshow", images=(_IMAGE,))
 
     assert slideshow.calls == [(_IMAGE,)]
     assert video.long_video_calls == []
     assert video.slideshow_calls == []
-    assert outcome.slideshow_result == _slideshow_result()
+    assert outcome.slideshow_result == slideshow_res
     assert outcome.pipeline_result is None
     assert outcome.status is CampaignStatus.COMPLETED
 
 
-def test_slideshow_mode_falls_back_to_video_orchestrator() -> None:
+def test_slideshow_mode_falls_back_to_video_orchestrator(tmp_path: Path) -> None:
+    video_path = tmp_path / "slideshow.mp4"
+    _ = video_path.write_bytes(b"slideshow video")
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
-    video = FakeVideoOrchestrator(slideshow_result=_slideshow_result())
-    manager = _manager(classifier=classifier, video=video)
+    slideshow_res = _slideshow_result(video_path)
+    video = FakeVideoOrchestrator(slideshow_result=slideshow_res)
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    manager = _manager(
+        classifier=classifier,
+        video=video,
+        gate=gate,
+        destination=tmp_path / "delivery",
+        assets=AssetRegistry(tmp_path),
+    )
 
-    outcome = manager.process(_campaign(), mode="slideshow", images=(_IMAGE,))
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+    )
+    outcome = manager.process(campaign, mode="slideshow", images=(_IMAGE,))
 
     assert video.slideshow_calls == [(_IMAGE,)]
     assert video.long_video_calls == []
-    assert outcome.slideshow_result == _slideshow_result()
+    assert outcome.slideshow_result == slideshow_res
 
 
 def _module_level_imports() -> list[str]:
