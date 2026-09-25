@@ -25,6 +25,7 @@ el resultado se publica con la misma limpieza determinista.
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -38,14 +39,16 @@ from typing import Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
-from kliptych.contract import Contract, Segment
+from kliptych.contract import Contract, Segment, contract_digest
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
     audio_injection_arguments,
+    fallback_encoder_arguments,
     video_encoder_arguments,
 )
+from kliptych.hashing import sha256_canonical_json
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
@@ -58,10 +61,13 @@ from kliptych.transcribe import (
     Word,
 )
 
+logger = logging.getLogger(__name__)
+
 _STDERR_TAIL = 400
 _SOURCE_NAME = "source.mp4"
 _FINAL_NAME = "final.mp4"
 _FFPROBE = "ffprobe"
+_AUDIO_DURATION_TOLERANCE_S = 0.1
 _TARGET_ASPECT = 9.0 / 16.0
 _ASPECT_TOLERANCE = 0.05
 _SLIDESHOW_NAME = "slideshow.mp4"
@@ -337,6 +343,76 @@ class _VideoInfo:
     duration_s: float
 
 
+def compute_long_video_fingerprint(
+    url: str,
+    *,
+    config: PipelineConfig,
+) -> str:
+    """Calcula el digest SHA-256 determinista de las entradas de long_video.
+
+    Args:
+        url: URL del vídeo fuente.
+        config: Configuración con contrato, render y audio.
+
+    Returns:
+        El digest SHA-256 en hexadecimal.
+    """
+    payload: dict[str, object] = {
+        "pipeline": "long_video",
+        "url": url,
+        "contract": contract_digest(config.contract),
+        "audio": {
+            "locked": config.audio_locked,
+            "track_path": str(config.audio_track_path) if config.audio_track_path else None,
+            "track_url": config.audio_track_url,
+            "mix_ratio": config.audio_mix_ratio,
+        },
+        "render": {
+            "ffmpeg": config.render.ffmpeg,
+            "timeout_s": config.render.timeout_s,
+            "nvenc_available": config.render.nvenc_available,
+        },
+        "repost_mode": config.repost_mode,
+    }
+    return sha256_canonical_json(payload)
+
+
+def compute_slideshow_fingerprint(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    slide_duration_s: float,
+) -> str:
+    """Calcula el digest SHA-256 determinista de las entradas de slideshow.
+
+    Args:
+        images: Secuencia de rutas o URLs de imágenes.
+        config: Configuración con contrato, render y audio.
+        slide_duration_s: Duración por slide.
+
+    Returns:
+        El digest SHA-256 en hexadecimal.
+    """
+    payload: dict[str, object] = {
+        "pipeline": "slideshow",
+        "images": [str(img) for img in images],
+        "slide_duration_s": slide_duration_s,
+        "contract": contract_digest(config.contract),
+        "audio": {
+            "locked": config.audio_locked,
+            "track_path": str(config.audio_track_path) if config.audio_track_path else None,
+            "track_url": config.audio_track_url,
+            "mix_ratio": config.audio_mix_ratio,
+        },
+        "render": {
+            "ffmpeg": config.render.ffmpeg,
+            "timeout_s": config.render.timeout_s,
+            "nvenc_available": config.render.nvenc_available,
+        },
+    }
+    return sha256_canonical_json(payload)
+
+
 def run_long_video(
     url: str,
     *,
@@ -384,8 +460,20 @@ def run_long_video(
     )
     registry = _CleanupRegistry()
     state = PipelineStateManager(config.output_dir)
-    if not resume:
-        state.reset()
+    fingerprint = compute_long_video_fingerprint(url, config=config)
+    effective_resume = resume
+    if effective_resume:
+        if state.is_loaded:
+            if state.checkpoint.input_fingerprint != fingerprint:
+                logger.warning(
+                    "Entradas cambiaron respecto al checkpoint previo; reiniciando ejecución limpia"
+                )
+                state.reset(input_fingerprint=fingerprint)
+                effective_resume = False
+        else:
+            state.checkpoint.input_fingerprint = fingerprint
+    else:
+        state.reset(input_fingerprint=fingerprint)
     try:
         result = _run_stages(
             url,
@@ -394,7 +482,7 @@ def run_long_video(
             dependencies=dependencies,
             registry=registry,
             state=state,
-            resume=resume,
+            resume=effective_resume,
         )
         cleaning = registry.cleanup(mode="all")
         state.mark_done(PipelineStage.COMPLETED, result.final_video)
@@ -446,8 +534,24 @@ def run_slideshow(
     )
     registry = _CleanupRegistry()
     state = PipelineStateManager(config.output_dir)
-    if not resume:
-        state.reset()
+    fingerprint = compute_slideshow_fingerprint(
+        images,
+        config=config,
+        slide_duration_s=slide_duration_s,
+    )
+    effective_resume = resume
+    if effective_resume:
+        if state.is_loaded:
+            if state.checkpoint.input_fingerprint != fingerprint:
+                logger.warning(
+                    "Entradas cambiaron respecto al checkpoint previo; reiniciando ejecución limpia"
+                )
+                state.reset(input_fingerprint=fingerprint)
+                effective_resume = False
+        else:
+            state.checkpoint.input_fingerprint = fingerprint
+    else:
+        state.reset(input_fingerprint=fingerprint)
     try:
         result = _run_slideshow_stages(
             images,
@@ -456,7 +560,7 @@ def run_slideshow(
             downloader=downloader,
             registry=registry,
             state=state,
-            resume=resume,
+            resume=effective_resume,
         )
         cleaning = registry.cleanup(mode="all")
         state.mark_done(PipelineStage.COMPLETED, result.final_video)
@@ -527,6 +631,7 @@ def _run_slideshow_stages(
     )
     slideshow_video = _assemble_slideshow(
         concat,
+        total_duration_s=len(resolved) * slide_duration_s,
         render=config.render,
         output_dir=config.output_dir,
         registry=registry,
@@ -657,6 +762,7 @@ def _concat_file_line(path: Path) -> str:
 def _assemble_slideshow(
     concat: Path,
     *,
+    total_duration_s: float | None = None,
     render: RenderConfig,
     output_dir: Path,
     registry: _CleanupRegistry,
@@ -675,11 +781,17 @@ def _assemble_slideshow(
         "0",
         "-i",
         str(concat),
-        "-vf",
-        _SLIDESHOW_FILTER,
-        "-r",
-        _SLIDESHOW_FPS,
     ]
+    if total_duration_s is not None:
+        argv.extend(["-t", _seconds(total_duration_s)])
+    argv.extend(
+        [
+            "-vf",
+            _SLIDESHOW_FILTER,
+            "-r",
+            _SLIDESHOW_FPS,
+        ]
+    )
     argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
     argv.append(str(destination))
     with _translated("ensamblado del slideshow"):
@@ -1211,6 +1323,54 @@ def _probe_video(video: Path, *, render: RenderConfig) -> _VideoInfo:
     return _VideoInfo(width=width, height=height, duration_s=duration_s)
 
 
+def _probe_audio_duration(audio: Path, *, render: RenderConfig) -> float:
+    """Lee la duración de una pista de audio con ffprobe.
+
+    Args:
+        audio: Ruta de la pista de audio a sondear.
+        render: Configuración con el timeout del sondeo.
+
+    Returns:
+        La duración del audio en segundos.
+
+    Raises:
+        PipelineError: Si ffprobe no está disponible, falla, expira o no se
+            puede leer la duración.
+    """
+    argv = [
+        _FFPROBE,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(audio),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=render.timeout_s,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        msg = f"ffprobe no está disponible: {_FFPROBE}"
+        raise PipelineError(msg) from error
+    except subprocess.TimeoutExpired as error:
+        msg = f"ffprobe excedió el timeout de {render.timeout_s} s"
+        raise PipelineError(msg) from error
+    except OSError as error:
+        msg = f"no se pudo ejecutar ffprobe ({_FFPROBE}): {error}"
+        raise PipelineError(msg) from error
+    if completed.returncode != 0:
+        msg = f"ffprobe falló con código {completed.returncode}: {_tail(completed.stderr)}"
+        raise PipelineError(msg)
+    fields = _probe_fields(completed.stdout)
+    return _probe_duration(fields.get("duration"), video=audio)
+
+
 def _probe_fields(stdout: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in stdout.splitlines():
@@ -1483,6 +1643,11 @@ def _inject_audio(
             falla.
     """
     track = _resolve_audio_track(config, downloader=downloader, registry=registry, resume=resume)
+    video_info = _probe_video(video, render=config.render)
+    audio_duration_s = _probe_audio_duration(track, render=config.render)
+    if audio_duration_s < video_info.duration_s - _AUDIO_DURATION_TOLERANCE_S:
+        msg = "El audio externo es más corto que el video"
+        raise PipelineError(msg)
     destination = registry.register(_temporary_path(video.with_name("audio_injected.mp4")))
     argv = [
         config.render.ffmpeg,
@@ -1496,7 +1661,12 @@ def _inject_audio(
         "-i",
         str(track),
     ]
-    argv += list(audio_injection_arguments(mix_ratio=config.audio_mix_ratio))
+    argv += list(
+        audio_injection_arguments(
+            mix_ratio=config.audio_mix_ratio,
+            video_duration_s=video_info.duration_s,
+        )
+    )
     argv.append(str(destination))
     with _translated("inyección de audio"):
         _run_ffmpeg(argv, render=config.render)
@@ -1609,25 +1779,46 @@ def _translated(stage: str) -> Generator[None]:
         raise PipelineError(msg) from error
 
 
-def _run_ffmpeg(argv: list[str], *, render: RenderConfig) -> None:
+def _run_ffmpeg(argv: Sequence[str], *, render: RenderConfig) -> None:
+    def _execute(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                list(cmd),
+                capture_output=True,
+                text=True,
+                timeout=render.timeout_s,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            msg = f"ffmpeg no está disponible: {render.ffmpeg}"
+            raise PipelineError(msg) from error
+        except subprocess.TimeoutExpired as error:
+            msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
+            raise PipelineError(msg) from error
+        except OSError as error:
+            msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
+            raise PipelineError(msg) from error
+
     try:
-        completed = subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            timeout=render.timeout_s,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        msg = f"ffmpeg no está disponible: {render.ffmpeg}"
-        raise PipelineError(msg) from error
-    except subprocess.TimeoutExpired as error:
-        msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
-        raise PipelineError(msg) from error
-    except OSError as error:
-        msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
-        raise PipelineError(msg) from error
+        completed = _execute(argv)
+    except subprocess.CalledProcessError as error:
+        if "h264_nvenc" in argv:
+            logger.warning("NVENC falló, reintentando con libx264...")
+            fallback_argv = fallback_encoder_arguments(argv)
+            completed = _execute(fallback_argv)
+        else:
+            msg = f"ffmpeg falló: {error}"
+            raise PipelineError(msg) from error
+
     if completed.returncode != 0:
+        if "h264_nvenc" in argv:
+            logger.warning("NVENC falló, reintentando con libx264...")
+            fallback_argv = fallback_encoder_arguments(argv)
+            completed = _execute(fallback_argv)
+            if completed.returncode != 0:
+                msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
+                raise PipelineError(msg)
+            return
         msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
         raise PipelineError(msg)
 

@@ -49,6 +49,7 @@ class PipelineCheckpoint(BaseModel):
     artifacts: dict[str, str] = Field(default_factory=dict)
     created_at: str
     updated_at: str
+    input_fingerprint: str | None = None
 
 
 class PipelineStateManager:
@@ -57,8 +58,9 @@ class PipelineStateManager:
     output_dir: Path
     checkpoint_path: Path
     checkpoint: PipelineCheckpoint
+    is_loaded: bool
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, *, input_fingerprint: str | None = None) -> None:
         """Inicializa el administrador de estado en el directorio de salida.
 
         Si ya existe un ``checkpoint.json`` en el directorio, se carga
@@ -67,13 +69,16 @@ class PipelineStateManager:
 
         Args:
             output_dir: Directorio de salida donde reside el checkpoint.
+            input_fingerprint: Fingerprint de las entradas del pipeline.
         """
         self.output_dir = output_dir
         self.checkpoint_path = output_dir / _CHECKPOINT_FILE
         existing = self._try_load_existing()
         if existing is not None:
             self.checkpoint = existing
+            self.is_loaded = True
             return
+        self.is_loaded = False
         now = datetime.now(UTC).isoformat()
         self.checkpoint = PipelineCheckpoint(
             run_id=uuid.uuid4().hex,
@@ -81,6 +86,7 @@ class PipelineStateManager:
             artifacts={},
             created_at=now,
             updated_at=now,
+            input_fingerprint=input_fingerprint,
         )
 
     def _try_load_existing(self) -> PipelineCheckpoint | None:
@@ -91,8 +97,14 @@ class PipelineStateManager:
             return PipelineCheckpoint.model_validate_json(data)
         return None
 
-    def reset(self) -> None:
-        """Reinicia el punto de control a un estado nuevo y limpio."""
+    def reset(self, *, input_fingerprint: str | None = None) -> None:
+        """Reinicia el punto de control a un estado nuevo y limpio.
+
+        Args:
+            input_fingerprint: Opcional fingerprint a persistir en el nuevo
+                checkpoint limpio.
+        """
+        self.is_loaded = False
         now = datetime.now(UTC).isoformat()
         self.checkpoint = PipelineCheckpoint(
             run_id=uuid.uuid4().hex,
@@ -100,7 +112,18 @@ class PipelineStateManager:
             artifacts={},
             created_at=now,
             updated_at=now,
+            input_fingerprint=input_fingerprint,
         )
+        self.save()
+
+    def set_input_fingerprint(self, fingerprint: str) -> None:
+        """Asigna y persiste el fingerprint de entradas del pipeline.
+
+        Args:
+            fingerprint: El digest SHA-256 de las entradas del pipeline.
+        """
+        self.checkpoint.input_fingerprint = fingerprint
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 
     def is_done(self, stage: str | PipelineStage) -> bool:

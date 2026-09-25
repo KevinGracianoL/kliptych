@@ -6,6 +6,7 @@ verifica el orden de las etapas, la estructura del resultado, la limpieza de
 temporales en éxito y en cada fallo, y la traducción de errores a PipelineError.
 """
 
+import logging
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -511,6 +512,148 @@ def test_run_ffmpeg_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("kliptych.orchestrator.subprocess.run", run)
     with pytest.raises(PipelineError, match="código 2"):
         _run_ffmpeg(["ffmpeg"], render=RenderConfig())
+
+
+def test_run_ffmpeg_nvenc_fallback_to_libx264(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[list[str]] = []
+
+    def mock_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        calls.append(list(argv))
+        if "h264_nvenc" in argv:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=1,
+                stdout="",
+                stderr="NVENC out of memory",
+            )
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", mock_run)
+    render = RenderConfig(nvenc_available=True)
+    argv = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "out.mp4",
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="kliptych.orchestrator"):
+        _run_ffmpeg(argv, render=render)
+
+    assert len(calls) == 2
+    assert "h264_nvenc" in calls[0]
+    assert "libx264" in calls[1]
+    assert "h264_nvenc" not in calls[1]
+    assert "-preset" in calls[1]
+    assert calls[1][calls[1].index("-preset") + 1] == "medium"
+    assert "-crf" in calls[1]
+    assert calls[1][calls[1].index("-crf") + 1] == "20"
+    assert any(
+        "NVENC falló, reintentando con libx264" in record.message for record in caplog.records
+    )
+
+
+def test_run_ffmpeg_nvenc_fallback_propagates_when_libx264_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def mock_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="all encoders failed",
+        )
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", mock_run)
+    render = RenderConfig(nvenc_available=True)
+    argv = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "out.mp4",
+    ]
+
+    with pytest.raises(PipelineError, match="ffmpeg falló con código 1"):
+        _run_ffmpeg(argv, render=render)
+
+    assert len(calls) == 2
+
+
+def test_run_ffmpeg_called_process_error_nvenc_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def mock_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        calls.append(list(argv))
+        if "h264_nvenc" in argv:
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=argv, output="", stderr="nvenc error"
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", mock_run)
+    render = RenderConfig(nvenc_available=True)
+    argv = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "out.mp4",
+    ]
+    _run_ffmpeg(argv, render=render)
+    assert len(calls) == 2
+    assert "libx264" in calls[1]
+
+
+def test_run_ffmpeg_called_process_error_without_nvenc_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mock_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = (argv, kwargs)
+        raise subprocess.CalledProcessError(returncode=1, cmd=argv, output="", stderr="cpu error")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", mock_run)
+    render = RenderConfig(nvenc_available=False)
+    argv = ["ffmpeg", "-i", "in.mp4", "-c:v", "libx264", "out.mp4"]
+    with pytest.raises(PipelineError, match="ffmpeg falló"):
+        _run_ffmpeg(argv, render=render)
 
 
 def test_cut_segment_builds_list_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

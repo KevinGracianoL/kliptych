@@ -35,6 +35,7 @@ from kliptych.orchestrator import (
     PipelineError,
     PipelineResult,
     SlideshowResult,
+    compute_long_video_fingerprint,
     run_long_video,
     run_slideshow,
 )
@@ -492,6 +493,7 @@ def test_idempotent_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     _ = transcript_file.write_text(_transcript().model_dump_json(indent=2), encoding="utf-8")
 
     mgr = PipelineStateManager(config.output_dir)
+    mgr.set_input_fingerprint(compute_long_video_fingerprint(_URL, config=config))
     mgr.mark_done(PipelineStage.DOWNLOAD, source)
     mgr.mark_done(PipelineStage.TRANSCRIBE, transcript_file)
 
@@ -575,6 +577,7 @@ def test_corrupt_or_empty_artifacts_trigger_reexecution(
     _ = selection_file.write_text("", encoding="utf-8")
 
     mgr = PipelineStateManager(config.output_dir)
+    mgr.set_input_fingerprint(compute_long_video_fingerprint(_URL, config=config))
     mgr.mark_done(PipelineStage.DOWNLOAD, source)
     mgr.mark_done(PipelineStage.TRANSCRIBE, transcript_file)
     mgr.mark_done(PipelineStage.MOMENTS, moments_file)
@@ -948,3 +951,33 @@ def test_cli_run_subcommand_resume_and_restart_flags(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc_info:
         _ = main(["run", str(brief), "--out", str(tmp_path / "out"), "--resume", "--restart"])
     assert exc_info.value.code == 2
+
+
+def test_resume_invalidates_cache_on_fingerprint_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # 1. Primera ejecución limpia
+    result1 = _run(config, deps, resume=False)
+    assert isinstance(result1, PipelineResult)
+    assert counter.download_calls == 1
+
+    # Verificar que el checkpoint persistió con el fingerprint
+    mgr1 = PipelineStateManager.load(config.output_dir)
+    initial_fp = mgr1.checkpoint.input_fingerprint
+    assert initial_fp is not None
+    assert mgr1.is_done(PipelineStage.COMPLETED)
+
+    # 2. Modificamos un parámetro de entrada (audio_mix_ratio de 1.0 a 0.5)
+    config_modified = replace(config, audio_mix_ratio=0.5)
+
+    # 3. Segunda ejecución con resume=True
+    result2 = _run(config_modified, deps, resume=True)
+    assert isinstance(result2, PipelineResult)
+
+    # Verificamos que el fingerprint cambió y las etapas se re-ejecutaron
+    mgr2 = PipelineStateManager.load(config.output_dir)
+    assert mgr2.checkpoint.input_fingerprint != initial_fp
+    assert counter.download_calls == 2
