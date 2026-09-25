@@ -644,7 +644,7 @@ def test_cli_run_reports_unresolved_with_issues(
             str(tmp_path),
         ]
     )
-    assert code == 0
+    assert code == 1
     payload = _parse(capsys.readouterr().out)
     assert payload["outcome"] == "new_archetype"
     assert payload["issues"] == ["missing_required"]

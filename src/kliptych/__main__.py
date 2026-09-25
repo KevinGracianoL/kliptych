@@ -32,7 +32,7 @@ from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
 from kliptych.intelligence import LLMCampaignClassifier
 from kliptych.logging_setup import setup_logging
-from kliptych.pipeline import PipelineError, RunRequest, RunResult, run_given_clips
+from kliptych.pipeline import PipelineError, RunOutcome, RunRequest, RunResult, run_given_clips
 from kliptych.resolver import ProvenanceError, resolve_contract
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
@@ -439,7 +439,7 @@ def _run_command(args: argparse.Namespace) -> int:
         _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
         return 1
     _ = sys.stdout.write(json.dumps(_run_payload(result), indent=2) + "\n")
-    return 0
+    return 0 if result.outcome is RunOutcome.EXPORTED else 1
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
