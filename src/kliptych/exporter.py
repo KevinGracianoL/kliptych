@@ -23,6 +23,7 @@ import shutil
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -100,6 +101,9 @@ class ExportedPiece(_ExporterBase):
     metadata_path: str
     gate_path: str
     gate_status: GateStatus
+    manually_approved_rules: tuple[str, ...] = ()
+    approved_by: str | None = None
+    approved_at_utc: str | None = None
 
 
 class RejectedPiece(_ExporterBase):
@@ -138,6 +142,9 @@ class DeliveryReport(_ExporterBase):
     rejected: tuple[RejectedPiece, ...]
     reminders: tuple[Reminder, ...]
     published_dir: str | None = None
+    manually_approved_rules: tuple[str, ...] = ()
+    approved_by: str | None = None
+    approved_at_utc: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +165,7 @@ class _ExportContext:
     gate: Gate
     assets: AssetRegistry
     approve_manual_review: bool = False
+    approved_by: str | None = None
 
 
 def export_delivery(
@@ -168,6 +176,7 @@ def export_delivery(
     assets: AssetRegistry,
     destination: Path,
     approve_manual_review: bool = False,
+    approved_by: str | None = None,
 ) -> DeliveryReport:
     """Construye el paquete de entrega de las piezas que pasan el gate.
 
@@ -183,6 +192,7 @@ def export_delivery(
         destination: Raíz del paquete de entrega.
         approve_manual_review: Si es True, permite exportar piezas con estado
             PENDING_REVIEW tras aprobación explícita.
+        approved_by: Identificador del operador o sistema que aprueba la revisión manual.
 
     Returns:
         El reporte del paquete, escrito también en ``delivery_report.json``.
@@ -234,6 +244,7 @@ def export_delivery(
         gate=gate,
         assets=assets,
         approve_manual_review=approve_manual_review,
+        approved_by=approved_by,
     )
     published = False
     try:
@@ -273,6 +284,16 @@ def _build_report(
     package: str,
 ) -> DeliveryReport:
     exported, rejected = _build_package(context, plans)
+    all_approved_rules = tuple(
+        dict.fromkeys(r for p in exported for r in p.manually_approved_rules)
+    )
+    has_manual_approval = bool(all_approved_rules)
+    approved_by = (context.approved_by or "cli-operator") if has_manual_approval else None
+    approved_at_utc = (
+        next((p.approved_at_utc for p in exported if p.approved_at_utc is not None), None)
+        if has_manual_approval
+        else None
+    )
     return DeliveryReport(
         campaign_id=context.contract.campaign_id,
         package=package,
@@ -280,6 +301,9 @@ def _build_report(
         exported=tuple(exported),
         rejected=tuple(rejected),
         reminders=_reminders(context.contract),
+        manually_approved_rules=all_approved_rules,
+        approved_by=approved_by,
+        approved_at_utc=approved_at_utc,
     )
 
 
@@ -325,9 +349,10 @@ def _build_package(
     for plan in plans:
         gate_func = getattr(context.gate, "evaluate_piece", context.gate.run)
         gate_result = gate_func(contract=context.contract, piece=plan.piece, assets=context.assets)
-        should_export = gate_result.passed or (
+        is_manual_approval = (
             gate_result.status is GateStatus.PENDING_REVIEW and context.approve_manual_review
         )
+        should_export = gate_result.passed or is_manual_approval
         if not should_export:
             rejected.append(
                 RejectedPiece(
@@ -338,7 +363,9 @@ def _build_package(
                 )
             )
             continue
-        exported.append(_export_piece(plan, context, gate_result))
+        exported.append(
+            _export_piece(plan, context, gate_result, is_manual_approval=is_manual_approval)
+        )
     return exported, rejected
 
 
@@ -346,6 +373,8 @@ def _export_piece(
     plan: _PiecePlan,
     context: _ExportContext,
     gate_result: GateResult,
+    *,
+    is_manual_approval: bool = False,
 ) -> ExportedPiece:
     piece = plan.piece
     destination = context.staging
@@ -385,6 +414,13 @@ def _export_piece(
     _ = (directory / plan.gate_name).write_text(
         gate_result.model_dump_json(indent=2), encoding="utf-8"
     )
+    pending_rules = (
+        tuple(check.id for check in gate_result.checks if check.status is CheckStatus.MANUAL_REVIEW)
+        if is_manual_approval
+        else ()
+    )
+    effective_approved_by = (context.approved_by or "cli-operator") if is_manual_approval else None
+    approved_at = datetime.now(UTC).isoformat() if is_manual_approval else None
     return ExportedPiece(
         piece_id=piece.piece_id,
         platform=piece.platform,
@@ -393,6 +429,9 @@ def _export_piece(
         metadata_path=(directory / plan.metadata_name).relative_to(destination).as_posix(),
         gate_path=(directory / plan.gate_name).relative_to(destination).as_posix(),
         gate_status=gate_result.status,
+        manually_approved_rules=pending_rules,
+        approved_by=effective_approved_by,
+        approved_at_utc=approved_at,
     )
 
 

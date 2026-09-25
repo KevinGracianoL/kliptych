@@ -230,13 +230,37 @@ def _make_provenance_draft_json() -> str:
     return text
 
 
-def test_cli_campaign_resolves_contract_when_brief_is_json(tmp_path: Path) -> None:
-    """When brief is valid ContractDraft JSON, contract is resolved and attached."""
+def test_cli_campaign_rejects_json_brief_self_validation(tmp_path: Path) -> None:
+    """When brief is JSON, CLI rejects the self-validation attempt and returns 1."""
     draft_json = _make_provenance_draft_json()
     brief = tmp_path / "brief.txt"
     _ = brief.write_text(draft_json, encoding="utf-8")
     manager = FakeCampaignManager()
     code = main(["campaign", str(brief), "--out", str(tmp_path / "out")], manager=manager)
+    assert code == 1
+    assert len(manager.calls) == 0
+
+
+def test_cli_campaign_with_valid_brief_and_separate_contract_draft(tmp_path: Path) -> None:
+    """When brief is text and contract draft is separate JSON, contract resolves."""
+    text = "cita del brief para la prueba"
+    brief = tmp_path / "brief.txt"
+    _ = brief.write_text(text, encoding="utf-8")
+    draft = make_draft()
+    draft_file = tmp_path / "draft.json"
+    _ = draft_file.write_text(draft.model_dump_json(), encoding="utf-8")
+    manager = FakeCampaignManager()
+    code = main(
+        [
+            "campaign",
+            str(brief),
+            "--contract-draft",
+            str(draft_file),
+            "--out",
+            str(tmp_path / "out"),
+        ],
+        manager=manager,
+    )
     assert code == 0
     assert len(manager.calls) == 1
     campaign = cast("Campaign", manager.calls[0]["campaign"])
@@ -265,7 +289,5 @@ def test_cli_campaign_blocks_raw_json_contract_without_provenance(tmp_path: Path
     _ = brief.write_text(raw_contract_json, encoding="utf-8")
     manager = FakeCampaignManager()
     code = main(["campaign", str(brief), "--out", str(tmp_path / "out")], manager=manager)
-    assert code == 0
-    assert len(manager.calls) == 1
-    campaign = cast("Campaign", manager.calls[0]["campaign"])
-    assert campaign.contract is None
+    assert code == 1
+    assert len(manager.calls) == 0

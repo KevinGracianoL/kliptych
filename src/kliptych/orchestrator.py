@@ -45,7 +45,7 @@ from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
     audio_injection_arguments,
-    fallback_encoder_arguments,
+    run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
 from kliptych.hashing import sha256_canonical_json, sha256_file
@@ -1311,6 +1311,122 @@ def _render_segment(
     return reframe, subtitles, final_video
 
 
+def _check_source_content_signature(
+    source: Path,
+    *,
+    config: PipelineConfig,
+    state: PipelineStateManager,
+    resume: bool,
+) -> bool:
+    source_sig = _file_signature(source)
+    if (
+        resume
+        and state.checkpoint.source_content_hash is not None
+        and state.checkpoint.source_content_hash != source_sig
+    ):
+        logger.warning("El contenido del video fuente cambió; invalidando etapas dependientes...")
+        state.invalidate_downstream_stages()
+        patterns = (
+            "transcript.json",
+            "moments.json",
+            "selection.json",
+            "reframed*.mp4",
+            "reframe*.json",
+            "subtitles*.ass",
+            "final*.mp4",
+            "clip*.mp4",
+        )
+        for pattern in patterns:
+            for path in config.output_dir.glob(pattern):
+                with suppress(OSError):
+                    path.unlink(missing_ok=True)
+        resume = False
+    state.set_source_content_hash(source_sig)
+    return resume
+
+
+def _clean_leftover_segments(output_dir: Path, total_segments: int) -> None:
+    for final_file in output_dir.glob("final_*.mp4"):
+        stem = final_file.stem
+        try:
+            num = int(stem.split("_")[-1])
+        except (ValueError, IndexError):
+            continue
+        if num >= total_segments:
+            with suppress(OSError):
+                final_file.unlink()
+            patterns = (
+                f"reframed_{num:02d}.mp4",
+                f"subtitles_{num:02d}.ass",
+                f"reframe_{num:02d}.json",
+                f"clip_{num:02d}.mp4",
+            )
+            for pattern in patterns:
+                with suppress(OSError):
+                    (output_dir / pattern).unlink(missing_ok=True)
+
+
+def _invalidate_segment_artifacts(output_dir: Path, suffix: str) -> None:
+    patterns = (
+        f"final{suffix}.mp4",
+        f"reframed{suffix}.mp4",
+        f"subtitles{suffix}.ass",
+        f"reframe{suffix}.json",
+        f"clip{suffix}.mp4",
+    )
+    for pattern in patterns:
+        with suppress(OSError):
+            (output_dir / pattern).unlink(missing_ok=True)
+
+
+def _render_all_segments(
+    source: Path,
+    selection: SegmentSelection,
+    *,
+    transcript: Transcript | None,
+    config: PipelineConfig,
+    dependencies: _Dependencies,
+    registry: _CleanupRegistry,
+    state: PipelineStateManager,
+    effective_resume: bool,
+) -> tuple[ReframeResult | None, Path | None, tuple[Path, ...]]:
+    _ = _primary_segment(selection)
+    total_segments = len(selection.segments)
+    final_videos: list[Path] = []
+    primary_reframe: ReframeResult | None = None
+    primary_subtitles: Path | None = None
+
+    for idx, segment in enumerate(selection.segments):
+        suffix = f"_{idx:02d}" if total_segments > 1 else ""
+        coords_match = (
+            effective_resume
+            and idx < len(state.checkpoint.segment_coords)
+            and state.checkpoint.segment_coords[idx] == (segment.start_s, segment.end_s)
+        )
+        if effective_resume and not coords_match:
+            _invalidate_segment_artifacts(config.output_dir, suffix)
+
+        reframe, subtitles, final_video = _render_segment(
+            source,
+            segment=segment,
+            transcript=transcript,
+            config=config,
+            dependencies=dependencies,
+            registry=registry,
+            state=state,
+            resume=effective_resume and coords_match,
+            suffix=suffix,
+            is_primary=(idx == 0),
+        )
+        if idx == 0:
+            primary_reframe = reframe
+            primary_subtitles = subtitles
+        final_videos.append(final_video)
+
+    state.set_segment_coords(tuple((s.start_s, s.end_s) for s in selection.segments))
+    return primary_reframe, primary_subtitles, tuple(final_videos)
+
+
 def _run_stages(
     url: str,
     *,
@@ -1329,49 +1445,39 @@ def _run_stages(
         state=state,
         resume=resume,
     )
+    effective_resume = _check_source_content_signature(
+        source, config=config, state=state, resume=resume
+    )
     transcript, moments, selection = _resolve_intelligence_stages(
         source,
         model=model,
         config=config,
         dependencies=dependencies,
         state=state,
-        resume=resume,
+        resume=effective_resume,
     )
-    _ = _primary_segment(selection)
-    total_segments = len(selection.segments)
-    final_videos: list[Path] = []
-    primary_reframe: ReframeResult | None = None
-    primary_subtitles: Path | None = None
-
-    for idx, segment in enumerate(selection.segments):
-        suffix = f"_{idx:02d}" if total_segments > 1 else ""
-        reframe, subtitles, final_video = _render_segment(
-            source,
-            segment=segment,
-            transcript=transcript,
-            config=config,
-            dependencies=dependencies,
-            registry=registry,
-            state=state,
-            resume=resume,
-            suffix=suffix,
-            is_primary=(idx == 0),
-        )
-        if idx == 0:
-            primary_reframe = reframe
-            primary_subtitles = subtitles
-        final_videos.append(final_video)
+    _clean_leftover_segments(config.output_dir, len(selection.segments))
+    reframe, subtitles, final_videos = _render_all_segments(
+        source,
+        selection,
+        transcript=transcript,
+        config=config,
+        dependencies=dependencies,
+        registry=registry,
+        state=state,
+        effective_resume=effective_resume,
+    )
 
     return PipelineResult(
         source=source,
         transcript=transcript,
         moments=moments,
         selection=selection,
-        reframe=primary_reframe,
-        subtitles=primary_subtitles,
+        reframe=reframe,
+        subtitles=subtitles,
         final_video=final_videos[0],
         cleaning=(),
-        final_videos=tuple(final_videos),
+        final_videos=final_videos,
     )
 
 
@@ -1918,47 +2024,12 @@ def _translated(stage: str) -> Generator[None]:
 
 
 def _run_ffmpeg(argv: Sequence[str], *, render: RenderConfig) -> None:
-    def _execute(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                list(cmd),
-                capture_output=True,
-                text=True,
-                timeout=render.timeout_s,
-                check=False,
-            )
-        except FileNotFoundError as error:
-            msg = f"ffmpeg no está disponible: {render.ffmpeg}"
-            raise PipelineError(msg) from error
-        except subprocess.TimeoutExpired as error:
-            msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
-            raise PipelineError(msg) from error
-        except OSError as error:
-            msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
-            raise PipelineError(msg) from error
-
-    try:
-        completed = _execute(argv)
-    except subprocess.CalledProcessError as error:
-        if "h264_nvenc" in argv:
-            logger.warning("NVENC falló, reintentando con libx264...")
-            fallback_argv = fallback_encoder_arguments(argv)
-            completed = _execute(fallback_argv)
-        else:
-            msg = f"ffmpeg falló: {error}"
-            raise PipelineError(msg) from error
-
-    if completed.returncode != 0:
-        if "h264_nvenc" in argv:
-            logger.warning("NVENC falló, reintentando con libx264...")
-            fallback_argv = fallback_encoder_arguments(argv)
-            completed = _execute(fallback_argv)
-            if completed.returncode != 0:
-                msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-                raise PipelineError(msg)
-            return
-        msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-        raise PipelineError(msg)
+    run_ffmpeg_with_fallback(
+        argv,
+        render=render,
+        error_cls=PipelineError,
+        runner=subprocess.run,
+    )
 
 
 def _atomic_write_json(destination: Path, content: str) -> None:

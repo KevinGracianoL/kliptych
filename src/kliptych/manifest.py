@@ -45,6 +45,9 @@ class RunManifest(_ManifestBase):
     outputs: tuple[OutputHash, ...] = ()
     gates: tuple[GateResult, ...] = ()
     degradations: tuple[str, ...] = ()
+    manually_approved_rules: tuple[str, ...] = ()
+    approved_by: str | None = None
+    approved_at_utc: str | None = None
 
 
 def write_manifest(manifest: RunManifest, run_dir: Path) -> Path:

@@ -1028,3 +1028,101 @@ def test_resume_invalidates_cache_when_audio_file_content_changes(
     mgr2 = PipelineStateManager.load(config.output_dir)
     assert mgr2.checkpoint.input_fingerprint != initial_fp
     assert counter.download_calls == 2
+
+
+def test_resume_binds_secondary_segments_and_removes_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifica que resume invalide segmentos cuyas coordenadas cambiaron y limpie sobrantes."""
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # Run 1: dos segmentos (0.0, 5.0) y (10.0, 15.0)
+    selection1 = SegmentSelection(
+        segments=(
+            Segment(start_s=0.0, end_s=5.0),
+            Segment(start_s=10.0, end_s=15.0),
+        ),
+        rationale="r1",
+    )
+
+    def _parse1(_raw: object) -> SegmentSelection:
+        return selection1
+
+    monkeypatch.setattr(deps.selector, "parse_response", _parse1)
+
+    result1 = _run(config, deps, resume=False)
+    assert len(result1.final_videos) == 2
+    f0 = config.output_dir / "final_00.mp4"
+    f1 = config.output_dir / "final_01.mp4"
+    assert f0.is_file()
+    assert f1.is_file()
+    # Guardamos contenido inicial de final_01 para detectar si se re-renderizó
+    f0_bytes_initial = b"final_video_run1_seg0"
+    _ = f0.write_bytes(f0_bytes_initial)
+    f1_bytes_initial = b"final_video_run1"
+    _ = f1.write_bytes(f1_bytes_initial)
+
+    # Creamos un sobrante final_02.mp4 de una supuesta corrida anterior con 3 segmentos
+    leftover = config.output_dir / "final_02.mp4"
+    _ = leftover.write_bytes(b"leftover_final_02")
+
+    # Run 2: segmento 0 idéntico (0.0, 5.0), segmento 1 con coordenadas cambiadas (12.0, 17.0)
+    selection2 = SegmentSelection(
+        segments=(
+            Segment(start_s=0.0, end_s=5.0),
+            Segment(start_s=12.0, end_s=17.0),
+        ),
+        rationale="r2",
+    )
+
+    def _parse2(_raw: object) -> SegmentSelection:
+        return selection2
+
+    monkeypatch.setattr(deps.selector, "parse_response", _parse2)
+    _ = (config.output_dir / "selection.json").write_text(
+        selection2.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+    result2 = _run(config, deps, resume=True)
+    assert len(result2.final_videos) == 2
+    assert result2.final_videos == (f0, f1)
+
+    # El sobrante final_02 debe haber sido eliminado
+    assert not leftover.exists()
+
+    # final_00 debió reutilizarse intacto
+    assert f0.read_bytes() == f0_bytes_initial
+
+    # final_01 debe haberse re-renderizado porque sus coordenadas cambiaron
+    assert f1.read_bytes() != f1_bytes_initial
+
+
+def test_resume_invalidates_downstream_stages_when_source_content_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifica que resume invalide etapas descendentes si los bytes del video fuente cambian."""
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # 1. Primera corrida completa
+    result1 = _run(config, deps, resume=False)
+    assert isinstance(result1, PipelineResult)
+    assert counter.transcribe_calls == 1
+    assert counter.reframe_calls == 1
+    assert counter.subtitles_calls == 1
+
+    source_file = config.output_dir / "source.mp4"
+    assert source_file.is_file()
+
+    # 2. Simulamos que el archivo fuente descargado cambió de contenido (bytes distintos)
+    _ = source_file.write_bytes(b"completely_new_source_video_bytes_v2")
+
+    # 3. Segunda corrida con resume=True
+    result2 = _run(config, deps, resume=True)
+    assert isinstance(result2, PipelineResult)
+
+    # Las etapas dependientes deben haberse re-ejecutado por el cambio de contenido del fuente
+    assert counter.transcribe_calls == 2
+    assert counter.reframe_calls == 2
+    assert counter.subtitles_calls == 2

@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
+    run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
 from kliptych.transcribe import Word
@@ -34,7 +35,6 @@ _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
 _MARGIN_H = 20
 _ENCODING = 1
-_STDERR_TAIL = 400
 
 _STYLE_FORMAT = (
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
@@ -300,30 +300,13 @@ def _require_file(path: Path, *, what: str) -> None:
 
 
 def _run_ffmpeg(argv: Sequence[str], *, temporary: Path, render: RenderConfig) -> None:
-    try:
-        completed = subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            timeout=render.timeout_s,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg no está disponible: {render.ffmpeg}"
-        raise SubtitleError(msg) from error
-    except subprocess.TimeoutExpired as error:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
-        raise SubtitleError(msg) from error
-    except OSError as error:
-        _remove_quietly(temporary)
-        msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
-        raise SubtitleError(msg) from error
-    if completed.returncode != 0:
-        _remove_quietly(temporary)
-        msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-        raise SubtitleError(msg)
+    run_ffmpeg_with_fallback(
+        argv,
+        render=render,
+        temporary=temporary,
+        error_cls=SubtitleError,
+        runner=subprocess.run,
+    )
 
 
 def _temporary_path(destination: Path) -> Path:
@@ -333,7 +316,3 @@ def _temporary_path(destination: Path) -> Path:
 def _remove_quietly(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
-
-
-def _tail(text: str) -> str:
-    return text.strip()[-_STDERR_TAIL:]

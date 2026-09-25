@@ -55,6 +55,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "src/kliptych/__main__.py" = [
     "print", # la CLI imprime JSON y ayuda en stdout
+    "too-many-arguments", # _CampaignManagerProtocol.process refleja los parámetros completos de la campaña
 ]
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
@@ -80,6 +81,12 @@ ignore = [
     "blind-except",
     # El controlador orquesta clasificación, propuestas, video y entrega (gate/assets/destino).
     "too-many-arguments",
+]
+"src/kliptych/encoding.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
+    # configuración del operador, nunca texto del LLM.
+    "suspicious-subprocess-import",
+    "subprocess-without-shell-equals-true",
 ]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
@@ -223,6 +230,12 @@ ignore = [
 "tests/test_assembler.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar
     # fixtures sintéticos.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_audit_blockers.py" = [
+    # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
+    # argumentos y shell=False.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]

@@ -99,6 +99,7 @@ class RunRequest:
     registry: AssetRegistry | None = None
     brief_path: Path | None = None
     approve_manual_review: bool = False
+    approved_by: str | None = None
     contract_draft: ContractDraft | None = None
 
 
@@ -273,7 +274,12 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
         assets=context.registry,
         destination=context.request.destination,
         approve_manual_review=context.request.approve_manual_review,
+        approved_by=context.request.approved_by,
     )
+    if delivery.manually_approved_rules:
+        manifest_path = _write_manifest(
+            context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
+        )
     return RunResult(
         run_id=context.identifier,
         outcome=RunOutcome(delivery.status.value),
@@ -347,8 +353,12 @@ def _write_manifest(
     contract: Contract | None = None,
     outputs: Sequence[OutputHash] = (),
     gates: Sequence[GateResult] = (),
+    delivery: DeliveryReport | None = None,
 ) -> Path:
     request = context.request
+    manually_approved_rules = delivery.manually_approved_rules if delivery is not None else ()
+    approved_by = delivery.approved_by if delivery is not None else None
+    approved_at_utc = delivery.approved_at_utc if delivery is not None else None
     manifest = RunManifest(
         run_id=context.identifier,
         started_at=context.started_at,
@@ -365,6 +375,9 @@ def _write_manifest(
         outputs=tuple(outputs),
         gates=tuple(gates),
         degradations=request.environment.degradations,
+        manually_approved_rules=manually_approved_rules,
+        approved_by=approved_by,
+        approved_at_utc=approved_at_utc,
     )
     return write_manifest(manifest, context.run_dir)
 

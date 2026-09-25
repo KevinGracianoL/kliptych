@@ -6,8 +6,15 @@ para que reframe y subtítulos compartan una única fuente de verdad y no
 divergen en silencio.
 """
 
-from collections.abc import Sequence
+import contextlib
+import logging
+import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+logger = logging.getLogger("kliptych.encoding")
+_STDERR_TAIL = 500
 
 _DEFAULT_TIMEOUT_S = 600.0
 
@@ -153,6 +160,121 @@ def fallback_encoder_arguments(argv: Sequence[str]) -> list[str]:
             result.append(arg)
             idx += 1
     return result
+
+
+def _remove_quietly(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
+def _tail(text: str) -> str:
+    return text.strip()[-_STDERR_TAIL:]
+
+
+def _execute_single(
+    cmd: Sequence[str],
+    *,
+    render: RenderConfig,
+    temporary: Path | None,
+    error_cls: type[Exception],
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proc_runner = runner if runner is not None else subprocess.run
+    try:
+        return proc_runner(
+            list(cmd),
+            capture_output=True,
+            text=True,
+            timeout=render.timeout_s,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"ffmpeg no está disponible: {render.ffmpeg}"
+        raise error_cls(msg) from error
+    except subprocess.TimeoutExpired as error:
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
+        raise error_cls(msg) from error
+    except OSError as error:
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
+        raise error_cls(msg) from error
+
+
+def _execute_fallback(
+    cmd: Sequence[str],
+    *,
+    render: RenderConfig,
+    temporary: Path | None,
+    error_cls: type[Exception],
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    logger.warning("NVENC falló, reintentando con libx264...")
+    fallback_argv = fallback_encoder_arguments(cmd)
+    try:
+        completed = _execute_single(
+            fallback_argv, render=render, temporary=temporary, error_cls=error_cls, runner=runner
+        )
+    except subprocess.CalledProcessError as error:
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"ffmpeg falló: {error}"
+        raise error_cls(msg) from error
+    if completed.returncode != 0:
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
+        raise error_cls(msg)
+
+
+def run_ffmpeg_with_fallback(
+    argv: Sequence[str],
+    *,
+    render: RenderConfig,
+    temporary: Path | None = None,
+    error_cls: type[Exception] = RuntimeError,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    """Ejecuta ffmpeg con reintento automático libx264 si h264_nvenc falla.
+
+    Args:
+        argv: Secuencia de argumentos de línea de comandos de ffmpeg.
+        render: Configuración de render (binario ffmpeg, timeout, nvenc).
+        temporary: Archivo temporal opcional que limpiar en caso de error fatal.
+        error_cls: Clase de excepción a lanzar en caso de fallo.
+        runner: Invocador de procesos ejecutables (por defecto subprocess.run).
+    """
+    cmd_list = list(argv)
+    try:
+        completed = _execute_single(
+            cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
+        )
+    except subprocess.CalledProcessError as error:
+        if "h264_nvenc" in cmd_list:
+            _execute_fallback(
+                cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
+            )
+            return
+        if temporary is not None:
+            _remove_quietly(temporary)
+        msg = f"ffmpeg falló: {error}"
+        raise error_cls(msg) from error
+
+    if completed.returncode == 0:
+        return
+    if "h264_nvenc" in cmd_list:
+        _execute_fallback(
+            cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
+        )
+        return
+    if temporary is not None:
+        _remove_quietly(temporary)
+    msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
+    raise error_cls(msg)
 
 
 def _volume(value: float) -> str:
