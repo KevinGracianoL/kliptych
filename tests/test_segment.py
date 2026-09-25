@@ -50,7 +50,7 @@ def _contract(*, min_s: int = 8, max_s: int = 60) -> Contract:
                     "subtitles.spelling_lock",
                 ],
                 "recommended": [],
-                "manual_review": [],
+                "manual_review": ["audio.own_clip"],
             },
             "assets": {"required": [], "optional": []},
             "segments": [{"start_s": 0.0, "end_s": 8.0}],
@@ -80,7 +80,7 @@ def _incompatible_contract() -> Contract:
             "rules": {
                 "hard": ["duration.min", "duration.max"],
                 "recommended": [],
-                "manual_review": [],
+                "manual_review": ["audio.own_clip"],
             },
             "assets": {"required": [], "optional": []},
             "segments": [{"start_s": 0.0, "end_s": 8.0}],
@@ -163,7 +163,7 @@ def test_build_prompt_uses_strictest_platform_duration_intersection() -> None:
             "rules": {
                 "hard": ["duration.min", "duration.max"],
                 "recommended": [],
-                "manual_review": [],
+                "manual_review": ["audio.own_clip"],
             },
             "assets": {"required": [], "optional": []},
             "segments": [{"start_s": 0.0, "end_s": 8.0}],

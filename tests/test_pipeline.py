@@ -101,7 +101,7 @@ def _model(fixture: str) -> RecordedModel:
     )
 
 
-def _request(fixture: str, root: Path) -> RunRequest:
+def _request(fixture: str, root: Path, *, approve_manual_review: bool = False) -> RunRequest:
     brief = (_FIXTURES / fixture / "brief.md").read_text(encoding="utf-8")
     return RunRequest(
         brief=brief,
@@ -110,14 +110,16 @@ def _request(fixture: str, root: Path) -> RunRequest:
         model_version=RecordedModel.model_version,
         prompt_version=PROMPT_VERSION,
         caption_prompt_version=CAPTION_PROMPT_VERSION,
+        approve_manual_review=approve_manual_review,
+        approved_by="auditor-fixture" if approve_manual_review else None,
     )
 
 
-def _run(fixture: str, root: Path) -> RunResult:
+def _run(fixture: str, root: Path, *, approve_manual_review: bool = False) -> RunResult:
     return run_given_clips(
         model=_model(fixture),
         settings=Settings.from_root(root),
-        request=_request(fixture, root),
+        request=_request(fixture, root, approve_manual_review=approve_manual_review),
     )
 
 
@@ -218,10 +220,11 @@ def _unit_request(
 @_NEEDS_FFMPEG
 def test_pipeline_exports_pass_package(tmp_path: Path) -> None:
     _ = _generate_sample(tmp_path)
-    result = _run("given-clips", tmp_path)
+    result = _run("given-clips", tmp_path, approve_manual_review=True)
     assert result.outcome is RunOutcome.EXPORTED
     assert result.delivery is not None
     assert result.delivery.status is ExportStatus.EXPORTED
+    assert result.delivery.manually_approved_rules == ("audio.own_clip",)
     package = Path(cast("str", result.package_path))
     artifact = package / "demo-given-clips" / "tiktok" / "clip-01.mp4"
     assert artifact.is_file()
@@ -230,7 +233,7 @@ def test_pipeline_exports_pass_package(tmp_path: Path) -> None:
     assert metadata["hashtags"] == ["#marca"]
     manifest = _json(Path(result.manifest_path))
     gates = cast("list[dict[str, object]]", manifest["gates"])
-    assert gates[0]["status"] == "passed"
+    assert gates[0]["status"] == "pending_review"
     assert manifest["caption_prompt_version"] == CAPTION_PROMPT_VERSION
     outputs = cast("list[dict[str, object]]", manifest["outputs"])
     assert outputs[0]["sha256"] == metadata["artifact_sha256"]
@@ -338,6 +341,9 @@ def test_cli_run_exports_package(tmp_path: Path, capsys: pytest.CaptureFixture[s
             str(_FIXTURES / "given-clips" / "recorded"),
             "--root",
             str(tmp_path),
+            "--approve-manual-review",
+            "--approved-by",
+            "auditor-fixture",
         ]
     )
     assert code == 0
@@ -365,7 +371,7 @@ def test_cli_run_reports_rejected_package(
             str(tmp_path),
         ]
     )
-    assert code == 0
+    assert code == 1
     payload = _parse(capsys.readouterr().out)
     assert payload["outcome"] == "blocked"
     rejected = cast("list[dict[str, object]]", payload["rejected"])

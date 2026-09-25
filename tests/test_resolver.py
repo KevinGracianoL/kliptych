@@ -710,8 +710,9 @@ def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
         piece=make_piece(artifact, caption="libre", platform=Platform.INSTAGRAM_REELS),
         assets=AssetRegistry(tmp_path),
     )
-    assert gate_result.status is GateStatus.PASSED
+    assert gate_result.status is GateStatus.PENDING_REVIEW
     assert _check(gate_result, "audio.present").status is CheckStatus.PASS
+    assert _check(gate_result, "audio.no_trending").status is CheckStatus.MANUAL_REVIEW
 
 
 def test_nul_uri_on_registered_asset_is_rejected(tmp_path: Path) -> None:

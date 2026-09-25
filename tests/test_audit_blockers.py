@@ -356,7 +356,7 @@ def test_contract_with_link_in_bio_triggers_pending_review(tmp_path: Path) -> No
 
 
 def test_export_delivery_partial_batch_does_not_publish(tmp_path: Path) -> None:
-    contract = make_contract()
+    contract = make_contract(audio_rule="any")
     good = _valid_piece(tmp_path, caption="mira @marca #marca")
     bad_artifact = tmp_path / "bad.mp4"
     _ = bad_artifact.write_bytes(b"bad video")
@@ -506,7 +506,8 @@ def test_audit_10_traceability_in_manual_approval(tmp_path: Path) -> None:
             "caption.required_hashtag",
             "caption.required_mention",
             "watermark.full_video",
-        ]
+        ],
+        audio_rule="any",
     )
 
     piece = _valid_piece(tmp_path)

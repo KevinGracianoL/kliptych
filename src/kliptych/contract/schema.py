@@ -354,6 +354,10 @@ def _platform_restriction_rules(
         active.append("caption.required_hashtag")
     if rules.audio_rule is AudioRule.OFFICIAL_REQUIRED:
         active.append("audio.official_track")
+    if rules.audio_rule is AudioRule.OWN_CLIP:
+        active.append("audio.own_clip")
+    if rules.audio_rule is AudioRule.NO_TRENDING:
+        active.append("audio.no_trending")
     if rules.attribution.type is not AttributionType.NONE:
         active.append("attribution.required")
     if rules.link_rules.link_in_bio:

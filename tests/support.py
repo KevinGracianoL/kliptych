@@ -16,6 +16,11 @@ ALL_HARD_RULES = (
     "duration.min",
 )
 
+_AUDIO_MANUAL_RULES = {
+    "own_clip": "audio.own_clip",
+    "no_trending": "audio.no_trending",
+}
+
 
 def make_asset_ref(
     asset_id: str = "clip-01",
@@ -109,7 +114,12 @@ def make_contract(
     audio_rule: str = "own_clip",
 ) -> Contract:
     plan = [*hard]
+    manual = [*manual_review]
     classified = {*hard, *recommended, *manual_review}
+    audio_rule_id = _AUDIO_MANUAL_RULES.get(audio_rule)
+    if audio_rule_id is not None and audio_rule_id not in classified:
+        manual.append(audio_rule_id)
+        classified.add(audio_rule_id)
     for rule_id in _active_rule_ids(
         min_s=min_s,
         max_s=max_s,
@@ -160,7 +170,7 @@ def make_contract(
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),
-                "manual_review": list(manual_review),
+                "manual_review": manual,
             },
             "assets": {"required": list(required_assets), "optional": []},
             "geo_target": None,

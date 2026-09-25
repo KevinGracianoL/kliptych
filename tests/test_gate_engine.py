@@ -45,7 +45,7 @@ def _always_manual_review(_context: GateContext) -> CheckOutcome:
 def test_all_checks_pass_yields_passed(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     result = _gate().run(
-        contract=make_contract(),
+        contract=make_contract(audio_rule="any"),
         piece=make_piece(artifact),
         assets=AssetRegistry(tmp_path),
     )
@@ -54,7 +54,7 @@ def test_all_checks_pass_yields_passed(tmp_path: Path) -> None:
     assert [check.id for check in result.checks] == list(ALL_HARD_RULES)
     assert all(check.status is CheckStatus.PASS for check in result.checks)
     assert result.artifact_sha256 == sha256(b"video").hexdigest()
-    expected_contract_hash = contract_digest(make_contract())
+    expected_contract_hash = contract_digest(make_contract(audio_rule="any"))
     assert result.contract_sha256 == expected_contract_hash
 
 

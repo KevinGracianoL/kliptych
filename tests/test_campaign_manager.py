@@ -317,7 +317,9 @@ def test_known_routes_to_long_video_and_creates_no_proposal(tmp_path: Path) -> N
     campaign = Campaign(
         campaign_id="camp-01",
         brief="brief crudo",
-        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+        contract=make_contract(
+            required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+        ),
     )
     outcome = manager.process(campaign, mode="long_video", url=_VIDEO_URL)
 
@@ -340,7 +342,9 @@ def test_classifier_receives_brief_and_contract(tmp_path: Path) -> None:
     campaign = Campaign(
         campaign_id="camp-01",
         brief="brief crudo",
-        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+        contract=make_contract(
+            required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+        ),
     )
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
     video = FakeVideoOrchestrator(
@@ -539,7 +543,9 @@ def test_slideshow_mode_uses_slideshow_orchestrator(tmp_path: Path) -> None:
     campaign = Campaign(
         campaign_id="camp-01",
         brief="brief crudo",
-        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+        contract=make_contract(
+            required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+        ),
     )
     outcome = manager.process(campaign, mode="slideshow", images=(_IMAGE,))
 
@@ -570,7 +576,9 @@ def test_slideshow_mode_falls_back_to_video_orchestrator(tmp_path: Path) -> None
     campaign = Campaign(
         campaign_id="camp-01",
         brief="brief crudo",
-        contract=make_contract(required_mentions=["@marca"], required_hashtags=["#marca"]),
+        contract=make_contract(
+            required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+        ),
     )
     outcome = manager.process(campaign, mode="slideshow", images=(_IMAGE,))
 
@@ -682,7 +690,9 @@ def test_known_route_with_gate_and_valid_video_exports_successfully(tmp_path: Pa
     video_path = tmp_path / "rendered.mp4"
     _ = video_path.write_bytes(b"rendered video content")
 
-    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    contract = make_contract(
+        required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+    )
     campaign = Campaign(
         campaign_id="camp-valid",
         brief="brief crudo",
@@ -740,7 +750,9 @@ def test_known_route_batch_segments_export_all_valid_pieces(tmp_path: Path) -> N
     _ = v1.write_bytes(b"content 1")
     _ = v2.write_bytes(b"content 2")
 
-    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    contract = make_contract(
+        required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+    )
     campaign = Campaign(campaign_id="camp-batch", brief="brief crudo", contract=contract)
     classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
     video_orch = FakeVideoOrchestrator(
@@ -863,7 +875,9 @@ def test_slideshow_route_with_gate_delivery_success(tmp_path: Path) -> None:
     video_path = tmp_path / "slide_final.mp4"
     _ = video_path.write_bytes(b"slideshow video content")
 
-    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    contract = make_contract(
+        required_mentions=["@marca"], required_hashtags=["#marca"], audio_rule="any"
+    )
     campaign = Campaign(
         campaign_id="camp-slide",
         brief="brief crudo",

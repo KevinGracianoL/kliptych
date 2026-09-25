@@ -359,8 +359,12 @@ def test_fixture_brief_flows_to_the_gate(tmp_path: Path) -> None:
         piece=make_piece(artifact, caption="mira @marca #marca"),
         assets=registry,
     )
-    assert gate_result.status is GateStatus.PASSED
-    assert all(check.status is CheckStatus.PASS for check in gate_result.checks)
+    assert gate_result.status is GateStatus.PENDING_REVIEW
+    audio_check = next(check for check in gate_result.checks if check.id == "audio.own_clip")
+    assert audio_check.status is CheckStatus.MANUAL_REVIEW
+    assert all(
+        check.status is CheckStatus.PASS for check in gate_result.checks if check.id != "audio.own_clip"
+    )
 
 
 def test_recorded_document_rejects_bad_hash(tmp_path: Path) -> None:
