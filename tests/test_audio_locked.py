@@ -75,7 +75,7 @@ def _contract() -> Contract:
             "rules": {
                 "hard": ["duration.min", "duration.max"],
                 "recommended": [],
-                "manual_review": [],
+                "manual_review": ["audio.official_track"],
             },
             "assets": {"required": [], "optional": []},
             "segments": [{"start_s": 0.0, "end_s": 1.0}],

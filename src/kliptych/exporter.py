@@ -137,6 +137,7 @@ class DeliveryReport(_ExporterBase):
     exported: tuple[ExportedPiece, ...]
     rejected: tuple[RejectedPiece, ...]
     reminders: tuple[Reminder, ...]
+    published_dir: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,14 +238,11 @@ def export_delivery(
     published = False
     try:
         staging.mkdir(parents=True)
-        report = _build_report(
-            context,
-            plans,
-            package=destination.name,
-        )
-        _ = (staging / _SUMMARY_NAME).write_text(report.model_dump_json(indent=2), encoding="utf-8")
-        _publish(staging, destination)
-        published = True
+        report = _build_report(context, plans, package=destination.name)
+        if report.status is ExportStatus.EXPORTED:
+            report = _commit_published_package(staging, destination, report)
+            published = True
+            return report
     except OSError as error:
         msg = f"falló la escritura del paquete de entrega: {error}"
         raise ExportError(msg) from error
@@ -252,6 +250,20 @@ def export_delivery(
         if not published:
             _remove_tree(staging)
     return report
+
+
+def _commit_published_package(
+    staging: Path,
+    destination: Path,
+    report: DeliveryReport,
+) -> DeliveryReport:
+    published_report = report.model_copy(update={"published_dir": str(destination)})
+    _ = (staging / _SUMMARY_NAME).write_text(
+        published_report.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    _publish(staging, destination)
+    return published_report
 
 
 def _build_report(

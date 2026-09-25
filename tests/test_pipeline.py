@@ -191,15 +191,16 @@ def _asset_draft(asset_id: str, kind: str, uri: str) -> dict[str, object]:
 def _unit_request(
     root: Path,
     *,
-    brief: str = "brief de prueba",
+    brief: str = "cita del brief",
     assembler: PieceAssembler | None = None,
     gate: Gate | None = None,
     registry: AssetRegistry | None = None,
     run_id: str | None = None,
     brief_path: Path | None = None,
 ) -> RunRequest:
+    content = brief if brief.startswith("cita del brief") else f"cita del brief\n{brief}"
     return RunRequest(
-        brief=brief,
+        brief=content,
         destination=root / "delivery",
         environment=EnvironmentReport(),
         model_version="static",
@@ -292,7 +293,7 @@ def test_pipeline_blocks_artifact_without_audio(tmp_path: Path) -> None:
 def test_pipeline_requires_video_assets(tmp_path: Path) -> None:
     model = _StaticModel(make_draft())
     request = RunRequest(
-        brief="brief sin clips",
+        brief="cita del brief\nbrief sin clips",
         destination=tmp_path / "delivery",
         environment=EnvironmentReport(),
         model_version="static",
@@ -306,7 +307,7 @@ def test_pipeline_requires_video_assets(tmp_path: Path) -> None:
 def test_pipeline_reports_new_archetype(tmp_path: Path) -> None:
     model = _StaticModel(make_draft(mode={"confidence": "missing"}))
     request = RunRequest(
-        brief="brief sin modo",
+        brief="cita del brief\nbrief sin modo",
         destination=tmp_path / "delivery",
         environment=EnvironmentReport(),
         model_version="static",
@@ -615,7 +616,7 @@ def test_cli_run_missing_brief_exits_1_with_json_stderr(
 def test_cli_run_reports_unresolved_with_issues(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    brief_text = "brief sin modo"
+    brief_text = "cita del brief\nbrief sin modo"
     brief_path = tmp_path / "brief.md"
     _ = brief_path.write_text(brief_text, encoding="utf-8")
     recorded = tmp_path / "recorded"
@@ -649,8 +650,9 @@ def _stub_backend() -> SimpleNamespace:
 
 
 def _write_brief(tmp_path: Path, text: str = "brief de prueba") -> Path:
+    content = text if text.startswith("cita del brief") else f"cita del brief\n{text}"
     path = tmp_path / "brief.md"
-    _ = path.write_text(text, encoding="utf-8")
+    _ = path.write_text(content, encoding="utf-8")
     return path
 
 

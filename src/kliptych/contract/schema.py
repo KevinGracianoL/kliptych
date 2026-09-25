@@ -6,6 +6,7 @@ prohibida en el resto.
 """
 
 import math
+from collections.abc import Sequence
 from typing import Annotated, Literal, Self
 
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
@@ -272,13 +273,21 @@ class Contract(ContractBase):
             spelling_locks=tuple(self.spelling_locks),
             prohibitions=tuple(self.prohibitions),
         )
+        aliases: dict[str, tuple[str, ...]] = {
+            "audio.official_track": (
+                "audio.official_track",
+                "audio.official_selection",
+                "audio.rule",
+            ),
+            "attribution.required": ("attribution.required", "attribution.present"),
+            "link.in_bio": ("link.in_bio", "link_rules.link_in_bio"),
+        }
         missing: set[str] = set()
         for platform, rules in self.platforms.items():
-            missing.update(
-                f"{platform}.{rule_id}"
-                for rule_id in active_restriction_rules(rules, global_restrictions)
-                if rule_id not in classified
-            )
+            for rule_id in active_restriction_rules(rules, global_restrictions):
+                allowed = aliases.get(rule_id, (rule_id,))
+                if not any(alias in classified for alias in allowed):
+                    missing.add(f"{platform}.{rule_id}")
         if missing:
             msg = (
                 "restricciones declaradas sin regla clasificada en rules: "
@@ -326,6 +335,44 @@ def contract_digest(contract: Contract) -> str:
     )
 
 
+def _platform_restriction_rules(
+    rules: PlatformRules,
+    prohibitions: Sequence[str],
+) -> list[str]:
+    active: list[str] = []
+    if rules.duration.min_s is not None:
+        active.append("duration.min")
+    if rules.duration.max_s is not None:
+        active.append("duration.max")
+    if rules.caption_rules.first_line is not None:
+        active.append("caption.first_line")
+    if rules.caption_rules.forbidden or prohibitions:
+        active.append("caption.forbidden")
+    if rules.caption_rules.must_mention or rules.required_mentions:
+        active.append("caption.required_mention")
+    if rules.required_hashtags:
+        active.append("caption.required_hashtag")
+    if rules.audio_rule is AudioRule.OFFICIAL_REQUIRED:
+        active.append("audio.official_track")
+    if rules.attribution.type is not AttributionType.NONE:
+        active.append("attribution.required")
+    if rules.link_rules.link_in_bio:
+        active.append("link.in_bio")
+    return active
+
+
+def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[str]:
+    active: list[str] = []
+    if global_restrictions.has_required_assets:
+        active.append("assets.required")
+    watermark_rule = _watermark_rule(global_restrictions)
+    if watermark_rule is not None:
+        active.append(watermark_rule)
+    if global_restrictions.spelling_locks:
+        active.append("subtitles.spelling_lock")
+    return active
+
+
 def active_restriction_rules(
     rules: PlatformRules,
     global_restrictions: GlobalRestrictions,
@@ -340,36 +387,11 @@ def active_restriction_rules(
         Los rule_ids del catálogo del gate que la plataforma exige; el
         contrato debe clasificarlos en ``rules`` para que el gate los
         evalúe en vez de ignorarlos en silencio.
-
-    Nota:
-        ``watermark.present`` cubre el watermark exigido sin cobertura total y
-        aún no tiene validador mecánico (fase B): clasificado en ``rules``, el
-        gate lo marca ``unsupported``.  ``audio_rule``, ``attribution`` y
-        ``link_rules.link_in_bio`` tampoco tienen rule_id en el catálogo del
-        gate (fases C/D); hasta que lo tengan, el contrato puede declararlos
-        sin clasificación y el gate no los evalúa.
     """
-    active: list[str] = []
-    if rules.duration.min_s is not None:
-        active.append("duration.min")
-    if rules.duration.max_s is not None:
-        active.append("duration.max")
-    if rules.caption_rules.first_line is not None:
-        active.append("caption.first_line")
-    if rules.caption_rules.forbidden or global_restrictions.prohibitions:
-        active.append("caption.forbidden")
-    if rules.caption_rules.must_mention or rules.required_mentions:
-        active.append("caption.required_mention")
-    if rules.required_hashtags:
-        active.append("caption.required_hashtag")
-    if global_restrictions.has_required_assets:
-        active.append("assets.required")
-    watermark_rule = _watermark_rule(global_restrictions)
-    if watermark_rule is not None:
-        active.append(watermark_rule)
-    if global_restrictions.spelling_locks:
-        active.append("subtitles.spelling_lock")
-    return active
+    return [
+        *_platform_restriction_rules(rules, global_restrictions.prohibitions),
+        *_global_restriction_rules(global_restrictions),
+    ]
 
 
 def _watermark_rule(global_restrictions: GlobalRestrictions) -> str | None:

@@ -303,53 +303,48 @@ class CampaignManager:
         effective_dest = destination if destination is not None else self._destination
         effective_assets = assets if assets is not None else self._assets
 
-        if effective_gate is not None:
-            from kliptych.assets import AssetRegistry
-            from kliptych.exporter import ExportStatus, export_delivery
+        if effective_gate is None:
+            msg = f"la campaña {campaign.campaign_id} requiere un Gate configurado para su entrega"
+            raise CampaignManagerError(msg)
 
-            dest = effective_dest if effective_dest is not None else Path("delivery")
-            reg = effective_assets if effective_assets is not None else AssetRegistry(dest.parent)
-            contract = campaign.contract
-            if contract is None:
-                msg = f"la campaña {campaign.campaign_id} no tiene contrato validado"
-                raise CampaignManagerError(msg)
+        from kliptych.assets import AssetRegistry
+        from kliptych.exporter import ExportStatus, export_delivery
 
-            pieces = _build_pieces(
-                campaign=campaign,
-                contract=contract,
-                final_videos=final_videos,
-                caption=caption,
-                hashtags=hashtags,
-                platform=platform,
-            )
-            delivery_report = export_delivery(
-                contract=contract,
-                pieces=pieces,
-                gate=effective_gate,
-                assets=reg,
-                destination=dest,
-                approve_manual_review=approve_manual_review,
-            )
-            status = (
-                CampaignStatus.COMPLETED
-                if delivery_report.status is ExportStatus.EXPORTED
-                else CampaignStatus.BLOCKED
-            )
-            return CampaignOutcome(
-                campaign_id=campaign.campaign_id,
-                archetype=Archetype.KNOWN,
-                status=status,
-                pipeline_result=pipeline_result,
-                slideshow_result=slideshow_result,
-                delivery_report=delivery_report,
-            )
+        dest = effective_dest if effective_dest is not None else Path("delivery")
+        reg = effective_assets if effective_assets is not None else AssetRegistry(dest.parent)
+        contract = campaign.contract
+        if contract is None:
+            msg = f"la campaña {campaign.campaign_id} no tiene contrato validado"
+            raise CampaignManagerError(msg)
 
+        pieces = _build_pieces(
+            campaign=campaign,
+            contract=contract,
+            final_videos=final_videos,
+            caption=caption,
+            hashtags=hashtags,
+            platform=platform,
+        )
+        delivery_report = export_delivery(
+            contract=contract,
+            pieces=pieces,
+            gate=effective_gate,
+            assets=reg,
+            destination=dest,
+            approve_manual_review=approve_manual_review,
+        )
+        status = (
+            CampaignStatus.COMPLETED
+            if delivery_report.status is ExportStatus.EXPORTED
+            else CampaignStatus.BLOCKED
+        )
         return CampaignOutcome(
             campaign_id=campaign.campaign_id,
             archetype=Archetype.KNOWN,
-            status=CampaignStatus.COMPLETED,
+            status=status,
             pipeline_result=pipeline_result,
             slideshow_result=slideshow_result,
+            delivery_report=delivery_report,
         )
 
     def _process_proposal(

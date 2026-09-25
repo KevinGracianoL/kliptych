@@ -826,23 +826,63 @@ def _resolve_rules(
                     detail="regla obligatoria reclasificada como hard (fail-closed)",
                 )
             )
+    _apply_platform_restrictions(
+        context,
+        classified=classified,
+        hard=hard,
+        manual_review=manual_review,
+        issues=issues,
+    )
+    return RuleSet(hard=hard, recommended=recommended, manual_review=manual_review)
+
+
+_MANUAL_REVIEW_DEFAULTS: frozenset[str] = frozenset(
+    {
+        "audio.official_track",
+        "audio.official_selection",
+        "audio.rule",
+        "attribution.required",
+        "attribution.present",
+        "link.in_bio",
+        "link_rules.link_in_bio",
+    }
+)
+
+
+def _apply_platform_restrictions(
+    context: _RuleContext,
+    *,
+    classified: set[str],
+    hard: list[str],
+    manual_review: list[str],
+    issues: list[ResolutionIssue],
+) -> None:
     for platform, platform_rules in context.platforms.items():
         for rule_id in active_restriction_rules(platform_rules, context.global_restrictions):
-            if rule_id not in classified:
-                classified.add(rule_id)
+            if rule_id in classified:
+                continue
+            classified.add(rule_id)
+            if rule_id in _MANUAL_REVIEW_DEFAULTS:
+                if rule_id not in manual_review:
+                    manual_review.append(rule_id)
+                detail = (
+                    f"{platform}: restricción activa sin clasificar en el brief; "
+                    "se clasifica como manual_review"
+                )
+            else:
                 if rule_id not in hard:
                     hard.append(rule_id)
-                issues.append(
-                    ResolutionIssue(
-                        code=IssueCode.RULE_DEFAULTED,
-                        field=f"rules.{rule_id}",
-                        detail=(
-                            f"{platform}: restricción activa sin clasificar en el brief; "
-                            "se clasifica como hard (fail-closed)"
-                        ),
-                    )
+                detail = (
+                    f"{platform}: restricción activa sin clasificar en el brief; "
+                    "se clasifica como hard (fail-closed)"
                 )
-    return RuleSet(hard=hard, recommended=recommended, manual_review=manual_review)
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.RULE_DEFAULTED,
+                    field=f"rules.{rule_id}",
+                    detail=detail,
+                )
+            )
 
 
 def _resolve_geo_target(
