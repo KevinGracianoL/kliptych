@@ -239,6 +239,13 @@ class _SubtitleRenderer:
 def _ffmpeg(events: list[str], captured: list[list[str]]) -> Callable[..., object]:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
+        if str(argv[0]).lower().endswith("ffprobe") or "ffprobe" in str(argv[0]).lower():
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="width=1080\nheight=1920\nduration=10.000\n",
+                stderr="",
+            )
         if "-ss" in argv:
             tag = "cut"
         elif "-filter_complex" in argv:
@@ -303,7 +310,7 @@ def test_audio_injection_arguments_replace() -> None:
     assert argv[argv.index("-map", argv.index("-map") + 1) + 1] == "1:a:0"
     assert "-filter_complex" not in argv
     assert "copy" in argv
-    assert "-shortest" in argv
+    assert "-shortest" not in argv
 
 
 def test_audio_injection_arguments_mix() -> None:
@@ -396,8 +403,79 @@ def test_inject_audio_builds_replace_argv(tmp_path: Path, monkeypatch: pytest.Mo
     argv = captured[0]
     assert argv.count("-i") == 2
     assert argv[argv.index("-map", argv.index("-map") + 1) + 1] == "1:a:0"
+    assert "-shortest" not in argv
+    assert "-t" in argv
+    assert argv[argv.index("-t") + 1] == "10.000"
     assert destination.is_file()
     assert destination in registry.paths
+
+
+def test_inject_audio_rejects_shorter_external_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_probe(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        target = Path(argv[-1])
+        duration = "6.000" if target.suffix == ".mp4" else "2.000"
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=f"width=1080\nheight=1920\nduration={duration}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", fake_probe)
+    video = tmp_path / "reframed.mp4"
+    _ = video.write_bytes(b"video")
+    track = tmp_path / "track.mp3"
+    _ = track.write_bytes(b"audio")
+    config = _config(tmp_path, audio_locked=True, audio_track_path=track)
+    with pytest.raises(PipelineError, match="El audio externo es más corto que el video"):
+        _ = _inject_audio(
+            video,
+            config=config,
+            downloader=_FakeDownloader([]),
+            registry=_cleanup_registry(),
+        )
+
+
+def test_inject_audio_accepts_longer_audio_without_shortest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        if str(argv[0]).lower().endswith("ffprobe") or "ffprobe" in str(argv[0]).lower():
+            target = Path(argv[-1])
+            duration = "6.000" if target.suffix == ".mp4" else "8.000"
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=f"width=1080\nheight=1920\nduration={duration}\n",
+                stderr="",
+            )
+        captured.append(list(argv))
+        _ = Path(argv[-1]).write_bytes(b"rendered")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", fake_run)
+    video = tmp_path / "reframed.mp4"
+    _ = video.write_bytes(b"video")
+    track = tmp_path / "track.mp3"
+    _ = track.write_bytes(b"audio")
+    config = _config(tmp_path, audio_locked=True, audio_track_path=track)
+    dest = _inject_audio(
+        video,
+        config=config,
+        downloader=_FakeDownloader([]),
+        registry=_cleanup_registry(),
+    )
+    assert dest.is_file()
+    ffmpeg_argv = captured[0]
+    assert "-shortest" not in ffmpeg_argv
+    assert "-t" in ffmpeg_argv
+    assert ffmpeg_argv[ffmpeg_argv.index("-t") + 1] == "6.000"
 
 
 def test_inject_audio_builds_mix_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

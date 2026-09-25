@@ -109,6 +109,13 @@ def _ffmpeg(harness: _Harness) -> Callable[..., object]:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         harness.commands.append(list(argv))
+        if str(argv[0]).lower().endswith("ffprobe") or "ffprobe" in str(argv[0]).lower():
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="width=1080\nheight=1920\nduration=10.000\n",
+                stderr="",
+            )
         if "-f" in argv and argv[argv.index("-f") + 1] == "concat":
             harness.events.append("assemble")
         elif "-filter_complex" in argv:
@@ -355,3 +362,30 @@ def test_rejects_unwritable_output_dir(tmp_path: Path, monkeypatch: pytest.Monke
 def test_backward_compatible_long_video_untouched() -> None:
     assert callable(orchestrator.run_long_video)
     assert orchestrator.run_long_video is not run_slideshow
+
+
+def test_slideshow_resume_fingerprint_mismatch_and_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness()
+    _install(monkeypatch, harness)
+    track = tmp_path / "track.wav"
+    _ = track.write_bytes(b"audio")
+    images = _images(tmp_path)
+    config = _config(tmp_path, audio_track_path=track)
+
+    # 0. Corrida con resume=True sin checkpoint previo (is_loaded=False)
+    res0 = run_slideshow(images, config=config, resume=True)
+    assert res0.final_video.is_file()
+
+    # 1. Corrida normal
+    res1 = run_slideshow(images, config=config, resume=False)
+    assert res1.final_video.is_file()
+
+    # 2. Reanudar con mismos parámetros
+    res2 = run_slideshow(images, config=config, resume=True)
+    assert res2.final_video.is_file()
+
+    # 3. Reanudar cambiando la duración del slide (invalida fingerprint)
+    res3 = run_slideshow(images, config=config, slide_duration_s=5.0, resume=True)
+    assert res3.final_video.is_file()
