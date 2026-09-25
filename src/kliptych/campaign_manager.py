@@ -185,7 +185,8 @@ class CampaignManager:
         Args:
             campaign: Campaña con su brief y contrato validado.
             mode: Modo de video a ejecutar si el arquetipo es ``KNOWN``
-                (``long_video``, ``audio_locked``, ``repost`` o ``slideshow``).
+                (``long_video``, ``audio_locked``, ``repost``, ``repost_ugc``
+                o ``slideshow``).
             url: URL del vídeo fuente, requerida por los modos de video.
             images: Imágenes del slideshow, requeridas por el modo ``slideshow``.
             resume: Si es True, reanuda la ejecución desde checkpoints previos.
@@ -319,7 +320,7 @@ class CampaignManager:
                 audio_track_url=audio_track_url,
             )
             final_videos = getattr(pipeline_result, "final_videos", (pipeline_result.final_video,))
-        elif mode == "repost":
+        elif mode in {"repost", "repost_ugc"}:
             pipeline_result = self._run_long_video(
                 url, resume=resume, contract=contract, repost_mode=True
             )
