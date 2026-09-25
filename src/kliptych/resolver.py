@@ -25,9 +25,9 @@ Política de resolución:
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from kliptych.assets import AssetError, AssetRegistry
 from kliptych.contract import (
@@ -58,6 +58,7 @@ from kliptych.contract import (
     PlatformRules,
     RuleSet,
     Segment,
+    SourceEvidence,
     Watermark,
     active_restriction_rules,
 )
@@ -132,17 +133,97 @@ class _ConfidenceCarrier(Protocol):
     def confidence(self) -> Confidence: ...
 
 
-def resolve_contract(draft: ContractDraft, *, registry: AssetRegistry) -> ResolutionResult:
+class ProvenanceError(ValueError):
+    """Fallo mecánico en la verificación de procedencia de una cita del brief."""
+
+
+def _collect_all_evidence(node: object) -> list[SourceEvidence]:
+    evidences: list[SourceEvidence] = []
+    if isinstance(node, SourceEvidence):
+        evidences.append(node)
+        return evidences
+    if isinstance(node, BaseModel):
+        for field_name in type(node).model_fields:
+            field_value = cast("object", getattr(node, field_name))
+            if field_value is not None:
+                evidences.extend(_collect_all_evidence(field_value))
+    elif isinstance(node, (list, tuple)):
+        for item in cast("Sequence[object]", node):
+            evidences.extend(_collect_all_evidence(item))
+    elif isinstance(node, dict):
+        for value in cast("dict[object, object]", node).values():
+            evidences.extend(_collect_all_evidence(value))
+    return evidences
+
+
+def verify_provenance(draft: ContractDraft, brief_text: str) -> None:
+    """Verifica mecánicamente que cada cita y sus offsets existan en el brief.
+
+    Args:
+        draft: Borrador de contrato con evidencias textuales.
+        brief_text: Texto crudo del brief original.
+
+    Raises:
+        ProvenanceError: Si alguna cita está fabricada (no existe en brief_text)
+            o si los offsets no coinciden exactamente con la cita en brief_text.
+    """
+    for evidence in _collect_all_evidence(draft):
+        quote = evidence.quote
+        if quote not in brief_text:
+            msg = f"Cita fabricada: {quote!r} no existe en el texto del brief"
+            raise ProvenanceError(msg)
+        start = getattr(evidence, "start_char", getattr(evidence, "start", None))
+        end = getattr(evidence, "end_char", getattr(evidence, "end", None))
+        if start is not None and end is not None:
+            if start < 0 or end < start or end > len(brief_text):
+                msg = (
+                    f"Offsets fuera de rango [{start}:{end}] para cita {quote!r} "
+                    f"en brief de longitud {len(brief_text)}"
+                )
+                raise ProvenanceError(msg)
+            if brief_text[start:end] != quote:
+                msg = (
+                    f"Offsets desalineados: brief[{start}:{end}] es "
+                    f"{brief_text[start:end]!r}, se esperaba {quote!r}"
+                )
+                raise ProvenanceError(msg)
+        elif start is not None and end is None:
+            if start < 0 or start + len(quote) > len(brief_text):
+                msg = (
+                    f"Offset de inicio fuera de rango [{start}] para cita {quote!r} "
+                    f"en brief de longitud {len(brief_text)}"
+                )
+                raise ProvenanceError(msg)
+            if brief_text[start : start + len(quote)] != quote:
+                msg = (
+                    f"Offsets desalineados: brief[{start}:{start + len(quote)}] es "
+                    f"{brief_text[start : start + len(quote)]!r}, se esperaba {quote!r}"
+                )
+                raise ProvenanceError(msg)
+
+
+def resolve_contract(
+    draft: ContractDraft,
+    *,
+    registry: AssetRegistry,
+    brief_text: str | None = None,
+) -> ResolutionResult:
     """Convierte un ``ContractDraft`` en un ``Contract`` validado.
 
     Args:
         draft: Salida cruda del extractor, con evidencia por campo.
         registry: Registro de assets del workspace para resolver assets.
+        brief_text: Texto crudo del brief original para verificación mecánica
+            de procedencia. Si se proporciona, cada cita y offset en ``draft``
+            se verifican contra este texto.
 
     Returns:
         El resultado con el contrato resuelto (si aplica) y los issues
         encontrados.
     """
+    if brief_text is not None:
+        verify_provenance(draft, brief_text)
+
     issues: list[ResolutionIssue] = _collect_conflicts(draft)
 
     mode = _required_value(draft.mode, "mode", issues)

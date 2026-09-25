@@ -311,9 +311,8 @@ def _build_package(
     exported: list[ExportedPiece] = []
     rejected: list[RejectedPiece] = []
     for plan in plans:
-        gate_result = context.gate.run(
-            contract=context.contract, piece=plan.piece, assets=context.assets
-        )
+        gate_func = getattr(context.gate, "evaluate_piece", context.gate.run)
+        gate_result = gate_func(contract=context.contract, piece=plan.piece, assets=context.assets)
         should_export = gate_result.passed or (
             gate_result.status is GateStatus.PENDING_REVIEW and context.approve_manual_review
         )

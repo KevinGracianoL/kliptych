@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from kliptych.contract.base import ContractBase
 
@@ -21,9 +21,19 @@ class SourceEvidence(ContractBase):
     """Cita textual del brief que respalda un valor extraído."""
 
     quote: str = Field(min_length=1)
-    start: int = Field(ge=0)
-    end: int = Field(ge=0)
+    start: int = Field(ge=0, validation_alias=AliasChoices("start", "start_char"))
+    end: int = Field(ge=0, validation_alias=AliasChoices("end", "end_char"))
     location: str = Field(min_length=1)
+
+    @property
+    def start_char(self) -> int:
+        """Offset inicial de la cita textual en el brief."""
+        return self.start
+
+    @property
+    def end_char(self) -> int:
+        """Offset final de la cita textual en el brief."""
+        return self.end
 
     @model_validator(mode="after")
     def _span_is_ordered(self) -> Self:

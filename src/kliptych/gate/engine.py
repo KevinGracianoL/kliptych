@@ -42,6 +42,29 @@ class Gate:
             DEFAULT_VALIDATORS if validators is None else validators
         )
 
+    def evaluate_piece(
+        self,
+        piece: Piece,
+        *,
+        contract: Contract,
+        assets: AssetRegistry | None = None,
+    ) -> GateResult:
+        """Evalúa una pieza contra el contrato usando el Gate.
+
+        Args:
+            piece: Pieza final a validar (artefacto más textos).
+            contract: Contrato validado que declara las reglas.
+            assets: Registro opcional de assets del workspace. Si es None,
+                se crea a partir del directorio del artefacto.
+
+        Returns:
+            El resultado del gate, con un check por regla declarada.
+        """
+        effective_assets = (
+            assets if assets is not None else AssetRegistry(piece.artifact_path.parent)
+        )
+        return self.run(contract=contract, piece=piece, assets=effective_assets)
+
     def run(self, *, contract: Contract, piece: Piece, assets: AssetRegistry) -> GateResult:
         """Valida la pieza contra el contrato.
 

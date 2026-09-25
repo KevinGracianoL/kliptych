@@ -114,6 +114,12 @@ class PipelineResult:
     subtitles: Path | None
     final_video: Path
     cleaning: tuple[str, ...]
+    final_videos: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Inicializa final_videos con final_video si no se proporcionó."""
+        if not self.final_videos and self.final_video:
+            object.__setattr__(self, "final_videos", (self.final_video,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +136,7 @@ class SlideshowResult:
         subtitles: Siempre ``None``: el slideshow no transcribe y por tanto no
             genera subtítulos.
         cleaning: Rutas de los temporales eliminados al terminar.
+        final_videos: Todos los vídeos generados en el lote.
     """
 
     images: tuple[Path, ...]
@@ -137,6 +144,12 @@ class SlideshowResult:
     final_video: Path
     subtitles: Path | None
     cleaning: tuple[str, ...]
+    final_videos: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Inicializa final_videos con final_video si no se proporcionó."""
+        if not self.final_videos and self.final_video:
+            object.__setattr__(self, "final_videos", (self.final_video,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1109,6 +1122,7 @@ def _resolve_clip(
     segment: Segment,
     config: PipelineConfig,
     registry: _CleanupRegistry,
+    suffix: str = "",
 ) -> Path:
     passthrough = (
         config.repost_mode and not config.audio_locked and not _needs_reframe(source, config.render)
@@ -1120,7 +1134,13 @@ def _resolve_clip(
             render=config.render,
             registry=registry,
         )
-    return _cut_segment(source, segment=segment, render=config.render, registry=registry)
+    return _cut_segment(
+        source,
+        segment=segment,
+        render=config.render,
+        registry=registry,
+        suffix=suffix,
+    )
 
 
 def _resolve_reframe_stage(
@@ -1131,20 +1151,22 @@ def _resolve_reframe_stage(
     registry: _CleanupRegistry,
     state: PipelineStateManager,
     resume: bool = False,
+    suffix: str = "",
+    is_primary: bool = True,
 ) -> tuple[ReframeResult | None, Path]:
     if config.repost_mode and not _needs_reframe(clip, config.render):
         return None, clip
-    reframe_json = config.output_dir / "reframe.json"
-    reframed_video = state.artifact_path(PipelineStage.REFRAME) or (
-        config.output_dir / "reframed.mp4"
+    reframe_json = config.output_dir / f"reframe{suffix}.json"
+    reframed_video = (state.artifact_path(PipelineStage.REFRAME) if is_primary else None) or (
+        config.output_dir / f"reframed{suffix}.mp4"
     )
-    subtitles_already_done = (
+    subtitles_already_done = is_primary and (
         state.is_done(PipelineStage.SUBTITLES) and (config.output_dir / _FINAL_NAME).is_file()
     )
     video_valid = reframed_video.is_file() and reframed_video.stat().st_size > 0
     json_valid = reframe_json.is_file() and reframe_json.stat().st_size > 0
     can_reuse = (video_valid or subtitles_already_done) and json_valid
-    if resume and state.is_done(PipelineStage.REFRAME) and can_reuse:
+    if resume and (state.is_done(PipelineStage.REFRAME) if is_primary else True) and can_reuse:
         try:
             reframe = ReframeResult.model_validate_json(reframe_json.read_text(encoding="utf-8"))
         except (ValidationError, ValueError, json.JSONDecodeError):
@@ -1154,7 +1176,7 @@ def _resolve_reframe_stage(
                 _ = registry.register(reframed_video, is_artifact=True)
             return reframe, reframed_video
     try:
-        destination = config.output_dir / "reframed.mp4"
+        destination = config.output_dir / f"reframed{suffix}.mp4"
         reframe, reframed = _reframe(
             clip,
             reframer=_require_reframer(dependencies),
@@ -1162,9 +1184,11 @@ def _resolve_reframe_stage(
             registry=registry,
         )
         _atomic_write_json(reframe_json, reframe.model_dump_json(indent=2))
-        state.mark_done(PipelineStage.REFRAME, reframed)
+        if is_primary:
+            state.mark_done(PipelineStage.REFRAME, reframed)
     except Exception:
-        state.mark_failed(PipelineStage.REFRAME)
+        if is_primary:
+            state.mark_failed(PipelineStage.REFRAME)
         raise
     else:
         return reframe, reframed
@@ -1180,18 +1204,29 @@ def _resolve_subtitles_and_burn_stage(
     registry: _CleanupRegistry,
     state: PipelineStateManager,
     resume: bool = False,
+    suffix: str = "",
+    is_primary: bool = True,
 ) -> tuple[Path | None, Path]:
+    final_name = f"final{suffix}.mp4"
+    subtitles_name = f"subtitles{suffix}.ass"
     if transcript is None:
-        final_video = _publish(video, output_dir=config.output_dir, registry=registry)
+        final_video = _publish(
+            video,
+            output_dir=config.output_dir,
+            registry=registry,
+            final_name=final_name,
+        )
         return None, final_video
-    final_video = state.artifact_path(PipelineStage.SUBTITLES) or (config.output_dir / _FINAL_NAME)
+    final_video = (state.artifact_path(PipelineStage.SUBTITLES) if is_primary else None) or (
+        config.output_dir / final_name
+    )
     if (
         resume
-        and state.is_done(PipelineStage.SUBTITLES)
+        and (state.is_done(PipelineStage.SUBTITLES) if is_primary else True)
         and final_video.is_file()
         and final_video.stat().st_size > 0
     ):
-        cached_subtitles = config.output_dir / "subtitles.ass"
+        cached_subtitles = config.output_dir / subtitles_name
         return cached_subtitles, final_video
     try:
         subtitles = _write_subtitles(
@@ -1200,19 +1235,80 @@ def _resolve_subtitles_and_burn_stage(
             renderer=dependencies.subtitle_renderer,
             output_dir=config.output_dir,
             registry=registry,
+            subtitles_name=subtitles_name,
         )
         final = _burn(
             video,
             subtitles=subtitles,
             renderer=dependencies.subtitle_renderer,
             output_dir=config.output_dir,
+            final_name=final_name,
         )
-        state.mark_done(PipelineStage.SUBTITLES, final)
+        if is_primary:
+            state.mark_done(PipelineStage.SUBTITLES, final)
     except Exception:
-        state.mark_failed(PipelineStage.SUBTITLES)
+        if is_primary:
+            state.mark_failed(PipelineStage.SUBTITLES)
         raise
     else:
         return subtitles, final
+
+
+def _render_segment(
+    source: Path,
+    *,
+    segment: Segment,
+    transcript: Transcript | None,
+    config: PipelineConfig,
+    dependencies: _Dependencies,
+    registry: _CleanupRegistry,
+    state: PipelineStateManager,
+    resume: bool,
+    suffix: str,
+    is_primary: bool,
+) -> tuple[ReframeResult | None, Path | None, Path]:
+    clip = _resolve_clip(
+        source,
+        segment=segment,
+        config=config,
+        registry=registry,
+        suffix=suffix,
+    )
+    reframe, reframed = _resolve_reframe_stage(
+        clip,
+        config=config,
+        dependencies=dependencies,
+        registry=registry,
+        state=state,
+        resume=resume,
+        suffix=suffix,
+        is_primary=is_primary,
+    )
+    with_audio = (
+        _inject_audio(
+            reframed,
+            config=config,
+            downloader=dependencies.downloader,
+            registry=registry,
+            resume=resume,
+            suffix=suffix,
+        )
+        if config.audio_locked
+        else reframed
+    )
+    subtitles, final_video = _resolve_subtitles_and_burn_stage(
+        with_audio,
+        transcript=transcript,
+        segment=segment,
+        dependencies=dependencies,
+        config=config,
+        registry=registry,
+        state=state,
+        resume=resume,
+        suffix=suffix,
+        is_primary=is_primary,
+    )
+    return reframe, subtitles, final_video
 
 
 def _run_stages(
@@ -1241,46 +1337,41 @@ def _run_stages(
         state=state,
         resume=resume,
     )
-    segment = _primary_segment(selection)
-    clip = _resolve_clip(source, segment=segment, config=config, registry=registry)
-    reframe, reframed = _resolve_reframe_stage(
-        clip,
-        config=config,
-        dependencies=dependencies,
-        registry=registry,
-        state=state,
-        resume=resume,
-    )
-    with_audio = (
-        _inject_audio(
-            reframed,
+    _ = _primary_segment(selection)
+    total_segments = len(selection.segments)
+    final_videos: list[Path] = []
+    primary_reframe: ReframeResult | None = None
+    primary_subtitles: Path | None = None
+
+    for idx, segment in enumerate(selection.segments):
+        suffix = f"_{idx:02d}" if total_segments > 1 else ""
+        reframe, subtitles, final_video = _render_segment(
+            source,
+            segment=segment,
+            transcript=transcript,
             config=config,
-            downloader=dependencies.downloader,
+            dependencies=dependencies,
             registry=registry,
+            state=state,
             resume=resume,
+            suffix=suffix,
+            is_primary=(idx == 0),
         )
-        if config.audio_locked
-        else reframed
-    )
-    subtitles, final_video = _resolve_subtitles_and_burn_stage(
-        with_audio,
-        transcript=transcript,
-        segment=segment,
-        dependencies=dependencies,
-        config=config,
-        registry=registry,
-        state=state,
-        resume=resume,
-    )
+        if idx == 0:
+            primary_reframe = reframe
+            primary_subtitles = subtitles
+        final_videos.append(final_video)
+
     return PipelineResult(
         source=source,
         transcript=transcript,
         moments=moments,
         selection=selection,
-        reframe=reframe,
-        subtitles=subtitles,
-        final_video=final_video,
+        reframe=primary_reframe,
+        subtitles=primary_subtitles,
+        final_video=final_videos[0],
         cleaning=(),
+        final_videos=tuple(final_videos),
     )
 
 
@@ -1499,13 +1590,20 @@ def _full_video_selection(source: Path, *, render: RenderConfig) -> SegmentSelec
     )
 
 
-def _publish(video: Path, *, output_dir: Path, registry: _CleanupRegistry) -> Path:
+def _publish(
+    video: Path,
+    *,
+    output_dir: Path,
+    registry: _CleanupRegistry,
+    final_name: str = _FINAL_NAME,
+) -> Path:
     """Publica el vídeo procesado como artefacto final sin subtítulos.
 
     Args:
         video: Vídeo procesado (cortado, reframeado y/o con audio inyectado).
         output_dir: Directorio donde se publica ``final.mp4``.
         registry: Registro del temporal de publicación.
+        final_name: Nombre del archivo de video final publicado.
 
     Returns:
         La ruta del artefacto final.
@@ -1513,7 +1611,7 @@ def _publish(video: Path, *, output_dir: Path, registry: _CleanupRegistry) -> Pa
     Raises:
         PipelineError: Si no se puede copiar o publicar el artefacto.
     """
-    destination = output_dir / _FINAL_NAME
+    destination = output_dir / final_name
     temporary = registry.register(_temporary_path(destination))
     with _translated("publicación del vídeo final"):
         _ = shutil.copyfile(video, temporary)
@@ -1563,8 +1661,9 @@ def _cut_segment(
     segment: Segment,
     render: RenderConfig,
     registry: _CleanupRegistry,
+    suffix: str = "",
 ) -> Path:
-    destination = registry.register(_temporary_path(source.with_name("segment.mp4")))
+    destination = registry.register(_temporary_path(source.with_name(f"segment{suffix}.mp4")))
     argv = [
         render.ffmpeg,
         "-hide_banner",
@@ -1656,6 +1755,7 @@ def _inject_audio(
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
     resume: bool = False,
+    suffix: str = "",
 ) -> Path:
     """Inyecta la pista externa reemplazando o mezclando la original.
 
@@ -1669,6 +1769,7 @@ def _inject_audio(
         downloader: Descargador acotado para pistas entregadas por URL.
         registry: Registro de temporales para limpiar la pista y el resultado.
         resume: Si es True, aprovecha la pista ya descargada si existe.
+        suffix: Sufijo opcional para nombres de archivo en lote.
 
     Returns:
         La ruta del vídeo con la pista externa inyectada.
@@ -1683,7 +1784,7 @@ def _inject_audio(
     if audio_duration_s < video_info.duration_s - _AUDIO_DURATION_TOLERANCE_S:
         msg = "El audio externo es más corto que el video"
         raise PipelineError(msg)
-    destination = registry.register(_temporary_path(video.with_name("audio_injected.mp4")))
+    destination = registry.register(_temporary_path(video.with_name(f"audio_injected{suffix}.mp4")))
     argv = [
         config.render.ffmpeg,
         "-hide_banner",
@@ -1760,8 +1861,9 @@ def _write_subtitles(
     renderer: SubtitleBurner,
     output_dir: Path,
     registry: _CleanupRegistry,
+    subtitles_name: str = "subtitles.ass",
 ) -> Path:
-    destination = registry.register(_temporary_path(output_dir / "subtitles.ass"))
+    destination = registry.register(_temporary_path(output_dir / subtitles_name))
     words = _segment_words(transcript, segment)
     with _translated("subtítulos"):
         return renderer.write(words, destination)
@@ -1773,8 +1875,9 @@ def _burn(
     subtitles: Path,
     renderer: SubtitleBurner,
     output_dir: Path,
+    final_name: str = _FINAL_NAME,
 ) -> Path:
-    destination = output_dir / _FINAL_NAME
+    destination = output_dir / final_name
     with _translated("quemado de subtítulos"):
         return renderer.burn(video=video, subtitles=subtitles, destination=destination)
 

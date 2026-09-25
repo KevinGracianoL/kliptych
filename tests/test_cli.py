@@ -1,5 +1,6 @@
 """Tests de la CLI de Kliptych y el subcomando campaign (F1-PR1)."""
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -15,7 +16,7 @@ from kliptych.git_proposals import PullRequest
 from kliptych.intelligence import Archetype
 from kliptych.orchestrator import PipelineResult, SlideshowResult
 from kliptych.segment import SegmentSelection
-from tests.support import make_draft
+from tests.support import make_contract, make_draft
 
 _ = CampaignOutcome.model_rebuild(
     _types_namespace={
@@ -195,9 +196,37 @@ def test_cli_campaign_missing_env_returns_one(
     assert code == 1
 
 
+def _make_provenance_draft_json() -> str:
+    def update_spans(data: object, text: str) -> None:
+        if isinstance(data, dict):
+            dict_data = cast("dict[str, object]", data)
+            if "quote" in dict_data and "start" in dict_data and "end" in dict_data:
+                q = str(dict_data["quote"])
+                idx = text.find(q)
+                dict_data["start"] = idx
+                dict_data["end"] = idx + len(q)
+            else:
+                for v in dict_data.values():
+                    update_spans(v, text)
+        elif isinstance(data, list):
+            list_data = cast("list[object]", data)
+            for item in list_data:
+                update_spans(item, text)
+
+    text = make_draft().model_dump_json()
+    for _ in range(5):
+        d = cast("object", json.loads(text))
+        update_spans(d, text)
+        new_text = json.dumps(d)
+        if new_text == text:
+            break
+        text = new_text
+    return text
+
+
 def test_cli_campaign_resolves_contract_when_brief_is_json(tmp_path: Path) -> None:
     """When brief is valid ContractDraft JSON, contract is resolved and attached."""
-    draft_json = make_draft().model_dump_json()
+    draft_json = _make_provenance_draft_json()
     brief = tmp_path / "brief.txt"
     _ = brief.write_text(draft_json, encoding="utf-8")
     manager = FakeCampaignManager()
@@ -221,3 +250,16 @@ def test_cli_campaign_logs_out_dir(tmp_path: Path, capsys: pytest.CaptureFixture
     assert code == 0
     captured = capsys.readouterr()
     assert f"Directorio de salida: {tmp_path / 'custom_out'}" in captured.err
+
+
+def test_cli_campaign_blocks_raw_json_contract_without_provenance(tmp_path: Path) -> None:
+    """Raw Contract JSON without ContractDraft/provenance is rejected."""
+    raw_contract_json = make_contract().model_dump_json()
+    brief = tmp_path / "raw_contract.txt"
+    _ = brief.write_text(raw_contract_json, encoding="utf-8")
+    manager = FakeCampaignManager()
+    code = main(["campaign", str(brief), "--out", str(tmp_path / "out")], manager=manager)
+    assert code == 0
+    assert len(manager.calls) == 1
+    campaign = cast("Campaign", manager.calls[0]["campaign"])
+    assert campaign.contract is None
