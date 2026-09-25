@@ -363,7 +363,9 @@ def test_fixture_brief_flows_to_the_gate(tmp_path: Path) -> None:
     audio_check = next(check for check in gate_result.checks if check.id == "audio.own_clip")
     assert audio_check.status is CheckStatus.MANUAL_REVIEW
     assert all(
-        check.status is CheckStatus.PASS for check in gate_result.checks if check.id != "audio.own_clip"
+        check.status is CheckStatus.PASS
+        for check in gate_result.checks
+        if check.id != "audio.own_clip"
     )
 
 

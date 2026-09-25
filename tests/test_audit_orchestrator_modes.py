@@ -24,6 +24,17 @@ from kliptych.orchestrator import (
 _URL = "https://example.com/video"
 
 
+class _UnusedModel:
+    def select_segments(self, prompt: object) -> object:
+        _ = (self, prompt)
+        msg = "el modelo no debe usarse en este test"
+        raise AssertionError(msg)
+
+
+def _stub_model() -> LongVideoModel:
+    return cast("LongVideoModel", _UnusedModel())
+
+
 def _contract() -> Contract:
     return Contract.model_validate(
         {
@@ -80,7 +91,7 @@ def _config(
 
 def test_mode_wrappers_reject_mismatched_config(tmp_path: Path) -> None:
     """run_audio_locked/run_repost exigen su flag en la config (fail-closed)."""
-    model = cast("LongVideoModel", SimpleNamespace())
+    model = _stub_model()
     with pytest.raises(PipelineError, match="audio_locked"):
         _ = run_audio_locked(_URL, model=model, config=_config(tmp_path))
     with pytest.raises(PipelineError, match="repost"):
@@ -103,7 +114,7 @@ def test_run_audio_locked_delegates_to_long_video(
     track = tmp_path / "track.mp3"
     _ = track.write_bytes(b"audio")
     config = _config(tmp_path, audio_locked=True, audio_track_path=track)
-    model = cast("LongVideoModel", SimpleNamespace())
+    model = _stub_model()
     result = run_audio_locked(_URL, model=model, config=config, resume=True)
     assert result is sentinel
     assert seen["config"] is config
@@ -124,7 +135,7 @@ def test_run_repost_delegates_to_long_video(
 
     monkeypatch.setattr(orchestrator_module, "run_long_video", _fake_run_long_video)
     config = _config(tmp_path, repost_mode=True)
-    model = cast("LongVideoModel", SimpleNamespace())
+    model = _stub_model()
     result = run_repost(_URL, model=model, config=config)
     assert result is sentinel
     assert seen["config"] is config

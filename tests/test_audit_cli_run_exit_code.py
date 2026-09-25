@@ -26,8 +26,8 @@ class _MissingMentionModel(CampaignModel):
     model_version: str = "static-hal"
 
     def __init__(self, draft: ContractDraft, caption: Caption) -> None:
-        self._draft = draft
-        self._caption = caption
+        self._draft: ContractDraft = draft
+        self._caption: Caption = caption
 
     @override
     def extract_contract(self, brief: str) -> ContractDraft:
@@ -80,6 +80,19 @@ def _probe_15s() -> FakeProbe:
     return FakeProbe(info=make_media(duration_s=15.0, has_video=True, has_audio=True))
 
 
+def _build_model_factory(model: _MissingMentionModel) -> object:
+    def _build(recorded: str | None) -> tuple[CampaignModel, str]:
+        _ = recorded
+        return model, "static-hal"
+
+    return _build
+
+
+def _gate_factory(probe: object) -> Gate:
+    _ = probe
+    return Gate(probe=_probe_15s())
+
+
 @pytest.mark.parametrize(
     ("caption_text", "expected_code", "expected_outcome"),
     [
@@ -91,6 +104,7 @@ def test_cli_run_exit_code_reflects_outcome(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    *,
     caption_text: str,
     expected_code: int,
     expected_outcome: str,
@@ -100,9 +114,9 @@ def test_cli_run_exit_code_reflects_outcome(
     brief = tmp_path / "brief.md"
     _ = brief.write_text("cita del brief para run con mencion", encoding="utf-8")
     model = _MissingMentionModel(_hal_draft(), Caption(caption=caption_text, hashtags=()))
-    monkeypatch.setattr("kliptych.__main__._build_model", lambda _recorded: (model, "static-hal"))
+    monkeypatch.setattr("kliptych.__main__._build_model", _build_model_factory(model))
     monkeypatch.setattr("kliptych.pipeline.FFmpegAssembler", _CopyAssembler)
-    monkeypatch.setattr("kliptych.pipeline.Gate", lambda _probe: Gate(probe=_probe_15s()))
+    monkeypatch.setattr("kliptych.pipeline.Gate", _gate_factory)
     code = main(
         [
             "run",

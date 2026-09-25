@@ -218,9 +218,7 @@ def test_piece_id_length_is_bounded_at_construction() -> None:
 
 
 def test_metadata_merges_must_mention_with_required_mentions(tmp_path: Path) -> None:
-    contract = make_contract(
-        required_mentions=["@marca"], must_mention=["@jefe"], audio_rule="any"
-    )
+    contract = make_contract(required_mentions=["@marca"], must_mention=["@jefe"], audio_rule="any")
     piece = make_piece(_artifact(tmp_path), caption="mira @marca y @jefe #marca")
     report = _export(tmp_path, contract=contract, pieces=[piece])
     metadata_path = tmp_path / "delivery" / _CAMPAIGN / "tiktok" / "piece-01.metadata.json"

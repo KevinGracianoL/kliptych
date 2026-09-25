@@ -26,7 +26,6 @@ def _artifact(tmp_path: Path) -> Path:
 
 
 def _hal_contract() -> Contract:
-    """Contrato con la mención obligatoria clasificada como revisión manual."""
     hard = [rule for rule in ALL_HARD_RULES if rule != "caption.required_mention"]
     return make_contract(
         hard=hard,
