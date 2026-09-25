@@ -33,6 +33,8 @@ from kliptych.orchestrator import (
     PipelineResult,
     Reframer,
     SubtitleBurner,
+    compute_long_video_fingerprint,
+    compute_slideshow_fingerprint,
     run_long_video,
 )
 from kliptych.reframe import (
@@ -90,6 +92,7 @@ _cut_segment = cast("Callable[..., Path]", _private("_cut_segment"))
 _default_reframer = cast(
     "Callable[[PipelineConfig], FFmpegReframer]", _private("_default_reframer")
 )
+_file_signature = cast("Callable[[Path | str | None], str | None]", _private("_file_signature"))
 _primary_segment = cast("Callable[[SegmentSelection], Segment]", _private("_primary_segment"))
 _resolve_dependencies = cast("Callable[..., _ResolvedDeps]", _private("_resolve_dependencies"))
 _run_ffmpeg = cast("Callable[..., None]", _private("_run_ffmpeg"))
@@ -811,3 +814,118 @@ def test_cleanup_registry_ignores_directories(tmp_path: Path) -> None:
     _ = registry.register(directory)
     assert registry.cleanup() == ()
     assert directory.is_dir()
+
+
+def test_file_signature_content_change_and_fallback(tmp_path: Path) -> None:
+    file_path = tmp_path / "track.mp3"
+    _ = file_path.write_bytes(b"initial content")
+    sig1 = _file_signature(file_path)
+    assert sig1 is not None
+    assert sig1.startswith(f"{file_path.as_posix()}:")
+
+    _ = file_path.write_bytes(b"modified content")
+    sig2 = _file_signature(file_path)
+    assert sig2 is not None
+    assert sig1 != sig2
+
+    missing = tmp_path / "missing.mp3"
+    assert _file_signature(missing) == str(missing)
+    assert _file_signature("https://example.com/stream.mp4") == "https://example.com/stream.mp4"
+    assert _file_signature(None) is None
+
+
+def test_file_signature_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def mock_is_file(_self: Path) -> bool:
+        msg = "Permission denied"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "is_file", mock_is_file)
+    test_path = tmp_path / "file.txt"
+    assert _file_signature(test_path) == str(test_path)
+
+
+def test_long_video_fingerprint_file_content_change(tmp_path: Path) -> None:
+    track = tmp_path / "audio.mp3"
+    _ = track.write_bytes(b"version 1")
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        audio_locked=True,
+        audio_track_path=track,
+    )
+    fp1 = compute_long_video_fingerprint("https://example.com/video.mp4", config=config)
+
+    _ = track.write_bytes(b"version 2 with different bytes")
+    fp2 = compute_long_video_fingerprint("https://example.com/video.mp4", config=config)
+    assert fp1 != fp2
+
+
+def test_long_video_fingerprint_local_source_content_change(tmp_path: Path) -> None:
+    source_file = tmp_path / "source.mp4"
+    _ = source_file.write_bytes(b"video bytes v1")
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+    )
+    fp1 = compute_long_video_fingerprint(str(source_file), config=config)
+
+    _ = source_file.write_bytes(b"video bytes v2 modified")
+    fp2 = compute_long_video_fingerprint(str(source_file), config=config)
+    assert fp1 != fp2
+
+
+def test_long_video_fingerprint_face_model_path_change(tmp_path: Path) -> None:
+    config_none = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        face_model_path=None,
+    )
+    config_with_model = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        face_model_path=tmp_path / "face.tflite",
+    )
+    fp1 = compute_long_video_fingerprint("https://example.com/video.mp4", config=config_none)
+    fp2 = compute_long_video_fingerprint("https://example.com/video.mp4", config=config_with_model)
+    assert fp1 != fp2
+
+
+def test_slideshow_fingerprint_file_content_change(tmp_path: Path) -> None:
+    img1 = tmp_path / "1.png"
+    img2 = tmp_path / "2.png"
+    _ = img1.write_bytes(b"image 1 v1")
+    _ = img2.write_bytes(b"image 2")
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+    )
+    fp1 = compute_slideshow_fingerprint([img1, img2], config=config, slide_duration_s=3.0)
+
+    _ = img1.write_bytes(b"image 1 v2 modified")
+    fp2 = compute_slideshow_fingerprint([img1, img2], config=config, slide_duration_s=3.0)
+    assert fp1 != fp2
+
+
+def test_slideshow_fingerprint_face_model_path_change(tmp_path: Path) -> None:
+    img = tmp_path / "1.png"
+    _ = img.write_bytes(b"img")
+    config_none = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        face_model_path=None,
+    )
+    config_with_model = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        face_model_path=tmp_path / "face.tflite",
+    )
+    fp1 = compute_slideshow_fingerprint([img], config=config_none, slide_duration_s=3.0)
+    fp2 = compute_slideshow_fingerprint([img], config=config_with_model, slide_duration_s=3.0)
+    assert fp1 != fp2

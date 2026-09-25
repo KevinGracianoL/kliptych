@@ -35,7 +35,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -48,7 +48,7 @@ from kliptych.encoding import (
     fallback_encoder_arguments,
     video_encoder_arguments,
 )
-from kliptych.hashing import sha256_canonical_json
+from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
@@ -343,6 +343,39 @@ class _VideoInfo:
     duration_s: float
 
 
+@overload
+def _file_signature(path: None) -> None: ...
+
+
+@overload
+def _file_signature(path: Path | str) -> str: ...
+
+
+def _file_signature(path: Path | str | None) -> str | None:
+    """Calcula una firma determinista de un archivo local o retorna su ruta si no existe.
+
+    Args:
+        path: Ruta o URL del archivo a firmar.
+
+    Returns:
+        None si path es None; la combinación de la ruta normalizada y el sha256
+        del contenido si el archivo existe en disco; o la ruta como string si no
+        existe o es una URL remota.
+    """
+    if path is None:
+        return None
+    if isinstance(path, str) and path.startswith(("http://", "https://")):
+        return path
+    try:
+        p = Path(path)
+        if p.is_file():
+            normalized = Path(os.path.normpath(str(p))).as_posix()
+            return f"{normalized}:{sha256_file(p)}"
+    except (OSError, ValueError):
+        pass
+    return str(path)
+
+
 def compute_long_video_fingerprint(
     url: str,
     *,
@@ -359,11 +392,12 @@ def compute_long_video_fingerprint(
     """
     payload: dict[str, object] = {
         "pipeline": "long_video",
-        "url": url,
+        "url": _file_signature(url),
         "contract": contract_digest(config.contract),
+        "face_model_path": _file_signature(config.face_model_path),
         "audio": {
             "locked": config.audio_locked,
-            "track_path": str(config.audio_track_path) if config.audio_track_path else None,
+            "track_path": _file_signature(config.audio_track_path),
             "track_url": config.audio_track_url,
             "mix_ratio": config.audio_mix_ratio,
         },
@@ -395,12 +429,13 @@ def compute_slideshow_fingerprint(
     """
     payload: dict[str, object] = {
         "pipeline": "slideshow",
-        "images": [str(img) for img in images],
+        "images": [_file_signature(img) for img in images],
         "slide_duration_s": slide_duration_s,
         "contract": contract_digest(config.contract),
+        "face_model_path": _file_signature(config.face_model_path),
         "audio": {
             "locked": config.audio_locked,
-            "track_path": str(config.audio_track_path) if config.audio_track_path else None,
+            "track_path": _file_signature(config.audio_track_path),
             "track_url": config.audio_track_url,
             "mix_ratio": config.audio_mix_ratio,
         },

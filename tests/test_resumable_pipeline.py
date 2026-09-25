@@ -981,3 +981,36 @@ def test_resume_invalidates_cache_on_fingerprint_mismatch(
     mgr2 = PipelineStateManager.load(config.output_dir)
     assert mgr2.checkpoint.input_fingerprint != initial_fp
     assert counter.download_calls == 2
+
+
+def test_resume_invalidates_cache_when_audio_file_content_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+    track = tmp_path / "audio.mp3"
+    _ = track.write_bytes(b"audio content v1")
+    config = replace(config, audio_locked=True, audio_track_path=track)
+
+    # 1. Primera ejecución limpia
+    result1 = _run(config, deps, resume=False)
+    assert isinstance(result1, PipelineResult)
+    assert counter.download_calls == 1
+
+    # Verificar que el checkpoint persistió con el fingerprint
+    mgr1 = PipelineStateManager.load(config.output_dir)
+    initial_fp = mgr1.checkpoint.input_fingerprint
+    assert initial_fp is not None
+    assert mgr1.is_done(PipelineStage.COMPLETED)
+
+    # 2. Modificamos el contenido del archivo de audio (mismo path, diferentes bytes)
+    _ = track.write_bytes(b"audio content v2 changed")
+
+    # 3. Segunda ejecución con resume=True
+    result2 = _run(config, deps, resume=True)
+    assert isinstance(result2, PipelineResult)
+
+    # Verificamos que el fingerprint cambió y las etapas se re-ejecutaron
+    mgr2 = PipelineStateManager.load(config.output_dir)
+    assert mgr2.checkpoint.input_fingerprint != initial_fp
+    assert counter.download_calls == 2

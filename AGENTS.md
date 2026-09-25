@@ -48,9 +48,8 @@ un gate. Se arregla el código.
 
 - **Gemini 3.1 Pro High via OmniRoute** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta. No implementa código y no hace code reviews.
 - **Gemini 3.8 Flash High via OmniRoute (programmer)** es el agente de implementación: ejecuta tareas de código delegadas por el orquestador. No hace code reviews.
-- **Claude Sonnet 4.6 via OmniRoute (`reviewer-light`)** es el primer nivel de review: revisión ligera de cada PR, decide si el cambio merece review profundo y reporta su justificación. No modifica código.
-- **Claude Opus 4.6 Thinking via OmniRoute (`reviewer`)** es el segundo nivel (review profundo): ejecuta la skill `evidence-driven-review` sobre PRs completos (snapshot base/head, nunca commit por commit) cuando `reviewer-light` lo justifica. Usa cuota independiente de Gemini.
-- El orquestador no implementa código directamente; delega al programmer la implementación y a `reviewer-light`/`reviewer` las reviews, y verifica los resultados.
+- **Muse Spark 1.3 free (xhigh) via OpenCode Zen (`reviewer`)** es el agente de revisión: ejecuta la skill `evidence-driven-review` sobre PRs completos (snapshot base/head, nunca commit por commit). Usa cuota de OpenCode Zen, independiente de Gemini.
+- El orquestador no implementa código directamente; delega al programmer la implementación y al reviewer las reviews, y verifica los resultados.
 
 ## Higiene de ramas
 
@@ -69,9 +68,8 @@ un gate. Se arregla el código.
 
 ## Proceso de revisión
 
-Al terminar un PR y con el CI verde, el owner pide la revisión: primero pasa por
-`reviewer-light` (Sonnet 4.6), un review ligero que decide si el cambio merece
-review profundo; si lo merece, `reviewer` (Opus 4.6) invoca la skill
-`evidence-driven-review` en modo report (subagentes con contexto limpio,
-validación adversarial, snapshot base/head). Los hallazgos confirmados se
-corrigen y se hace re-revisión del delta. La skill no aprueba ni publica nada.
+Al terminar un PR y con el CI verde, el owner pide la revisión: `reviewer`
+(Muse Spark 1.3 free, xhigh) invoca la skill `evidence-driven-review` en modo
+report (subagentes con contexto limpio, validación adversarial, snapshot
+base/head). Los hallazgos confirmados se corrigen y se hace re-revisión del
+delta. La skill no aprueba ni publica nada.
