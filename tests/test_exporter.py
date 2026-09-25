@@ -73,7 +73,7 @@ def _export(
     approve_manual_review: bool = False,
 ) -> DeliveryReport:
     return export_delivery(
-        contract=contract if contract is not None else make_contract(),
+        contract=contract if contract is not None else make_contract(audio_rule="any"),
         pieces=pieces if pieces is not None else [make_piece(_artifact(tmp_path))],
         gate=gate if gate is not None else _gate(),
         assets=AssetRegistry(tmp_path),
@@ -86,16 +86,24 @@ def test_exports_passing_piece_with_metadata_and_gate_report(tmp_path: Path) -> 
     artifact = _artifact(tmp_path)
     piece = make_piece(artifact, caption="mira @marca #marca", hashtags=("#marca",))
     destination = tmp_path / "delivery"
-    report = _export(tmp_path, pieces=[piece], destination=destination)
+    report = _export(
+        tmp_path,
+        contract=make_contract(),
+        pieces=[piece],
+        destination=destination,
+        approve_manual_review=True,
+    )
 
     assert report.status is ExportStatus.EXPORTED
+    assert report.manually_approved_rules == ("audio.own_clip",)
     assert report.package == "delivery"
     assert report.schema_version == "1.1"
     assert len(report.exported) == 1
     exported = report.exported[0]
     assert exported.piece_id == "piece-01"
     assert exported.platform.value == "tiktok"
-    assert exported.gate_status is GateStatus.PASSED
+    assert exported.gate_status is GateStatus.PENDING_REVIEW
+    assert exported.manually_approved_rules == ("audio.own_clip",)
     assert exported.artifact_sha256 == sha256(b"video").hexdigest()
     assert exported.artifact_path == "camp-test/tiktok/piece-01.mp4"
 
@@ -119,7 +127,7 @@ def test_exports_passing_piece_with_metadata_and_gate_report(tmp_path: Path) -> 
     assert metadata["artifact_sha256"] == sha256(b"video").hexdigest()
     assert metadata["artifact_size_bytes"] == 5
     gate_payload = _parse((root / "piece-01.gate.json").read_text(encoding="utf-8"))
-    assert gate_payload["status"] == "passed"
+    assert gate_payload["status"] == "pending_review"
     assert gate_payload["artifact_sha256"] == sha256(b"video").hexdigest()
     assert gate_payload["contract_sha256"]
     checks = cast("list[object]", gate_payload["checks"])
@@ -210,7 +218,7 @@ def test_piece_id_length_is_bounded_at_construction() -> None:
 
 
 def test_metadata_merges_must_mention_with_required_mentions(tmp_path: Path) -> None:
-    contract = make_contract(required_mentions=["@marca"], must_mention=["@jefe"])
+    contract = make_contract(required_mentions=["@marca"], must_mention=["@jefe"], audio_rule="any")
     piece = make_piece(_artifact(tmp_path), caption="mira @marca y @jefe #marca")
     report = _export(tmp_path, contract=contract, pieces=[piece])
     metadata_path = tmp_path / "delivery" / _CAMPAIGN / "tiktok" / "piece-01.metadata.json"
@@ -451,7 +459,7 @@ def test_mid_batch_failure_leaves_destination_untouched(
         return original_read_bytes(self)
 
     monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
-    contract = make_contract(hard=[])
+    contract = make_contract(hard=[], audio_rule="any")
     with pytest.raises(ExportError, match="no se pudo leer"):
         _ = _export(tmp_path, contract=contract, pieces=[good, bad])
     assert not (tmp_path / "delivery").exists()
@@ -586,6 +594,9 @@ def test_recorded_fixture_flows_to_delivery(tmp_path: Path) -> None:
         gate=_gate(),
         assets=registry,
         destination=tmp_path / "delivery",
+        approve_manual_review=True,
+        approved_by="auditor-fixture",
     )
     assert report.status is ExportStatus.EXPORTED
+    assert report.manually_approved_rules == ("audio.own_clip",)
     assert report.exported[0].piece_id == "piece-01"

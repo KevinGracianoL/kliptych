@@ -841,6 +841,8 @@ _MANUAL_REVIEW_DEFAULTS: frozenset[str] = frozenset(
         "audio.official_track",
         "audio.official_selection",
         "audio.rule",
+        "audio.own_clip",
+        "audio.no_trending",
         "attribution.required",
         "attribution.present",
         "link.in_bio",

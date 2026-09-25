@@ -349,10 +349,10 @@ def _build_package(
     for plan in plans:
         gate_func = getattr(context.gate, "evaluate_piece", context.gate.run)
         gate_result = gate_func(contract=context.contract, piece=plan.piece, assets=context.assets)
-        is_manual_approval = (
-            gate_result.status is GateStatus.PENDING_REVIEW and context.approve_manual_review
+        should_export = _is_piece_exportable(
+            gate_result, approve_manual_review=context.approve_manual_review
         )
-        should_export = gate_result.passed or is_manual_approval
+        is_manual_approval = should_export and not gate_result.passed
         if not should_export:
             rejected.append(
                 RejectedPiece(
@@ -367,6 +367,31 @@ def _build_package(
             _export_piece(plan, context, gate_result, is_manual_approval=is_manual_approval)
         )
     return exported, rejected
+
+
+def _is_piece_exportable(gate_result: GateResult, *, approve_manual_review: bool) -> bool:
+    """Indica si una pieza puede publicarse según su resultado del gate.
+
+    Defensa en profundidad: un check individual con estado FAIL nunca se
+    publica, aunque el estado global no sea REJECTED. La aprobación manual
+    solo cubre checks MANUAL_REVIEW (o PASS).
+
+    Args:
+        gate_result: Resultado completo del gate sobre la pieza.
+        approve_manual_review: Si es True, permite publicar piezas en estado
+            PENDING_REVIEW sin ningún check en FAIL.
+
+    Returns:
+        True si la pieza pasó el gate o su revisión manual es aprobable.
+    """
+    if gate_result.passed:
+        return True
+    if not approve_manual_review or gate_result.status is not GateStatus.PENDING_REVIEW:
+        return False
+    return all(
+        check.status is CheckStatus.PASS or check.status is CheckStatus.MANUAL_REVIEW
+        for check in gate_result.checks
+    )
 
 
 def _export_piece(

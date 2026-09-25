@@ -140,9 +140,10 @@ def _hash_artifact(path: Path) -> str | None:
 
 
 def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> GateStatus:
-    hard = [check for strength, check in outcomes if strength is RuleStrength.HARD]
-    if any(check.status is CheckStatus.FAIL for check in hard):
+    checks = [check for _, check in outcomes]
+    if any(check.status is CheckStatus.FAIL for check in checks):
         return GateStatus.REJECTED
+    hard = [check for strength, check in outcomes if strength is RuleStrength.HARD]
     if any(check.status is CheckStatus.UNSUPPORTED for check in hard):
         return GateStatus.UNSUPPORTED
     if any(

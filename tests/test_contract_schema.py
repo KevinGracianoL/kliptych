@@ -66,7 +66,7 @@ def _contract_data(**overrides: object) -> dict[str, object]:
                 "watermark.full_video",
             ],
             "recommended": [],
-            "manual_review": ["attribution.required", "audio.official_track"],
+            "manual_review": ["attribution.required", "audio.official_track", "audio.own_clip"],
         },
         "assets": {"required": [_asset()], "optional": []},
         "geo_target": None,

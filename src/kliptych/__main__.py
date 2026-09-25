@@ -10,19 +10,20 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 from pydantic import ValidationError
 
-from kliptych import __version__
+from kliptych import __version__, orchestrator
 from kliptych.assembler import AssembleError
 from kliptych.assets import AssetRegistry
-from kliptych.campaign_manager import CampaignManager, CampaignOutcome
+from kliptych.campaign_manager import CampaignManager, CampaignManagerError, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft
+from kliptych.encoding import RenderConfig
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
 from kliptych.gate import Gate
@@ -32,7 +33,7 @@ from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
 from kliptych.intelligence import LLMCampaignClassifier
 from kliptych.logging_setup import setup_logging
-from kliptych.pipeline import PipelineError, RunRequest, RunResult, run_given_clips
+from kliptych.pipeline import PipelineError, RunOutcome, RunRequest, RunResult, run_given_clips
 from kliptych.resolver import ProvenanceError, resolve_contract
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
@@ -58,7 +59,273 @@ class _CampaignManagerProtocol(Protocol):
         resume: bool = False,
         approve_manual_review: bool = False,
         approved_by: str | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
     ) -> CampaignOutcome: ...
+
+
+_SEGMENT_SYSTEM_PROMPT = (
+    "Eres el selector de segmentos de Kliptych. Recibes un JSON con la "
+    "transcripción, los momentos candidatos y las cotas de duración, y "
+    "devuelves ÚNICAMENTE un JSON con la forma "
+    '{"segments": [{"start_s": float, "end_s": float}], "rationale": str}. '
+    "Reglas: cada segmento queda dentro del vídeo y respeta las duraciones "
+    "mínima y máxima; el rationale explica la selección en una frase."
+)
+
+
+class _ChatSegmentModel:
+    """Modelo LongVideoModel sobre el backend OpenAI-compatible de la CLI."""
+
+    def __init__(self, backend: OpenAIChatModel) -> None:
+        """Configura el selector con su backend chat.
+
+        Args:
+            backend: Backend OpenAI-compatible ya configurado.
+        """
+        self._backend: OpenAIChatModel = backend
+
+    def select_segments(self, prompt: Mapping[str, object]) -> object:
+        """Selecciona los segmentos enviando el payload al backend chat.
+
+        Args:
+            prompt: Payload serializable construido por el selector.
+
+        Returns:
+            El objeto JSON devuelto por el backend.
+        """
+        return self._backend.chat_json(
+            system_prompt=_SEGMENT_SYSTEM_PROMPT,
+            user_content=json.dumps(dict(prompt), ensure_ascii=False, sort_keys=True),
+        )
+
+
+class _DefaultVideoOrchestrator:
+    """Orquestador de video real para CampaignManager (sin inyección manual)."""
+
+    def __init__(self, *, work_dir: Path, model: _ChatSegmentModel, render: RenderConfig) -> None:
+        """Configura el directorio de trabajo, el modelo y el render.
+
+        Args:
+            work_dir: Directorio donde el pipeline publica sus artefactos.
+            model: Modelo de selección de segmentos sobre el backend LLM.
+            render: Binario, timeout y NVENC compartidos por los renders.
+        """
+        self._work_dir: Path = work_dir
+        self._model: _ChatSegmentModel = model
+        self._render: RenderConfig = render
+
+    def run_long_video(self, url: str, **kwargs: object) -> orchestrator.PipelineResult:
+        """Renderiza un vídeo largo, con audio o repost según los flags.
+
+        Args:
+            url: URL http/https del vídeo fuente.
+            **kwargs: resume, contract, audio_locked, repost_mode,
+                audio_track_path y audio_track_url.
+
+        Returns:
+            El resultado del pipeline long_video.
+        """
+        config = self._pipeline_config(
+            kwargs.get("contract"),
+            audio_locked=kwargs.get("audio_locked") is True,
+            repost_mode=_is_repost_mode(kwargs.get("repost_mode"), kwargs.get("mode")),
+            audio_track_path=kwargs.get("audio_track_path"),
+            audio_track_url=kwargs.get("audio_track_url"),
+        )
+        resume = kwargs.get("resume") is True
+        if config.repost_mode:
+            return orchestrator.run_repost(url, model=self._model, config=config, resume=resume)
+        if config.audio_locked:
+            return orchestrator.run_audio_locked(
+                url, model=self._model, config=config, resume=resume
+            )
+        return orchestrator.run_long_video(url, model=self._model, config=config, resume=resume)
+
+    def run_slideshow(
+        self, images: Sequence[Path], **kwargs: object
+    ) -> orchestrator.SlideshowResult:
+        """Renderiza un slideshow delegando en el entry point real.
+
+        Args:
+            images: Rutas locales de las imágenes, en orden de montaje.
+            **kwargs: resume, contract, audio_track_path y audio_track_url.
+
+        Returns:
+            El resultado del pipeline slideshow.
+        """
+        return _run_slideshow_pipeline(
+            images, work_dir=self._work_dir, render=self._render, kwargs=kwargs
+        )
+
+    def _pipeline_config(
+        self,
+        contract: object,
+        *,
+        audio_locked: bool = False,
+        repost_mode: bool = False,
+        audio_track_path: object = None,
+        audio_track_url: object = None,
+    ) -> orchestrator.PipelineConfig:
+        """Construye la config del pipeline validando el contrato y la pista.
+
+        Args:
+            contract: Contrato validado de la campaña.
+            audio_locked: Si se inyecta pista de audio externa.
+            repost_mode: Si se usa el vídeo completo sin inteligencia.
+            audio_track_path: Ruta local de la pista externa, o None.
+            audio_track_url: URL de la pista externa, o None.
+
+        Returns:
+            La configuración lista para el pipeline.
+
+        Raises:
+            CampaignManagerError: Si el contrato o la pista no son válidos.
+        """
+        if not isinstance(contract, Contract):
+            msg = "el orquestador por defecto requiere el contrato de la campaña"
+            raise CampaignManagerError(msg)
+        track_path = _coerce_audio_track_path(audio_track_path)
+        track_url = _coerce_audio_track_url(audio_track_url)
+        return orchestrator.PipelineConfig(
+            output_dir=self._work_dir,
+            contract=contract,
+            render=self._render,
+            audio_locked=audio_locked,
+            audio_track_path=track_path,
+            audio_track_url=track_url,
+            repost_mode=repost_mode,
+        )
+
+
+class _DefaultSlideshowOrchestrator:
+    """Orquestador de slideshow real para CampaignManager."""
+
+    def __init__(self, *, work_dir: Path, render: RenderConfig) -> None:
+        """Configura el directorio de trabajo y el render.
+
+        Args:
+            work_dir: Directorio donde el pipeline publica sus artefactos.
+            render: Binario, timeout y NVENC compartidos por los renders.
+        """
+        self._work_dir: Path = work_dir
+        self._render: RenderConfig = render
+
+    def run(self, images: Sequence[Path], **kwargs: object) -> orchestrator.SlideshowResult:
+        """Renderiza un slideshow delegando en el entry point real.
+
+        Args:
+            images: Rutas locales de las imágenes, en orden de montaje.
+            **kwargs: resume, contract, audio_track_path y audio_track_url.
+
+        Returns:
+            El resultado del pipeline slideshow.
+        """
+        return _run_slideshow_pipeline(
+            images, work_dir=self._work_dir, render=self._render, kwargs=kwargs
+        )
+
+
+def _is_repost_mode(repost_flag: object, mode: object) -> bool:
+    """Indica si los flags del orquestador activan el pipeline repost.
+
+    Args:
+        repost_flag: Valor del flag ``repost_mode`` (activo solo si es True).
+        mode: Modo de campaña opcional; ``"repost"`` y el canónico
+            ``"repost_ugc"`` activan el pipeline repost.
+
+    Returns:
+        True si el pipeline repost debe ejecutarse.
+    """
+    if repost_flag is True:
+        return True
+    return isinstance(mode, str) and mode in {"repost", "repost_ugc"}
+
+
+def _coerce_audio_track_path(value: object) -> Path | None:
+    """Convierte la pista local a Path sin perderla en silencio.
+
+    Args:
+        value: Ruta como ``Path`` o ``str``, o None si no hay pista local.
+
+    Returns:
+        La ruta como ``Path``, o None si no hay pista local.
+
+    Raises:
+        TypeError: Si el valor no es ``Path``, ``str`` ni None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        return Path(value)
+    msg = f"audio_track_path debe ser Path, str o None, no {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _coerce_audio_track_url(value: object) -> str | None:
+    """Conserva la URL de la pista sin perderla en silencio.
+
+    Args:
+        value: URL como ``str``, o None si no hay pista remota.
+
+    Returns:
+        La URL, o None si no hay pista remota.
+
+    Raises:
+        TypeError: Si el valor no es ``str`` ni None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    msg = f"audio_track_url debe ser str o None, no {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _run_slideshow_pipeline(
+    images: Sequence[Path],
+    *,
+    work_dir: Path,
+    render: RenderConfig,
+    kwargs: Mapping[str, object],
+) -> orchestrator.SlideshowResult:
+    """Ejecuta el slideshow real con la pista externa obligatoria.
+
+    Args:
+        images: Rutas locales de las imágenes, en orden de montaje.
+        work_dir: Directorio donde el pipeline publica sus artefactos.
+        render: Binario, timeout y NVENC compartidos por los renders.
+        kwargs: resume, contract, audio_track_path y audio_track_url.
+
+    Returns:
+        El resultado del pipeline slideshow.
+
+    Raises:
+        CampaignManagerError: Si falta el contrato de la campaña.
+    """
+    contract = kwargs.get("contract")
+    if not isinstance(contract, Contract):
+        msg = "el orquestador por defecto requiere el contrato de la campaña"
+        raise CampaignManagerError(msg)
+    track_path = kwargs.get("audio_track_path")
+    track_url = kwargs.get("audio_track_url")
+    slide_duration = kwargs.get("slide_duration_s")
+    config = orchestrator.PipelineConfig(
+        output_dir=work_dir,
+        contract=contract,
+        render=render,
+        audio_locked=True,
+        audio_track_path=_coerce_audio_track_path(track_path),
+        audio_track_url=_coerce_audio_track_url(track_url),
+    )
+    return orchestrator.run_slideshow(
+        images,
+        config=config,
+        slide_duration_s=float(slide_duration) if isinstance(slide_duration, (int, float)) else 3.0,
+        resume=kwargs.get("resume") is True,
+    )
 
 
 def main(
@@ -150,11 +417,21 @@ def main(
     _ = campaign_parser.add_argument(
         "--mode",
         default="long_video",
-        choices=["long_video", "repost", "slideshow"],
+        choices=["long_video", "audio_locked", "repost", "repost_ugc", "slideshow"],
         help="modo de procesamiento (default: long_video)",
     )
     _ = campaign_parser.add_argument(
         "--url", default=None, help="URL del vídeo fuente (modo long_video)"
+    )
+    _ = campaign_parser.add_argument(
+        "--audio-track-path",
+        default=None,
+        help="pista de audio local a inyectar (modo audio_locked)",
+    )
+    _ = campaign_parser.add_argument(
+        "--audio-track-url",
+        default=None,
+        help="URL de la pista de audio a inyectar (modo audio_locked)",
     )
     _ = campaign_parser.add_argument(
         "--approve-manual-review",
@@ -353,6 +630,22 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
         logger.exception("Error de configuración")
         return 1
 
+    return _handle_campaign_result(_process_campaign(active_manager, campaign, args))
+
+
+def _process_campaign(
+    active_manager: _CampaignManagerProtocol, campaign: Campaign, args: argparse.Namespace
+) -> CampaignOutcome:
+    """Ejecuta el manager de campaña con los argumentos del subcomando.
+
+    Args:
+        active_manager: Manager inyectado o construido por defecto.
+        campaign: Campaña con su brief y contrato validado.
+        args: Argumentos parseados del subcomando campaign.
+
+    Returns:
+        El resultado del procesamiento de la campaña.
+    """
     mode = cast("str", getattr(args, "mode", "long_video"))
     url = cast("str | None", getattr(args, "url", None))
     resume = cast("bool", getattr(args, "resume", False))
@@ -360,16 +653,32 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     approved_by = cast("str | None", getattr(args, "approved_by", None))
     if approve_manual_review and not approved_by:
         approved_by = "cli-operator"
+    audio_track_path, audio_track_url = _campaign_audio_tracks(args)
 
-    result = active_manager.process(
+    return active_manager.process(
         campaign,
         mode=mode,
         url=url,
         resume=resume,
         approve_manual_review=approve_manual_review,
         approved_by=approved_by,
+        audio_track_path=audio_track_path,
+        audio_track_url=audio_track_url,
     )
-    return _handle_campaign_result(result)
+
+
+def _campaign_audio_tracks(args: argparse.Namespace) -> tuple[Path | None, str | None]:
+    """Extrae la pista de audio externa de los argumentos de campaña.
+
+    Args:
+        args: Argumentos parseados del subcomando campaign.
+
+    Returns:
+        La ruta local (o None) y la URL (o None) de la pista externa.
+    """
+    track_path_arg = cast("str | None", getattr(args, "audio_track_path", None))
+    track_url = cast("str | None", getattr(args, "audio_track_url", None))
+    return (Path(track_path_arg) if track_path_arg else None, track_url)
 
 
 def _load_run_brief(brief_path: str) -> str:
@@ -439,7 +748,7 @@ def _run_command(args: argparse.Namespace) -> int:
         _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
         return 1
     _ = sys.stdout.write(json.dumps(_run_payload(result), indent=2) + "\n")
-    return 0
+    return 0 if result.outcome is RunOutcome.EXPORTED else 1
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
@@ -498,14 +807,26 @@ def _make_default_campaign_manager(
         api_key=source["KLIPTYCH_LLM_API_KEY"],
         model=source["KLIPTYCH_LLM_MODEL"],
     )
+    backend = OpenAIChatModel(
+        base_url=source["KLIPTYCH_LLM_BASE_URL"],
+        api_key=source["KLIPTYCH_LLM_API_KEY"],
+        model=source["KLIPTYCH_LLM_MODEL"],
+    )
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
     effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe())
     effective_dest = destination if destination is not None else Path.cwd() / "delivery"
     effective_assets = assets if assets is not None else AssetRegistry(Path.cwd())
+    render = RenderConfig()
+    work_dir = effective_dest.parent / f"{effective_dest.name}-work"
+    segment_model = _ChatSegmentModel(backend)
     return CampaignManager(
         classifier=classifier,
         proposal_engine=ProposalEngine(provider=provider),
+        video_orchestrator=_DefaultVideoOrchestrator(
+            work_dir=work_dir, model=segment_model, render=render
+        ),
+        slideshow_orchestrator=_DefaultSlideshowOrchestrator(work_dir=work_dir, render=render),
         gate=effective_gate,
         destination=effective_dest,
         assets=effective_assets,

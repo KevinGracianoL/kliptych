@@ -540,6 +540,105 @@ def run_long_video(
     return replace(result, cleaning=cleaning)
 
 
+def run_audio_locked(
+    url: str,
+    *,
+    model: LongVideoModel,
+    config: PipelineConfig,
+    detector: MomentDetector | None = None,
+    transcriber: Transcriber | None = None,
+    selector: SegmentSelector | None = None,
+    reframer: Reframer | None = None,
+    subtitle_renderer: SubtitleBurner | None = None,
+    resume: bool = False,
+) -> PipelineResult:
+    """Ejecuta el pipeline long_video con pista de audio externa obligatoria.
+
+    Args:
+        url: URL http/https del vídeo fuente.
+        model: Modelo de runtime que elige los segmentos.
+        config: Directorio de salida, contrato y render; exige
+            ``audio_locked=True`` con pista configurada.
+        detector: Detector de momentos; por defecto usa ffmpeg.
+        transcriber: Transcriber word-level; por defecto usa faster-whisper.
+        selector: Constructor y validador del prompt; por defecto el de LLM.
+        reframer: Reframer 9:16; por defecto usa MediaPipe en CPU y ffmpeg.
+        subtitle_renderer: Renderizador de subtítulos; por defecto usa ffmpeg.
+        resume: Si es True, reanuda la ejecución desde el último punto de control
+            sin repetir las etapas ya completadas.
+
+    Returns:
+        El resultado con los artefactos y las rutas de temporales limpiados.
+
+    Raises:
+        PipelineError: Si la config no activa ``audio_locked`` o una etapa falla.
+    """
+    if not config.audio_locked:
+        msg = "run_audio_locked exige PipelineConfig con audio_locked=True"
+        raise PipelineError(msg)
+    return run_long_video(
+        url,
+        model=model,
+        config=config,
+        detector=detector,
+        transcriber=transcriber,
+        selector=selector,
+        reframer=reframer,
+        subtitle_renderer=subtitle_renderer,
+        resume=resume,
+    )
+
+
+def run_repost(
+    url: str,
+    *,
+    model: LongVideoModel,
+    config: PipelineConfig,
+    detector: MomentDetector | None = None,
+    transcriber: Transcriber | None = None,
+    selector: SegmentSelector | None = None,
+    reframer: Reframer | None = None,
+    subtitle_renderer: SubtitleBurner | None = None,
+    resume: bool = False,
+) -> PipelineResult:
+    """Ejecuta el pipeline en modo Repost/UGC: vídeo completo sin inteligencia.
+
+    Args:
+        url: URL http/https del vídeo fuente.
+        model: Modelo de runtime (no se usa en modo repost, que omite la
+            selección LLM).
+        config: Directorio de salida, contrato y render; exige
+            ``repost_mode=True``.
+        detector: Detector de momentos; por defecto usa ffmpeg.
+        transcriber: Transcriber word-level; por defecto usa faster-whisper.
+        selector: Constructor y validador del prompt; por defecto el de LLM.
+        reframer: Reframer 9:16; por defecto usa MediaPipe en CPU y ffmpeg.
+        subtitle_renderer: Renderizador de subtítulos; por defecto usa ffmpeg.
+        resume: Si es True, reanuda la ejecución desde el último punto de control
+            sin repetir las etapas ya completadas.
+
+    Returns:
+        El resultado con los artefactos y las rutas de temporales limpiados.
+
+    Raises:
+        PipelineError: Si la config no activa ``repost_mode`` o una etapa falla.
+    """
+    if not config.repost_mode:
+        msg = "run_repost exige PipelineConfig con repost_mode=True"
+        raise PipelineError(msg)
+    return run_long_video(
+        url,
+        model=model,
+        config=config,
+        detector=detector,
+        transcriber=transcriber,
+        selector=selector,
+        reframer=reframer,
+        subtitle_renderer=subtitle_renderer,
+        resume=resume,
+    )
+
+
 def run_slideshow(
     images: Sequence[Path | str],
     *,
@@ -960,6 +1059,13 @@ def _resolve_source_stage(
     if resume and state.is_done(PipelineStage.DOWNLOAD):
         source_path = state.artifact_path(PipelineStage.DOWNLOAD) or destination
         if source_path.is_file() and source_path.stat().st_size > 0:
+            if _is_url(url):
+                return _revalidate_remote_source(
+                    url,
+                    source_path,
+                    downloader=downloader,
+                    registry=registry,
+                )
             return source_path
     try:
         source = _download(url, config=config, downloader=downloader, registry=registry)
@@ -969,6 +1075,45 @@ def _resolve_source_stage(
         raise
     else:
         return source
+
+
+def _revalidate_remote_source(
+    url: str,
+    source_path: Path,
+    *,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Re-descarga la fuente remota y actualiza el local solo si cambió.
+
+    El servidor es la fuente de verdad: si los bytes difieren, el archivo
+    local se reemplaza y la firma de contenido posterior invalida las etapas
+    hijas. Si la revalidación falla, se reutiliza el archivo local.
+
+    Args:
+        url: URL http/https del vídeo fuente.
+        source_path: Archivo local descargado en una corrida previa.
+        downloader: Descargador acotado para re-descargar los bytes.
+        registry: Registro donde se anota el temporal de revalidación.
+
+    Returns:
+        La ruta del archivo fuente local (actualizado o reutilizado).
+    """
+    temporary = registry.register(_temporary_path(source_path))
+    try:
+        with _translated("revalidación de la fuente"):
+            _ = downloader.download_video(url=url, destination=temporary)
+    except Exception:
+        logger.warning("No se pudo revalidar la fuente remota; se reutiliza el archivo local")
+        return source_path
+    try:
+        changed = sha256_file(temporary) != sha256_file(source_path)
+    except OSError:
+        return source_path
+    if changed:
+        logger.warning("La fuente remota cambió; actualizando el archivo local")
+        _ = temporary.replace(source_path)
+    return source_path
 
 
 def _resolve_transcript_stage(
@@ -1157,9 +1302,9 @@ def _resolve_reframe_stage(
     if config.repost_mode and not _needs_reframe(clip, config.render):
         return None, clip
     reframe_json = config.output_dir / f"reframe{suffix}.json"
-    reframed_video = (state.artifact_path(PipelineStage.REFRAME) if is_primary else None) or (
-        config.output_dir / f"reframed{suffix}.mp4"
-    )
+    expected_reframed = config.output_dir / f"reframed{suffix}.mp4"
+    recorded = state.artifact_path(PipelineStage.REFRAME) if is_primary else None
+    reframed_video = _recorded_or_expected(recorded, expected_reframed)
     subtitles_already_done = is_primary and (
         state.is_done(PipelineStage.SUBTITLES) and (config.output_dir / _FINAL_NAME).is_file()
     )
@@ -1217,9 +1362,9 @@ def _resolve_subtitles_and_burn_stage(
             final_name=final_name,
         )
         return None, final_video
-    final_video = (state.artifact_path(PipelineStage.SUBTITLES) if is_primary else None) or (
-        config.output_dir / final_name
-    )
+    expected_final = config.output_dir / final_name
+    recorded = state.artifact_path(PipelineStage.SUBTITLES) if is_primary else None
+    final_video = _recorded_or_expected(recorded, expected_final)
     if (
         resume
         and (state.is_done(PipelineStage.SUBTITLES) if is_primary else True)
@@ -1379,6 +1524,57 @@ def _invalidate_segment_artifacts(output_dir: Path, suffix: str) -> None:
             (output_dir / pattern).unlink(missing_ok=True)
 
 
+def _recorded_or_expected(recorded: Path | None, expected: Path) -> Path:
+    """Devuelve el artefacto del checkpoint solo si coincide con el esperado.
+
+    Al cambiar la cardinalidad del lote (``final.mp4`` vs ``final_00.mp4``),
+    la ruta registrada pertenece al esquema viejo y debe ignorarse para que
+    ``final_videos`` nunca mezcle ambos esquemas.
+
+    Args:
+        recorded: Ruta registrada en el checkpoint, o None.
+        expected: Ruta esperada para la cardinalidad vigente.
+
+    Returns:
+        La ruta registrada si coincide con la esperada; la esperada si no.
+    """
+    if recorded is not None and recorded == expected:
+        return recorded
+    return expected
+
+
+def _normalize_final_artifacts(output_dir: Path, total_segments: int) -> None:
+    """Elimina finales con el esquema de nombres de la otra cardinalidad.
+
+    Un lote de 1 segmento publica ``final.mp4`` y un lote múltiple publica
+    ``final_00.mp4``...: al cambiar la cardinalidad en ``--resume``, el
+    artefacto con el nombre viejo se elimina para que ``final_videos`` nunca
+    mezcle ambos esquemas. La limpieza opera en ambas direcciones: de
+    múltiple a 1 se eliminan todos los ``final_NN.mp4`` indexados (que
+    ``_clean_leftover_segments`` conserva parcialmente), y de 1 a múltiple se
+    eliminan los artefactos de nombre singular.
+
+    Args:
+        output_dir: Directorio de salida del pipeline.
+        total_segments: Número de segmentos de la selección vigente.
+    """
+    if total_segments > 1:
+        for name in ("final.mp4", "reframed.mp4", "reframe.json", "subtitles.ass"):
+            with suppress(OSError):
+                (output_dir / name).unlink(missing_ok=True)
+        return
+    for pattern in (
+        "final_*.mp4",
+        "reframed_*.mp4",
+        "subtitles_*.ass",
+        "reframe_*.json",
+        "clip_*.mp4",
+    ):
+        for stale in output_dir.glob(pattern):
+            with suppress(OSError):
+                stale.unlink()
+
+
 def _render_all_segments(
     source: Path,
     selection: SegmentSelection,
@@ -1457,6 +1653,7 @@ def _run_stages(
         resume=effective_resume,
     )
     _clean_leftover_segments(config.output_dir, len(selection.segments))
+    _normalize_final_artifacts(config.output_dir, len(selection.segments))
     reframe, subtitles, final_videos = _render_all_segments(
         source,
         selection,

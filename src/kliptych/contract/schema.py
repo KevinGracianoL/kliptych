@@ -352,13 +352,30 @@ def _platform_restriction_rules(
         active.append("caption.required_mention")
     if rules.required_hashtags:
         active.append("caption.required_hashtag")
-    if rules.audio_rule is AudioRule.OFFICIAL_REQUIRED:
-        active.append("audio.official_track")
+    active.extend(_audio_restriction_rules(rules))
     if rules.attribution.type is not AttributionType.NONE:
         active.append("attribution.required")
     if rules.link_rules.link_in_bio:
         active.append("link.in_bio")
     return active
+
+
+def _audio_restriction_rules(rules: PlatformRules) -> list[str]:
+    """Deriva la regla de audio que exige la plataforma, si declara alguna.
+
+    Args:
+        rules: Restricciones declaradas para una plataforma.
+
+    Returns:
+        El rule_id de audio correspondiente, o lista vacía con ``any``.
+    """
+    if rules.audio_rule is AudioRule.OFFICIAL_REQUIRED:
+        return ["audio.official_track"]
+    if rules.audio_rule is AudioRule.OWN_CLIP:
+        return ["audio.own_clip"]
+    if rules.audio_rule is AudioRule.NO_TRENDING:
+        return ["audio.no_trending"]
+    return []
 
 
 def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[str]:

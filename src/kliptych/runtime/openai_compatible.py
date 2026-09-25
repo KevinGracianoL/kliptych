@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -198,6 +198,26 @@ class OpenAIChatModel:
             parse=_parse_caption,
         )
 
+    def chat_json(self, *, system_prompt: str, user_content: str) -> object:
+        """Envía un prompt chat y devuelve el cuerpo JSON parseado.
+
+        Args:
+            system_prompt: Instrucciones del sistema para el backend.
+            user_content: Contenido del usuario, serializado por el llamador.
+
+        Returns:
+            El valor JSON (objeto, lista o escalar) del primer choice.
+
+        Raises:
+            ModelUnavailableError: Si el backend no responde tras los intentos.
+            ModelOutputError: Si la salida no es un JSON válido.
+        """
+        return self._complete(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            parse=_parse_json_value,
+        )
+
     def _complete[T](
         self,
         *,
@@ -264,6 +284,27 @@ class OpenAIChatModel:
 
 def _caption_user_content(contract: Contract, piece: PieceContext) -> str:
     return json.dumps(caption_prompt_payload(contract, piece), ensure_ascii=False, sort_keys=True)
+
+
+def _parse_json_value(body: bytes) -> object:
+    """Parsea el completion del backend como un valor JSON genérico.
+
+    Args:
+        body: Cuerpo JSON del completion devuelto por el backend.
+
+    Returns:
+        El valor JSON (objeto, lista o escalar) del primer choice.
+
+    Raises:
+        ModelOutputError: Si la respuesta no contiene un JSON válido.
+    """
+    content = _completion_content(body)
+    try:
+        parsed = cast("object", json.loads(_strip_code_fences(content)))
+    except ValueError:
+        msg = "el contenido no es un JSON válido"
+        raise ModelOutputError(msg) from None
+    return parsed
 
 
 def _parse_draft(body: bytes) -> ContractDraft:

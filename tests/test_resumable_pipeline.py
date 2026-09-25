@@ -441,13 +441,14 @@ def test_resume_skips_completed_stages(tmp_path: Path, monkeypatch: pytest.Monke
     assert mgr.is_done(PipelineStage.TRANSCRIBE)
     assert not mgr.is_done(PipelineStage.MOMENTS)
 
-    # Segundo intento: reanudar tras resolver el fallo
+    # Segundo intento: reanudar tras resolver el fallo. La fuente remota se
+    # revalida (una descarga más con los mismos bytes) pero las etapas
+    # completadas no se re-ejecutan.
     counter.detect_error = None
     result = _run(config, deps, resume=True)
     assert isinstance(result, PipelineResult)
 
-    # download y transcribe NO deben haberse vuelto a ejecutar (call count sigue siendo 1)
-    assert counter.download_calls == 1
+    assert counter.download_calls == 2
     assert counter.transcribe_calls == 1
     assert counter.detect_calls == 2
 
@@ -1101,7 +1102,12 @@ def test_resume_binds_secondary_segments_and_removes_leftovers(
 def test_resume_invalidates_downstream_stages_when_source_content_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifica que resume invalide etapas descendentes si los bytes del video fuente cambian."""
+    """Verifica que resume invalide etapas descendentes si los bytes remotos cambian.
+
+    El servidor es la fuente de verdad: en --resume se re-descarga la URL y,
+    si los bytes difieren, el local se actualiza y las etapas hijas se
+    re-ejecutan.
+    """
     counter = _CallCounter()
     config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
 
@@ -1115,14 +1121,32 @@ def test_resume_invalidates_downstream_stages_when_source_content_changes(
     source_file = config.output_dir / "source.mp4"
     assert source_file.is_file()
 
-    # 2. Simulamos que el archivo fuente descargado cambió de contenido (bytes distintos)
-    _ = source_file.write_bytes(b"completely_new_source_video_bytes_v2")
+    # 2. El servidor cambia los bytes del video fuente entre corridas
+    def downloader_factory_v2(*, timeout_s: float, max_size_bytes: int) -> _TrackedDownloader:
+        _ = (timeout_s, max_size_bytes)
+
+        class _ChangedDownloader(_TrackedDownloader):
+            @override
+            def download_video(
+                self, *, url: str, destination: Path, format_selector: str | None = None
+            ) -> Path:
+                _ = (url, format_selector)
+                self._counter.download_calls += 1
+                _ = destination.write_bytes(b"completely_new_source_video_bytes_v2")
+                return destination
+
+        return _ChangedDownloader(counter)
+
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", downloader_factory_v2)
 
     # 3. Segunda corrida con resume=True
     result2 = _run(config, deps, resume=True)
     assert isinstance(result2, PipelineResult)
 
-    # Las etapas dependientes deben haberse re-ejecutado por el cambio de contenido del fuente
+    # El local se actualizó con los bytes del servidor y las etapas
+    # dependientes se re-ejecutaron por el cambio de contenido
+    assert counter.download_calls == 2
+    assert source_file.read_bytes() == b"completely_new_source_video_bytes_v2"
     assert counter.transcribe_calls == 2
     assert counter.reframe_calls == 2
     assert counter.subtitles_calls == 2

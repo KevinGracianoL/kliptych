@@ -172,6 +172,8 @@ class CampaignManager:
         platform: Platform | None = None,
         approve_manual_review: bool = False,
         approved_by: str | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
     ) -> CampaignOutcome:
         """Procesa la campaña según su arquetipo.
 
@@ -183,8 +185,9 @@ class CampaignManager:
         Args:
             campaign: Campaña con su brief y contrato validado.
             mode: Modo de video a ejecutar si el arquetipo es ``KNOWN``
-                (``long_video`` o ``slideshow``).
-            url: URL del vídeo fuente, requerida por el modo ``long_video``.
+                (``long_video``, ``audio_locked``, ``repost``, ``repost_ugc``
+                o ``slideshow``).
+            url: URL del vídeo fuente, requerida por los modos de video.
             images: Imágenes del slideshow, requeridas por el modo ``slideshow``.
             resume: Si es True, reanuda la ejecución desde checkpoints previos.
             gate: Gate de validación; si se omite, usa el inyectado en el manager.
@@ -195,6 +198,8 @@ class CampaignManager:
             platform: Plataforma específica a entregar; si se omite, entrega todas las del contrato.
             approve_manual_review: Si es True, aprueba piezas en estado PENDING_REVIEW.
             approved_by: Identificador del operador o sistema que aprueba la revisión manual.
+            audio_track_path: Pista de audio local para el modo ``audio_locked``.
+            audio_track_url: URL de la pista de audio para el modo ``audio_locked``.
 
         Returns:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
@@ -230,6 +235,8 @@ class CampaignManager:
                 platform=platform,
                 approve_manual_review=approve_manual_review,
                 approved_by=approved_by,
+                audio_track_path=audio_track_path,
+                audio_track_url=audio_track_url,
             )
         return self._process_proposal(campaign, contract, classification)
 
@@ -249,6 +256,8 @@ class CampaignManager:
         platform: Platform | None = None,
         approve_manual_review: bool = False,
         approved_by: str | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
     ) -> CampaignOutcome:
         try:
             outcome = self._render_known(
@@ -265,6 +274,8 @@ class CampaignManager:
                 platform=platform,
                 approve_manual_review=approve_manual_review,
                 approved_by=approved_by,
+                audio_track_path=audio_track_path,
+                audio_track_url=audio_track_url,
             )
         except Exception as error:
             return _error_outcome(
@@ -290,14 +301,38 @@ class CampaignManager:
         platform: Platform | None = None,
         approve_manual_review: bool = False,
         approved_by: str | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
     ) -> CampaignOutcome:
         pipeline_result: PipelineResult | None = None
         slideshow_result: SlideshowResult | None = None
+        contract = campaign.contract
         if mode == "long_video":
-            pipeline_result = self._run_long_video(url, resume=resume)
+            pipeline_result = self._run_long_video(url, resume=resume, contract=contract)
+            final_videos = getattr(pipeline_result, "final_videos", (pipeline_result.final_video,))
+        elif mode == "audio_locked":
+            pipeline_result = self._run_long_video(
+                url,
+                resume=resume,
+                contract=contract,
+                audio_locked=True,
+                audio_track_path=audio_track_path,
+                audio_track_url=audio_track_url,
+            )
+            final_videos = getattr(pipeline_result, "final_videos", (pipeline_result.final_video,))
+        elif mode in {"repost", "repost_ugc"}:
+            pipeline_result = self._run_long_video(
+                url, resume=resume, contract=contract, repost_mode=True
+            )
             final_videos = getattr(pipeline_result, "final_videos", (pipeline_result.final_video,))
         elif mode == "slideshow":
-            slideshow_result = self._run_slideshow(images, resume=resume)
+            slideshow_result = self._run_slideshow(
+                images,
+                resume=resume,
+                contract=contract,
+                audio_track_path=audio_track_path,
+                audio_track_url=audio_track_url,
+            )
             final_videos = getattr(
                 slideshow_result, "final_videos", (slideshow_result.final_video,)
             )
@@ -384,7 +419,17 @@ class CampaignManager:
             pull_request=pull_request,
         )
 
-    def _run_long_video(self, url: str | None, *, resume: bool = False) -> PipelineResult:
+    def _run_long_video(
+        self,
+        url: str | None,
+        *,
+        resume: bool = False,
+        contract: Contract | None = None,
+        audio_locked: bool = False,
+        repost_mode: bool = False,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
+    ) -> PipelineResult:
         orchestrator = self._video_orchestrator
         if orchestrator is None:
             msg = "no hay orquestador de video configurado para el modo long_video"
@@ -392,22 +437,48 @@ class CampaignManager:
         if url is None:
             msg = "el modo long_video requiere la URL del video fuente"
             raise CampaignManagerError(msg)
-        return orchestrator.run_long_video(url, resume=resume)
+        return orchestrator.run_long_video(
+            url,
+            resume=resume,
+            contract=contract,
+            audio_locked=audio_locked,
+            repost_mode=repost_mode,
+            audio_track_path=audio_track_path,
+            audio_track_url=audio_track_url,
+        )
 
     def _run_slideshow(
-        self, images: Sequence[Path] | None, *, resume: bool = False
+        self,
+        images: Sequence[Path] | None,
+        *,
+        resume: bool = False,
+        contract: Contract | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
     ) -> SlideshowResult:
         if images is None:
             msg = "el modo slideshow requiere la secuencia de imágenes"
             raise CampaignManagerError(msg)
         slideshow_orchestrator = self._slideshow_orchestrator
         if slideshow_orchestrator is not None:
-            return slideshow_orchestrator.run(images, resume=resume)
+            return slideshow_orchestrator.run(
+                images,
+                resume=resume,
+                contract=contract,
+                audio_track_path=audio_track_path,
+                audio_track_url=audio_track_url,
+            )
         video_orchestrator = self._video_orchestrator
         if video_orchestrator is None:
             msg = "no hay orquestador de slideshow configurado"
             raise CampaignManagerError(msg)
-        return video_orchestrator.run_slideshow(images, resume=resume)
+        return video_orchestrator.run_slideshow(
+            images,
+            resume=resume,
+            contract=contract,
+            audio_track_path=audio_track_path,
+            audio_track_url=audio_track_url,
+        )
 
 
 def _piece_caption(brief: str, rules: PlatformRules, caption: str | None) -> str:

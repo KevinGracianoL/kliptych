@@ -178,8 +178,9 @@ def test_cli_campaign_exits_one_on_blocked_status_despite_pipeline_success(tmp_p
             resume: bool = False,
             approve_manual_review: bool = False,
             approved_by: str | None = None,
+            **kwargs: object,
         ) -> CampaignOutcome:
-            _ = (campaign, mode, url, resume, approve_manual_review, approved_by)
+            _ = (campaign, mode, url, resume, approve_manual_review, approved_by, kwargs)
             return blocked_outcome
 
     brief_file = tmp_path / "brief.txt"
@@ -232,8 +233,9 @@ def test_cli_campaign_approved_by_defaults_and_explicit(tmp_path: Path) -> None:
             resume: bool = False,
             approve_manual_review: bool = False,
             approved_by: str | None = None,
+            **kwargs: object,
         ) -> CampaignOutcome:
-            _ = (mode, url, resume)
+            _ = (mode, url, resume, kwargs)
             self.calls.append(
                 {
                     "approve_manual_review": approve_manual_review,
@@ -356,7 +358,7 @@ def test_contract_with_link_in_bio_triggers_pending_review(tmp_path: Path) -> No
 
 
 def test_export_delivery_partial_batch_does_not_publish(tmp_path: Path) -> None:
-    contract = make_contract()
+    contract = make_contract(audio_rule="any")
     good = _valid_piece(tmp_path, caption="mira @marca #marca")
     bad_artifact = tmp_path / "bad.mp4"
     _ = bad_artifact.write_bytes(b"bad video")
@@ -506,7 +508,8 @@ def test_audit_10_traceability_in_manual_approval(tmp_path: Path) -> None:
             "caption.required_hashtag",
             "caption.required_mention",
             "watermark.full_video",
-        ]
+        ],
+        audio_rule="any",
     )
 
     piece = _valid_piece(tmp_path)
