@@ -154,6 +154,9 @@ class _ExportContext:
     contract: Contract
     campaign: str
     staging: Path
+    gate: Gate
+    assets: AssetRegistry
+    approve_manual_review: bool = False
 
 
 def export_delivery(
@@ -163,6 +166,7 @@ def export_delivery(
     gate: Gate,
     assets: AssetRegistry,
     destination: Path,
+    approve_manual_review: bool = False,
 ) -> DeliveryReport:
     """Construye el paquete de entrega de las piezas que pasan el gate.
 
@@ -176,6 +180,8 @@ def export_delivery(
         gate: Gate configurado con su probe de medios.
         assets: Registro de assets del workspace.
         destination: Raíz del paquete de entrega.
+        approve_manual_review: Si es True, permite exportar piezas con estado
+            PENDING_REVIEW tras aprobación explícita.
 
     Returns:
         El reporte del paquete, escrito también en ``delivery_report.json``.
@@ -220,15 +226,20 @@ def export_delivery(
     _validate_output_names(plans)
 
     staging = destination.with_name(f"{destination.name}.staging-{uuid4().hex}")
-    context = _ExportContext(contract=contract, campaign=campaign, staging=staging)
+    context = _ExportContext(
+        contract=contract,
+        campaign=campaign,
+        staging=staging,
+        gate=gate,
+        assets=assets,
+        approve_manual_review=approve_manual_review,
+    )
     published = False
     try:
         staging.mkdir(parents=True)
         report = _build_report(
             context,
             plans,
-            gate=gate,
-            assets=assets,
             package=destination.name,
         )
         _ = (staging / _SUMMARY_NAME).write_text(report.model_dump_json(indent=2), encoding="utf-8")
@@ -247,11 +258,9 @@ def _build_report(
     context: _ExportContext,
     plans: Sequence[_PiecePlan],
     *,
-    gate: Gate,
-    assets: AssetRegistry,
     package: str,
 ) -> DeliveryReport:
-    exported, rejected = _build_package(context, plans, gate=gate, assets=assets)
+    exported, rejected = _build_package(context, plans)
     return DeliveryReport(
         campaign_id=context.contract.campaign_id,
         package=package,
@@ -298,15 +307,17 @@ def _safe_segment(value: str, *, field: str) -> str:
 def _build_package(
     context: _ExportContext,
     plans: Sequence[_PiecePlan],
-    *,
-    gate: Gate,
-    assets: AssetRegistry,
 ) -> tuple[list[ExportedPiece], list[RejectedPiece]]:
     exported: list[ExportedPiece] = []
     rejected: list[RejectedPiece] = []
     for plan in plans:
-        gate_result = gate.run(contract=context.contract, piece=plan.piece, assets=assets)
-        if not gate_result.passed:
+        gate_result = context.gate.run(
+            contract=context.contract, piece=plan.piece, assets=context.assets
+        )
+        should_export = gate_result.passed or (
+            gate_result.status is GateStatus.PENDING_REVIEW and context.approve_manual_review
+        )
+        if not should_export:
             rejected.append(
                 RejectedPiece(
                     piece_id=plan.piece.piece_id,

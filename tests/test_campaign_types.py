@@ -17,6 +17,7 @@ def test_campaign_status_enum_values() -> None:
         "PROCESSING",
         "COMPLETED",
         "MANUAL_REVIEW",
+        "BLOCKED",
     }
 
 

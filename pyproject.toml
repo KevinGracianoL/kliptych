@@ -78,11 +78,17 @@ ignore = [
     # Frontera del controlador: cualquier fallo del clasificador, motor de video
     # o motor de propuestas se traduce a CampaignOutcome con error.
     "blind-except",
+    # El controlador orquesta clasificación, propuestas, video y entrega (gate/assets/destino).
+    "too-many-arguments",
 ]
 "src/kliptych/environment.py" = [
     # herramientas del sistema invocadas con lista de argumentos y shell=False
     "suspicious-subprocess-import",
     "subprocess-without-shell-equals-true",
+]
+"src/kliptych/exporter.py" = [
+    # export_delivery compone contrato, piezas, gate, assets, destino y aprobación manual.
+    "too-many-arguments",
 ]
 "src/kliptych/git_proposals.py" = [
     # open_pull_request refleja la firma del protocolo GitProvider (rama, base,

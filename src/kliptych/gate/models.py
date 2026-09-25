@@ -28,6 +28,7 @@ class GateStatus(StrEnum):
     PASSED = "passed"
     REJECTED = "rejected"
     MANUAL_REVIEW = "manual_review"
+    PENDING_REVIEW = "pending_review"
     UNSUPPORTED = "unsupported"
 
 

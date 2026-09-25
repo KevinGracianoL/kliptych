@@ -122,6 +122,9 @@ def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> Gate
         return GateStatus.REJECTED
     if any(check.status is CheckStatus.UNSUPPORTED for check in hard):
         return GateStatus.UNSUPPORTED
-    if any(check.status is CheckStatus.MANUAL_REVIEW for check in hard):
-        return GateStatus.MANUAL_REVIEW
+    if any(
+        strength is RuleStrength.MANUAL_REVIEW or check.status is CheckStatus.MANUAL_REVIEW
+        for strength, check in outcomes
+    ):
+        return GateStatus.PENDING_REVIEW
     return GateStatus.PASSED

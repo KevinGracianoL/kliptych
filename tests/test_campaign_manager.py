@@ -19,6 +19,7 @@ import pytest
 from pydantic import ValidationError
 
 from kliptych import campaign_manager
+from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import (
     CampaignManager,
     CampaignOutcome,
@@ -27,12 +28,14 @@ from kliptych.campaign_manager import (
 )
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import Contract, Segment
+from kliptych.exporter import ExportStatus
+from kliptych.gate import CheckStatus, Gate, GateStatus
 from kliptych.git_proposals import GitError, ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification
 from kliptych.orchestrator import PipelineError, PipelineResult, SlideshowResult
 from kliptych.runtime import ModelUnavailableError
 from kliptych.segment import SegmentSelection
-from tests.support import make_contract
+from tests.support import FakeProbe, make_contract, make_media
 
 _URL = "https://github.com/owner/repo/pull/7"
 _VIDEO_URL = "https://example.com/video"
@@ -231,6 +234,9 @@ def _manager(
     provider: FakeGitProvider | None = None,
     video: FakeVideoOrchestrator | None = None,
     slideshow: FakeSlideshowOrchestrator | None = None,
+    gate: Gate | None = None,
+    assets: AssetRegistry | None = None,
+    destination: Path | None = None,
 ) -> CampaignManager:
     return CampaignManager(
         classifier=classifier,
@@ -239,6 +245,9 @@ def _manager(
         ),
         video_orchestrator=video,
         slideshow_orchestrator=slideshow,
+        gate=gate,
+        assets=assets,
+        destination=destination,
     )
 
 
@@ -518,3 +527,228 @@ def test_importing_manager_does_not_load_video_engine() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"
+
+
+def test_known_route_with_gate_and_sabotaged_caption_is_blocked_by_gate(tmp_path: Path) -> None:
+    video_path = tmp_path / "rendered.mp4"
+    _ = video_path.write_bytes(b"rendered video content")
+
+    contract = make_contract(required_mentions=["@marca"])
+    campaign = Campaign(
+        campaign_id="camp-sabotage",
+        brief="brief crudo",
+        contract=contract,
+    )
+
+    classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
+    video_orch = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=Path("source.mp4"),
+            transcript=None,
+            moments=(),
+            selection=_selection(),
+            reframe=None,
+            subtitles=None,
+            final_video=video_path,
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    destination = tmp_path / "delivery"
+    assets = AssetRegistry(tmp_path)
+
+    manager = _manager(
+        classifier=classifier,
+        video=video_orch,
+        gate=gate,
+        assets=assets,
+        destination=destination,
+    )
+
+    outcome = manager.process(
+        campaign,
+        mode="long_video",
+        url=_VIDEO_URL,
+        caption="Este caption viola el contrato porque no tiene mencion",
+    )
+
+    assert outcome.status is not CampaignStatus.COMPLETED
+    assert outcome.status is CampaignStatus.BLOCKED
+    assert outcome.delivery_report is not None
+    assert outcome.delivery_report.status is ExportStatus.BLOCKED
+    assert len(outcome.delivery_report.rejected) == 1
+    rejected = outcome.delivery_report.rejected[0]
+    assert rejected.gate_status is GateStatus.REJECTED
+    assert "caption.required_mention" in rejected.reason
+    assert any(
+        c.id == "caption.required_mention" and c.status is CheckStatus.FAIL
+        for c in rejected.gate.checks
+    )
+    assert not (destination / "camp-sabotage").exists()
+
+
+def test_known_route_with_gate_and_valid_video_exports_successfully(tmp_path: Path) -> None:
+    video_path = tmp_path / "rendered.mp4"
+    _ = video_path.write_bytes(b"rendered video content")
+
+    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    campaign = Campaign(
+        campaign_id="camp-valid",
+        brief="brief crudo",
+        contract=contract,
+    )
+
+    classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
+    video_orch = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=Path("source.mp4"),
+            transcript=None,
+            moments=(),
+            selection=_selection(),
+            reframe=None,
+            subtitles=None,
+            final_video=video_path,
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    destination = tmp_path / "delivery"
+    assets = AssetRegistry(tmp_path)
+
+    manager = _manager(
+        classifier=classifier,
+        video=video_orch,
+        gate=gate,
+        assets=assets,
+        destination=destination,
+    )
+
+    outcome = manager.process(
+        campaign,
+        mode="long_video",
+        url=_VIDEO_URL,
+        caption="Mira esto @marca #marca",
+        hashtags=("#marca",),
+    )
+
+    assert outcome.status is CampaignStatus.COMPLETED
+    assert outcome.delivery_report is not None
+    assert outcome.delivery_report.status is ExportStatus.EXPORTED
+    assert len(outcome.delivery_report.exported) == 1
+    assert outcome.delivery_report.exported[0].gate_status is GateStatus.PASSED
+    assert (destination / "camp-test" / "tiktok" / "camp-valid.mp4").exists()
+    assert (destination / "delivery_report.json").exists()
+
+
+def test_known_route_with_manual_review_requires_approval(tmp_path: Path) -> None:
+    video_path = tmp_path / "rendered.mp4"
+    _ = video_path.write_bytes(b"rendered video content")
+
+    contract = make_contract(
+        manual_review=["audio.official_selection"],
+        required_mentions=["@marca"],
+        required_hashtags=["#marca"],
+    )
+    campaign = Campaign(
+        campaign_id="camp-manual",
+        brief="brief crudo",
+        contract=contract,
+    )
+
+    classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
+    video_orch = FakeVideoOrchestrator(
+        pipeline_result=PipelineResult(
+            source=Path("source.mp4"),
+            transcript=None,
+            moments=(),
+            selection=_selection(),
+            reframe=None,
+            subtitles=None,
+            final_video=video_path,
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    assets = AssetRegistry(tmp_path)
+
+    manager = _manager(
+        classifier=classifier,
+        video=video_orch,
+        gate=gate,
+        assets=assets,
+    )
+
+    # 1. Sin aprobacion manual -> BLOCKED
+    blocked_outcome = manager.process(
+        campaign,
+        mode="long_video",
+        url=_VIDEO_URL,
+        destination=tmp_path / "delivery_blocked",
+        approve_manual_review=False,
+    )
+    assert blocked_outcome.status is CampaignStatus.BLOCKED
+    assert blocked_outcome.delivery_report is not None
+    assert blocked_outcome.delivery_report.status is ExportStatus.BLOCKED
+    assert blocked_outcome.delivery_report.rejected[0].gate_status is GateStatus.PENDING_REVIEW
+
+    # 2. Con aprobacion manual -> COMPLETED
+    approved_outcome = manager.process(
+        campaign,
+        mode="long_video",
+        url=_VIDEO_URL,
+        destination=tmp_path / "delivery_approved",
+        approve_manual_review=True,
+    )
+    assert approved_outcome.status is CampaignStatus.COMPLETED
+    assert approved_outcome.delivery_report is not None
+    assert approved_outcome.delivery_report.status is ExportStatus.EXPORTED
+    assert approved_outcome.delivery_report.exported[0].gate_status is GateStatus.PENDING_REVIEW
+
+
+def test_slideshow_route_with_gate_delivery_success(tmp_path: Path) -> None:
+    video_path = tmp_path / "slide_final.mp4"
+    _ = video_path.write_bytes(b"slideshow video content")
+
+    contract = make_contract(required_mentions=["@marca"], required_hashtags=["#marca"])
+    campaign = Campaign(
+        campaign_id="camp-slide",
+        brief="brief crudo",
+        contract=contract,
+    )
+
+    classifier = FakeClassifier(classification=_classification(Archetype.KNOWN))
+    slideshow_orch = FakeSlideshowOrchestrator(
+        slideshow_result=SlideshowResult(
+            images=(_IMAGE,),
+            slideshow_video=Path("slideshow.mp4"),
+            final_video=video_path,
+            subtitles=None,
+            cleaning=(),
+        )
+    )
+    probe = FakeProbe(info=make_media(duration_s=10.0, has_video=True, has_audio=True))
+    gate = Gate(probe=probe)
+    destination = tmp_path / "delivery_slide"
+    assets = AssetRegistry(tmp_path)
+
+    manager = _manager(
+        classifier=classifier,
+        slideshow=slideshow_orch,
+        gate=gate,
+        assets=assets,
+        destination=destination,
+    )
+
+    outcome = manager.process(
+        campaign,
+        mode="slideshow",
+        images=(_IMAGE,),
+    )
+
+    assert outcome.status is CampaignStatus.COMPLETED
+    assert outcome.delivery_report is not None
+    assert outcome.delivery_report.status is ExportStatus.EXPORTED
+    assert (destination / "camp-test" / "tiktok" / "camp-slide.mp4").exists()

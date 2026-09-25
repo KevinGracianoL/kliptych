@@ -93,8 +93,9 @@ def test_manual_review_class_is_non_blocking(tmp_path: Path) -> None:
         piece=make_piece(artifact),
         assets=AssetRegistry(tmp_path),
     )
-    assert result.status is GateStatus.PASSED
+    assert result.status is GateStatus.PENDING_REVIEW
     assert _check(result, "audio.official_selection").status is CheckStatus.MANUAL_REVIEW
+    assert result.passed is False
 
 
 def test_recommended_failure_is_recorded_but_non_blocking(tmp_path: Path) -> None:
@@ -119,8 +120,9 @@ def test_hard_manual_review_status_blocks_as_manual_review(tmp_path: Path) -> No
         piece=make_piece(artifact),
         assets=AssetRegistry(tmp_path),
     )
-    assert result.status is GateStatus.MANUAL_REVIEW
+    assert result.status is GateStatus.PENDING_REVIEW
     assert _check(result, "watermark.full_video").status is CheckStatus.MANUAL_REVIEW
+    assert result.passed is False
 
 
 def test_probe_failure_blocks_media_checks(tmp_path: Path) -> None:
