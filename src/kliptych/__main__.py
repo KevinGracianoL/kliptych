@@ -125,15 +125,11 @@ class _DefaultVideoOrchestrator:
 
         Returns:
             El resultado del pipeline long_video.
-
-        Raises:
-            CampaignManagerError: Si falta el contrato de la campaña.
-            PipelineError: Si el pipeline no se completa.
         """
         config = self._pipeline_config(
             kwargs.get("contract"),
             audio_locked=kwargs.get("audio_locked") is True,
-            repost_mode=kwargs.get("repost_mode") is True,
+            repost_mode=_is_repost_mode(kwargs.get("repost_mode"), kwargs.get("mode")),
             audio_track_path=kwargs.get("audio_track_path"),
             audio_track_url=kwargs.get("audio_track_url"),
         )
@@ -157,10 +153,6 @@ class _DefaultVideoOrchestrator:
 
         Returns:
             El resultado del pipeline slideshow.
-
-        Raises:
-            CampaignManagerError: Si falta el contrato de la campaña.
-            PipelineError: Si el pipeline no se completa.
         """
         return _run_slideshow_pipeline(
             images, work_dir=self._work_dir, render=self._render, kwargs=kwargs
@@ -193,8 +185,8 @@ class _DefaultVideoOrchestrator:
         if not isinstance(contract, Contract):
             msg = "el orquestador por defecto requiere el contrato de la campaña"
             raise CampaignManagerError(msg)
-        track_path = audio_track_path if isinstance(audio_track_path, Path) else None
-        track_url = audio_track_url if isinstance(audio_track_url, str) else None
+        track_path = _coerce_audio_track_path(audio_track_path)
+        track_url = _coerce_audio_track_url(audio_track_url)
         return orchestrator.PipelineConfig(
             output_dir=self._work_dir,
             contract=contract,
@@ -228,14 +220,68 @@ class _DefaultSlideshowOrchestrator:
 
         Returns:
             El resultado del pipeline slideshow.
-
-        Raises:
-            CampaignManagerError: Si falta el contrato de la campaña.
-            PipelineError: Si el pipeline no se completa.
         """
         return _run_slideshow_pipeline(
             images, work_dir=self._work_dir, render=self._render, kwargs=kwargs
         )
+
+
+def _is_repost_mode(repost_flag: object, mode: object) -> bool:
+    """Indica si los flags del orquestador activan el pipeline repost.
+
+    Args:
+        repost_flag: Valor del flag ``repost_mode`` (activo solo si es True).
+        mode: Modo de campaña opcional; ``"repost"`` y el canónico
+            ``"repost_ugc"`` activan el pipeline repost.
+
+    Returns:
+        True si el pipeline repost debe ejecutarse.
+    """
+    if repost_flag is True:
+        return True
+    return isinstance(mode, str) and mode in {"repost", "repost_ugc"}
+
+
+def _coerce_audio_track_path(value: object) -> Path | None:
+    """Convierte la pista local a Path sin perderla en silencio.
+
+    Args:
+        value: Ruta como ``Path`` o ``str``, o None si no hay pista local.
+
+    Returns:
+        La ruta como ``Path``, o None si no hay pista local.
+
+    Raises:
+        TypeError: Si el valor no es ``Path``, ``str`` ni None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        return Path(value)
+    msg = f"audio_track_path debe ser Path, str o None, no {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _coerce_audio_track_url(value: object) -> str | None:
+    """Conserva la URL de la pista sin perderla en silencio.
+
+    Args:
+        value: URL como ``str``, o None si no hay pista remota.
+
+    Returns:
+        La URL, o None si no hay pista remota.
+
+    Raises:
+        TypeError: Si el valor no es ``str`` ni None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    msg = f"audio_track_url debe ser str o None, no {type(value).__name__}"
+    raise TypeError(msg)
 
 
 def _run_slideshow_pipeline(
@@ -258,7 +304,6 @@ def _run_slideshow_pipeline(
 
     Raises:
         CampaignManagerError: Si falta el contrato de la campaña.
-        PipelineError: Si el pipeline no se completa.
     """
     contract = kwargs.get("contract")
     if not isinstance(contract, Contract):
@@ -272,8 +317,8 @@ def _run_slideshow_pipeline(
         contract=contract,
         render=render,
         audio_locked=True,
-        audio_track_path=track_path if isinstance(track_path, Path) else None,
-        audio_track_url=track_url if isinstance(track_url, str) else None,
+        audio_track_path=_coerce_audio_track_path(track_path),
+        audio_track_url=_coerce_audio_track_url(track_url),
     )
     return orchestrator.run_slideshow(
         images,
@@ -372,7 +417,7 @@ def main(
     _ = campaign_parser.add_argument(
         "--mode",
         default="long_video",
-        choices=["long_video", "audio_locked", "repost", "slideshow"],
+        choices=["long_video", "audio_locked", "repost", "repost_ugc", "slideshow"],
         help="modo de procesamiento (default: long_video)",
     )
     _ = campaign_parser.add_argument(

@@ -18,6 +18,7 @@ from kliptych import orchestrator as orchestrator_module
 from kliptych.assets import AssetRegistry
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import Contract, Segment
+from kliptych.encoding import RenderConfig
 from kliptych.exporter import ExportStatus
 from kliptych.gate import Gate, MediaInfo
 from kliptych.gate.probe import FFprobeProbe
@@ -48,6 +49,9 @@ _ChatSegmentModel = cast(
     "Callable[[OpenAIChatModel], _SegmentModel]", _manager_private(cli_module, "_ChatSegmentModel")
 )
 main = cast("Callable[[object], int]", _manager_private(cli_module, "main"))
+_run_slideshow_pipeline = cast(
+    "Callable[..., SlideshowResult]", _manager_private(cli_module, "_run_slideshow_pipeline")
+)
 
 _URL = "https://example.com/video"
 
@@ -269,3 +273,116 @@ def test_chat_json_rejects_non_json_content() -> None:
     )
     with pytest.raises(ModelOutputError, match="JSON"):
         _ = backend.chat_json(system_prompt="s", user_content="{}")
+
+
+def _cli_orchestrator(tmp_path: Path) -> object:
+    backend = OpenAIChatModel(
+        base_url="https://llm.test.invalid",
+        api_key="test-key",
+        model="test-model",
+    )
+    factory = cast(
+        "Callable[..., object]",
+        _manager_private(cli_module, "_DefaultVideoOrchestrator"),
+    )
+    return factory(
+        work_dir=tmp_path / "work",
+        model=_ChatSegmentModel(backend),
+        render=RenderConfig(),
+    )
+
+
+def _cli_pipeline_config(orchestrator: object) -> Callable[..., PipelineConfig]:
+    return cast("Callable[..., PipelineConfig]", _manager_private(orchestrator, "_pipeline_config"))
+
+
+def test_pipeline_config_converts_str_audio_track(tmp_path: Path) -> None:
+    """La pista de audio en str se convierte a Path en vez de perderse como None."""
+    _ = tmp_path
+    config = _cli_pipeline_config(_cli_orchestrator(tmp_path))(
+        make_contract(audio_rule="any"),
+        audio_locked=True,
+        audio_track_path="track.mp3",
+        audio_track_url="https://example.com/track.mp3",
+    )
+    assert config.audio_track_path == Path("track.mp3")
+    assert config.audio_track_url == "https://example.com/track.mp3"
+
+
+def test_pipeline_config_rejects_invalid_audio_track_types(tmp_path: Path) -> None:
+    """Un tipo inesperado en la pista de audio falla con TypeError, nunca None."""
+    pipeline_config = _cli_pipeline_config(_cli_orchestrator(tmp_path))
+    with pytest.raises(TypeError, match="audio_track_path"):
+        _ = pipeline_config(
+            make_contract(audio_rule="any"),
+            audio_locked=True,
+            audio_track_path=123,
+        )
+    with pytest.raises(TypeError, match="audio_track_url"):
+        _ = pipeline_config(
+            make_contract(audio_rule="any"),
+            audio_locked=True,
+            audio_track_url=123,
+        )
+
+
+def test_slideshow_pipeline_converts_str_audio_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El slideshow convierte la pista en str a Path en vez de perderla como None."""
+    seen: list[PipelineConfig] = []
+
+    def _fake_slideshow(images: object, **kwargs: object) -> SlideshowResult:
+        _ = images
+        config = cast("PipelineConfig", kwargs["config"])
+        seen.append(config)
+        final = config.output_dir / "final.mp4"
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+        _ = final.write_bytes(b"slideshow")
+        return SlideshowResult(
+            images=(),
+            slideshow_video=final,
+            final_video=final,
+            subtitles=None,
+            cleaning=(),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "run_slideshow", _fake_slideshow)
+    image = tmp_path / "slide.jpg"
+    _ = image.write_bytes(b"image")
+    _ = _run_slideshow_pipeline(
+        [image],
+        work_dir=tmp_path / "work",
+        render=RenderConfig(),
+        kwargs={
+            "contract": make_contract(audio_rule="any"),
+            "audio_track_path": str(tmp_path / "track.mp3"),
+        },
+    )
+    assert seen[0].audio_track_path == tmp_path / "track.mp3"
+
+
+def test_slideshow_pipeline_rejects_invalid_audio_track_types(tmp_path: Path) -> None:
+    """El slideshow falla con TypeError ante tipos inesperados, nunca None."""
+    kwargs: Mapping[str, object] = {
+        "contract": make_contract(audio_rule="any"),
+        "audio_track_path": 123,
+    }
+    with pytest.raises(TypeError, match="audio_track_path"):
+        _ = _run_slideshow_pipeline(
+            [tmp_path / "slide.jpg"],
+            work_dir=tmp_path / "work",
+            render=RenderConfig(),
+            kwargs=kwargs,
+        )
+    bad_url: Mapping[str, object] = {
+        "contract": make_contract(audio_rule="any"),
+        "audio_track_url": 123,
+    }
+    with pytest.raises(TypeError, match="audio_track_url"):
+        _ = _run_slideshow_pipeline(
+            [tmp_path / "slide.jpg"],
+            work_dir=tmp_path / "work",
+            render=RenderConfig(),
+            kwargs=bad_url,
+        )

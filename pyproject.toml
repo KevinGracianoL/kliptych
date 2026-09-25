@@ -56,9 +56,6 @@ ignore = [
 "src/kliptych/__main__.py" = [
     "print", # la CLI imprime JSON y ayuda en stdout
     "too-many-arguments", # _CampaignManagerProtocol.process refleja los parámetros completos de la campaña
-    # los adaptadores delegan en el orquestador, que lanza PipelineError; la
-    # sección Raises documenta el contrato público.
-    "docstring-extraneous-exception",
 ]
 "src/kliptych/assets.py" = [
     "builtin-argument-shadowing", # el dominio usa `license`, nombre del campo del contrato
