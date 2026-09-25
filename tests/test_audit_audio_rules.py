@@ -3,6 +3,10 @@
 El gate no puede verificar mecánicamente el origen/uso del audio, así que el
 contrato proyecta reglas manual_review explícitas y el gate exige confirmación
 humana.
+
+Todos estos tests ejercen la ruta real de producción (`resolve_contract`, que
+proyecta vía `_audio_restriction_rules`, y el gate sobre el contrato
+resuelto): si la proyección se rompe, fallan.
 """
 
 from pathlib import Path
@@ -10,10 +14,10 @@ from pathlib import Path
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import AudioRule
+from kliptych.contract import AudioRule, Contract
 from kliptych.gate import CheckStatus, Gate, GateStatus
 from kliptych.resolver import resolve_contract
-from tests.support import FakeProbe, candidate, make_contract, make_draft, make_media, make_piece
+from tests.support import FakeProbe, candidate, make_draft, make_media, make_piece
 
 
 def _probe_15s() -> FakeProbe:
@@ -24,6 +28,32 @@ def _artifact(tmp_path: Path) -> Path:
     path = tmp_path / "piece.mp4"
     _ = path.write_bytes(b"video payload")
     return path
+
+
+def _resolve_with_audio_rule(audio_rule: AudioRule, tmp_path: Path) -> Contract:
+    """Resuelve un borrador con la regla de audio por la ruta real de producción.
+
+    Args:
+        audio_rule: Regla de audio declarada en la plataforma del borrador.
+        tmp_path: Directorio temporal para el registro de assets.
+
+    Returns:
+        El contrato resuelto con la regla de audio proyectada.
+    """
+    draft = make_draft(
+        platforms={
+            "tiktok": {
+                "duration": {"min_s": candidate(8)},
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+                "audio_rule": candidate(audio_rule.value),
+            }
+        },
+        rules=None,
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.contract is not None
+    return result.contract
 
 
 @pytest.mark.parametrize(
@@ -37,8 +67,7 @@ def test_audio_rule_projects_manual_review_rule(
     audio_rule: AudioRule, rule_id: str, tmp_path: Path
 ) -> None:
     """OWN_CLIP y NO_TRENDING generan reglas manual_review explícitas."""
-    _ = tmp_path
-    contract = make_contract(audio_rule=audio_rule.value)
+    contract = _resolve_with_audio_rule(audio_rule, tmp_path)
     assert rule_id in contract.rules.manual_review
     assert rule_id not in contract.rules.hard
 
@@ -54,7 +83,7 @@ def test_audio_gate_requires_human_confirmation(
     audio_rule: AudioRule, rule_id: str, tmp_path: Path
 ) -> None:
     """El gate pide confirmación humana del origen/uso del audio."""
-    contract = make_contract(audio_rule=audio_rule.value)
+    contract = _resolve_with_audio_rule(audio_rule, tmp_path)
     piece = make_piece(_artifact(tmp_path), caption="mira @marca #marca")
     result = Gate(probe=_probe_15s()).evaluate_piece(
         piece, contract=contract, assets=AssetRegistry(tmp_path)
