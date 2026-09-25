@@ -98,7 +98,7 @@ def test_manual_review_class_is_non_blocking(tmp_path: Path) -> None:
     assert result.passed is False
 
 
-def test_recommended_failure_is_recorded_but_non_blocking(tmp_path: Path) -> None:
+def test_recommended_failure_rejects_fail_closed(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     contract = make_contract(recommended=["duration.max"], min_s=5, max_s=6)
     result = _gate().run(
@@ -106,7 +106,8 @@ def test_recommended_failure_is_recorded_but_non_blocking(tmp_path: Path) -> Non
         piece=make_piece(artifact),
         assets=AssetRegistry(tmp_path),
     )
-    assert result.status is GateStatus.PASSED
+    assert result.status is GateStatus.REJECTED
+    assert result.passed is False
     assert _check(result, "duration.max").status is CheckStatus.FAIL
 
 
