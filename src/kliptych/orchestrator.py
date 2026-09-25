@@ -1549,8 +1549,10 @@ def _normalize_final_artifacts(output_dir: Path, total_segments: int) -> None:
     Un lote de 1 segmento publica ``final.mp4`` y un lote múltiple publica
     ``final_00.mp4``...: al cambiar la cardinalidad en ``--resume``, el
     artefacto con el nombre viejo se elimina para que ``final_videos`` nunca
-    mezcle ambos esquemas. Los sobrantes ``final_NN`` del caso 1-segmento los
-    limpia ``_clean_leftover_segments``.
+    mezcle ambos esquemas. La limpieza opera en ambas direcciones: de
+    múltiple a 1 se eliminan todos los ``final_NN.mp4`` indexados (que
+    ``_clean_leftover_segments`` conserva parcialmente), y de 1 a múltiple se
+    eliminan los artefactos de nombre singular.
 
     Args:
         output_dir: Directorio de salida del pipeline.
@@ -1560,6 +1562,17 @@ def _normalize_final_artifacts(output_dir: Path, total_segments: int) -> None:
         for name in ("final.mp4", "reframed.mp4", "reframe.json", "subtitles.ass"):
             with suppress(OSError):
                 (output_dir / name).unlink(missing_ok=True)
+        return
+    for pattern in (
+        "final_*.mp4",
+        "reframed_*.mp4",
+        "subtitles_*.ass",
+        "reframe_*.json",
+        "clip_*.mp4",
+    ):
+        for stale in output_dir.glob(pattern):
+            with suppress(OSError):
+                stale.unlink()
 
 
 def _render_all_segments(

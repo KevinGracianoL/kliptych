@@ -291,6 +291,51 @@ def test_resume_single_to_multi_segment_uses_indexed_finals(
     assert result2.final_videos == (first, second)
 
 
+def test_resume_multi_to_single_segment_removes_indexed_finals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--resume de 2 a 1 segmento produce final.mp4 sin huérfanos final_00/final_01."""
+    config, deps, _ = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"source-bytes"))
+    selection2 = SegmentSelection(
+        segments=(Segment(start_s=0.0, end_s=1.0), Segment(start_s=1.0, end_s=2.0)),
+        rationale="r2",
+    )
+
+    def _parse_selection_2(raw: object) -> SegmentSelection:
+        _ = raw
+        return selection2
+
+    monkeypatch.setattr(deps.selector, "parse_response", _parse_selection_2)
+    result1 = _run_resume(config, deps, resume=False)
+    assert result1.final_videos == (
+        config.output_dir / "final_00.mp4",
+        config.output_dir / "final_01.mp4",
+    )
+    assert (config.output_dir / "final_00.mp4").is_file()
+    assert (config.output_dir / "final_01.mp4").is_file()
+
+    selection1 = SegmentSelection(
+        segments=(Segment(start_s=0.0, end_s=1.0),),
+        rationale="r1",
+    )
+
+    def _parse_selection_1(raw: object) -> SegmentSelection:
+        _ = raw
+        return selection1
+
+    monkeypatch.setattr(deps.selector, "parse_response", _parse_selection_1)
+    _ = (config.output_dir / "selection.json").write_text(
+        selection1.model_dump_json(indent=2), encoding="utf-8"
+    )
+    result2 = _run_resume(config, deps, resume=True)
+
+    final = config.output_dir / "final.mp4"
+    assert final.is_file()
+    assert not (config.output_dir / "final_00.mp4").exists()
+    assert not (config.output_dir / "final_01.mp4").exists()
+    assert result2.final_videos == (final,)
+
+
 def test_resume_remote_source_revalidates_and_invalidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
