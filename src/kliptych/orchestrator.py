@@ -540,6 +540,105 @@ def run_long_video(
     return replace(result, cleaning=cleaning)
 
 
+def run_audio_locked(
+    url: str,
+    *,
+    model: LongVideoModel,
+    config: PipelineConfig,
+    detector: MomentDetector | None = None,
+    transcriber: Transcriber | None = None,
+    selector: SegmentSelector | None = None,
+    reframer: Reframer | None = None,
+    subtitle_renderer: SubtitleBurner | None = None,
+    resume: bool = False,
+) -> PipelineResult:
+    """Ejecuta el pipeline long_video con pista de audio externa obligatoria.
+
+    Args:
+        url: URL http/https del vídeo fuente.
+        model: Modelo de runtime que elige los segmentos.
+        config: Directorio de salida, contrato y render; exige
+            ``audio_locked=True`` con pista configurada.
+        detector: Detector de momentos; por defecto usa ffmpeg.
+        transcriber: Transcriber word-level; por defecto usa faster-whisper.
+        selector: Constructor y validador del prompt; por defecto el de LLM.
+        reframer: Reframer 9:16; por defecto usa MediaPipe en CPU y ffmpeg.
+        subtitle_renderer: Renderizador de subtítulos; por defecto usa ffmpeg.
+        resume: Si es True, reanuda la ejecución desde el último punto de control
+            sin repetir las etapas ya completadas.
+
+    Returns:
+        El resultado con los artefactos y las rutas de temporales limpiados.
+
+    Raises:
+        PipelineError: Si la config no activa ``audio_locked`` o una etapa falla.
+    """
+    if not config.audio_locked:
+        msg = "run_audio_locked exige PipelineConfig con audio_locked=True"
+        raise PipelineError(msg)
+    return run_long_video(
+        url,
+        model=model,
+        config=config,
+        detector=detector,
+        transcriber=transcriber,
+        selector=selector,
+        reframer=reframer,
+        subtitle_renderer=subtitle_renderer,
+        resume=resume,
+    )
+
+
+def run_repost(
+    url: str,
+    *,
+    model: LongVideoModel,
+    config: PipelineConfig,
+    detector: MomentDetector | None = None,
+    transcriber: Transcriber | None = None,
+    selector: SegmentSelector | None = None,
+    reframer: Reframer | None = None,
+    subtitle_renderer: SubtitleBurner | None = None,
+    resume: bool = False,
+) -> PipelineResult:
+    """Ejecuta el pipeline en modo Repost/UGC: vídeo completo sin inteligencia.
+
+    Args:
+        url: URL http/https del vídeo fuente.
+        model: Modelo de runtime (no se usa en modo repost, que omite la
+            selección LLM).
+        config: Directorio de salida, contrato y render; exige
+            ``repost_mode=True``.
+        detector: Detector de momentos; por defecto usa ffmpeg.
+        transcriber: Transcriber word-level; por defecto usa faster-whisper.
+        selector: Constructor y validador del prompt; por defecto el de LLM.
+        reframer: Reframer 9:16; por defecto usa MediaPipe en CPU y ffmpeg.
+        subtitle_renderer: Renderizador de subtítulos; por defecto usa ffmpeg.
+        resume: Si es True, reanuda la ejecución desde el último punto de control
+            sin repetir las etapas ya completadas.
+
+    Returns:
+        El resultado con los artefactos y las rutas de temporales limpiados.
+
+    Raises:
+        PipelineError: Si la config no activa ``repost_mode`` o una etapa falla.
+    """
+    if not config.repost_mode:
+        msg = "run_repost exige PipelineConfig con repost_mode=True"
+        raise PipelineError(msg)
+    return run_long_video(
+        url,
+        model=model,
+        config=config,
+        detector=detector,
+        transcriber=transcriber,
+        selector=selector,
+        reframer=reframer,
+        subtitle_renderer=subtitle_renderer,
+        resume=resume,
+    )
+
+
 def run_slideshow(
     images: Sequence[Path | str],
     *,
