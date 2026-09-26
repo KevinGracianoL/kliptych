@@ -289,6 +289,8 @@ def test_long_video_locked_audio_mixes_downloaded_track(
     audio_duration = _audio_duration_s(result.final_video)
     assert 0.0 < audio_duration < _SOURCE_DURATION_S
     assert abs(audio_duration - _SEGMENT_END_S) < abs(audio_duration - _SOURCE_DURATION_S)
-    assert any("audio_track" in path for path in result.cleaning)
+    audio_track_path = config.output_dir / "audio_track.mp3"
+    assert audio_track_path.is_file()
+    assert not any("audio_track" in path for path in result.cleaning)
     leftover = [path.name for path in (tmp_path / "out").iterdir() if ".part-" in path.name]
     assert leftover == []
