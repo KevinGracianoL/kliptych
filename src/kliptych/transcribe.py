@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_MODEL_SIZES = frozenset({"small"})
+_ALLOWED_MODEL_SIZES = frozenset({"small", "large-v3-turbo"})
 _ALLOWED_COMPUTE_TYPES = frozenset({"int8"})
 _ALLOWED_DEVICES = frozenset({"auto", "cpu", "cuda"})
 
@@ -158,20 +158,19 @@ class FasterWhisperTranscriber:
     def __init__(
         self,
         *,
-        model_size: str = "small",
+        model_size: str | None = None,
         device: str = "auto",
         compute_type: str = "int8",
         num_workers: int = 1,
     ) -> None:
         """Configura el motor de transcripción.
 
-        Solo se admite ``small`` con ``int8``: es la ruta medida como segura en
-        la VRAM objetivo de 4 GB (brief §8). Otros modelos o cuantizaciones no
-        se aceptan hasta medirlos en ese hardware; ``medium`` queda
-        explícitamente fuera.
+        Modelos aceptados: ``small`` y ``large-v3-turbo`` con ``int8``.
+        ``large-v3-turbo`` ocupa ~1,074 MiB VRAM en GTX 1650 Ti (certificado).
 
         Args:
-            model_size: Modelo de faster-whisper; debe ser ``small``.
+            model_size: Modelo de faster-whisper. Por defecto ``small`` o
+               变量 de entorno ``KLIPTYCH_WHISPER_MODEL`` si está definida.
             device: Dispositivo de inferencia (``auto``, ``cpu`` o ``cuda``).
             compute_type: Cuantización; debe ser ``int8``.
             num_workers: Número de workers del modelo; debe ser positivo.
@@ -180,11 +179,11 @@ class FasterWhisperTranscriber:
             ValueError: Si el modelo, la cuantización, el dispositivo o el
                 número de workers no son válidos.
         """
+        if model_size is None:
+            model_size = os.environ.get("KLIPTYCH_WHISPER_MODEL", "small")
         if model_size not in _ALLOWED_MODEL_SIZES:
-            msg = (
-                f"modelo no permitido: {model_size!r}; solo 'small' está medido "
-                "como seguro en la VRAM objetivo de 4 GB"
-            )
+            allowed = ", ".join(sorted(_ALLOWED_MODEL_SIZES))
+            msg = f"modelo no permitido: {model_size!r}; permitidos: {allowed}"
             raise ValueError(msg)
         if compute_type not in _ALLOWED_COMPUTE_TYPES:
             msg = (
