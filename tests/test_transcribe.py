@@ -135,6 +135,22 @@ def test_invalid_model_size_rejected(model_size: str) -> None:
         _ = FasterWhisperTranscriber(model_size=model_size)
 
 
+def test_large_v3_turbo_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """large-v3-turbo is accepted after empirical VRAM certification on GTX 1650 Ti."""
+    _ = _install_engine(monkeypatch, FakeEngine())
+    tc = FasterWhisperTranscriber(model_size="large-v3-turbo", device="cuda")
+    assert tc is not None
+
+
+def test_default_model_from_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KLIPTYCH_WHISPER_MODEL overrides the default model size."""
+    monkeypatch.setenv("KLIPTYCH_WHISPER_MODEL", "large-v3-turbo")
+    _ = _install_engine(monkeypatch, FakeEngine())
+    tc = FasterWhisperTranscriber()
+    assert tc is not None
+    monkeypatch.delenv("KLIPTYCH_WHISPER_MODEL")
+
+
 @pytest.mark.parametrize("compute_type", ["", "float64", "int4"])
 def test_invalid_compute_type_rejected(compute_type: str) -> None:
     with pytest.raises(ValueError, match="cuantización"):
