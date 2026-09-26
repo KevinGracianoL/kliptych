@@ -1,5 +1,6 @@
 """Fix 2: pista de audio externa con fingerprint y revalidación en --resume."""
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -294,3 +295,60 @@ def test_audio_fingerprint_includes_content_hash(tmp_path: Path) -> None:
     _ = track.write_bytes(b"audio-v2-different")
     fp2 = compute_long_video_fingerprint(_URL, config=config)
     assert fp1 != fp2
+
+
+def _setup_local(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audio_bytes: bytes
+) -> tuple[PipelineConfig, _Counter]:
+    counter = _Counter()
+    box = _Box(video=b"video-v1", audio=b"unused-remote")
+
+    def _factory(*, timeout_s: float, max_size_bytes: int) -> _Downloader:
+        _ = (timeout_s, max_size_bytes)
+        return _Downloader(counter, box)
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", _ffmpeg_run)
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _factory)
+    track = tmp_path / "track.mp3"
+    _ = track.write_bytes(audio_bytes)
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(),
+        audio_locked=True,
+        audio_track_path=track,
+    )
+    return config, counter
+
+
+def test_local_audio_change_invalidates_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, counter = _setup_local(monkeypatch, tmp_path, b"audio-v1")
+    result1 = _run(config, counter)
+    assert isinstance(result1, PipelineResult)
+    assert counter.subtitles_calls == 1
+    work_copy = config.output_dir / "audio_track.mp3"
+    assert work_copy.is_file()
+    assert work_copy.read_bytes() == b"audio-v1"
+
+    track = tmp_path / "track.mp3"
+    _ = track.write_bytes(b"audio-v2-changed")
+    result2 = _run_resume(config, counter)
+    assert isinstance(result2, PipelineResult)
+    assert work_copy.read_bytes() == b"audio-v2-changed"
+    assert counter.subtitles_calls == 2
+
+
+def test_local_audio_missing_hash_invalidates_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, counter = _setup_local(monkeypatch, tmp_path, b"stable-audio")
+    _ = _run(config, counter)
+    assert counter.subtitles_calls == 1
+    checkpoint_path = config.output_dir / "checkpoint.json"
+    payload = cast("dict[str, object]", json.loads(checkpoint_path.read_text(encoding="utf-8")))
+    payload["audio_content_hash"] = None
+    _ = checkpoint_path.write_text(json.dumps(payload), encoding="utf-8")
+    _ = _run_resume(config, counter)
+    assert counter.subtitles_calls == 2

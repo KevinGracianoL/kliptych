@@ -1181,6 +1181,55 @@ def _audio_track_signature(config: PipelineConfig) -> str | None:
     return None
 
 
+def _local_copy_needs_update(*, src: Path, dst: Path) -> bool:
+    """Indica si la copia en el work_dir difiere de la fuente local.
+
+    Args:
+        src: Pista local de origen.
+        dst: Copia en el work_dir.
+
+    Returns:
+        True si la copia falta, difiere o no se puede verificar (fail-closed
+        hacia la copia).
+    """
+    if not dst.is_file():
+        return True
+    try:
+        return sha256_file(dst) != sha256_file(src)
+    except OSError:
+        return True
+
+
+def _sync_local_audio_copy(*, config: PipelineConfig) -> None:
+    """Sincroniza la pista local en ``output_dir/audio_track.mp3``.
+
+    Mantiene una copia en el work_dir para que ``--resume`` pueda revalidar
+    sin depender solo del fingerprint global; si los bytes difieren, la copia
+    se actualiza. No se registra como temporal para que la limpieza no la
+    elimine, igual que la pista descargada por URL.
+
+    Args:
+        config: Configuración con la pista local.
+
+    Raises:
+        PipelineError: Si la copia no se puede actualizar.
+    """
+    if config.audio_track_path is None:
+        return
+    src = config.audio_track_path
+    if not src.is_file():
+        return
+    dst = config.output_dir / _AUDIO_TRACK_NAME
+    if not _local_copy_needs_update(src=src, dst=dst):
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _ = shutil.copyfile(src, dst)
+    except OSError as error:
+        msg = f"no se pudo sincronizar la pista local en {dst}: {error}"
+        raise PipelineError(msg) from error
+
+
 def _check_audio_content_signature(
     *,
     config: PipelineConfig,
@@ -1188,6 +1237,11 @@ def _check_audio_content_signature(
     resume: bool,
 ) -> bool:
     """Compara la firma de la pista con el checkpoint e invalida si cambió.
+
+    Para ``audio_track_path`` local siempre se recalcula el hash actual y se
+    sincroniza la copia en el work_dir; si difiere del checkpoint o el
+    checkpoint no tiene hash (fail-closed), se invalidan las etapas
+    dependientes.
 
     Args:
         config: Configuración con la pista externa.
@@ -1200,11 +1254,13 @@ def _check_audio_content_signature(
     """
     if not config.audio_locked:
         return resume
+    if config.audio_track_path is not None:
+        _sync_local_audio_copy(config=config)
     current = _audio_track_signature(config)
     if current is None:
         return resume
     stored = state.checkpoint.audio_content_hash
-    if resume and stored is not None and stored != current:
+    if resume and stored != current:
         logger.warning("El audio externo cambió; invalidando etapas dependientes...")
         state.invalidate_audio_dependents()
         for pattern in ("final*.mp4", "audio_injected*.mp4"):
