@@ -12,15 +12,22 @@ ante error, para no retener VRAM entre etapas del pipeline.
 
 import gc
 import importlib
+import logging
+import os
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+logger = logging.getLogger(__name__)
+
 _ALLOWED_MODEL_SIZES = frozenset({"small"})
 _ALLOWED_COMPUTE_TYPES = frozenset({"int8"})
 _ALLOWED_DEVICES = frozenset({"auto", "cpu", "cuda"})
+
+_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
 
 
 class TranscriptionError(Exception):
@@ -218,14 +225,42 @@ class FasterWhisperTranscriber:
             self._release_model()
 
     def _ensure_model(self) -> _WhisperEngine:
-        if self._model is None:
-            factory = _load_model_factory()
-            self._model = factory(
+        if self._model is not None:
+            return self._model
+        _register_windows_cuda_dlls()
+        key = (self._model_size, self._device, self._compute_type)
+        cached = _MODEL_CACHE.get(key)
+        if cached is not None:
+            self._model = cast("_WhisperEngine", cached)
+            return self._model
+        factory = _load_model_factory()
+        try:
+            model = factory(
                 self._model_size,
                 device=self._device,
                 compute_type=self._compute_type,
                 num_workers=self._num_workers,
             )
+        except Exception as error:
+            if self._device == "cuda":
+                msg = f"CUDA solicitado pero falló al inicializar faster-whisper: {error}"
+                raise TranscriptionError(msg) from error
+            if self._device == "auto":
+                logger.warning("CUDA no disponible (%s); usando CPU", error)
+                try:
+                    model = factory(
+                        self._model_size,
+                        device="cpu",
+                        compute_type=self._compute_type,
+                        num_workers=self._num_workers,
+                    )
+                except Exception as fallback_error:
+                    msg = f"faster-whisper falló en CPU tras fallback de auto: {fallback_error}"
+                    raise TranscriptionError(msg) from fallback_error
+            else:
+                raise
+        _MODEL_CACHE[key] = cast("object", model)
+        self._model = model
         return self._model
 
     def _release_model(self) -> None:
@@ -257,6 +292,46 @@ def _load_torch_cuda() -> _TorchCuda | None:
     if cuda is None:
         return None
     return cast("_TorchCuda", cuda)
+
+
+def _register_windows_cuda_dlls() -> None:
+    """Registra los DLLs CUDA del venv en Windows antes de cargar ctranslate2.
+
+    En Windows, ``ctranslate2`` (backend de faster-whisper) necesita
+    ``cublas`` y ``cudnn`` de los paquetes ``nvidia-*``. Se añaden
+    ``nvidia/cublas/bin`` y ``nvidia/cudnn/bin`` del venv a ``PATH`` y a
+    ``os.add_dll_directory`` para que la carga no falle con DLL faltante.
+
+    Es best-effort: si no hay venv o no existen los directorios, no hace nada.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        prefix = Path(sys.prefix)
+    except (ValueError, OSError):
+        return
+    candidates = (
+        prefix / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin",
+        prefix / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin",
+    )
+    for bin_dir in candidates:
+        try:
+            if not bin_dir.is_dir():
+                continue
+        except OSError:
+            continue
+        try:
+            current = os.environ.get("PATH", "")
+            if str(bin_dir) not in current:
+                os.environ["PATH"] = str(bin_dir) + os.pathsep + current
+        except (ValueError, OSError):
+            continue
+        add_dll = getattr(os, "add_dll_directory", None)
+        if callable(add_dll):
+            try:
+                _ = add_dll(str(bin_dir))
+            except (ValueError, OSError):
+                continue
 
 
 def _build_transcript(
