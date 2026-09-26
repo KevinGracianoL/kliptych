@@ -25,10 +25,7 @@ from kliptych.transcribe import (
 
 
 def _clear_cache() -> None:
-    attr_name = "_MODEL_CACHE"
-    cache_obj = cast("object", getattr(transcribe_module, attr_name))
-    if isinstance(cache_obj, dict):
-        cache_obj.clear()
+    transcribe_module.clear_model_cache()
 
 
 @dataclass

@@ -14,8 +14,9 @@ import gc
 import importlib
 import logging
 import os
+import shutil
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import ClassVar, Protocol, cast
 
@@ -27,7 +28,18 @@ _ALLOWED_MODEL_SIZES = frozenset({"small"})
 _ALLOWED_COMPUTE_TYPES = frozenset({"int8"})
 _ALLOWED_DEVICES = frozenset({"auto", "cpu", "cuda"})
 
-_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+_MODEL_CACHE: dict[tuple[str, str, str, int], object] = {}
+
+_WINERROR_SYMLINK_PRIVILEGE = 1314
+
+
+def clear_model_cache() -> None:
+    """Vacía la caché de modelos de faster-whisper.
+
+    Se usa en teardowns de tests y para liberar referencias tras un lote;
+    la VRAM se libera por transcripción en ``_release_model``.
+    """
+    _MODEL_CACHE.clear()
 
 
 class TranscriptionError(Exception):
@@ -228,7 +240,8 @@ class FasterWhisperTranscriber:
         if self._model is not None:
             return self._model
         _register_windows_cuda_dlls()
-        key = (self._model_size, self._device, self._compute_type)
+        _patch_windows_symlinks()
+        key = (self._model_size, self._device, self._compute_type, self._num_workers)
         cached = _MODEL_CACHE.get(key)
         if cached is not None:
             self._model = cast("_WhisperEngine", cached)
@@ -332,6 +345,51 @@ def _register_windows_cuda_dlls() -> None:
                 _ = add_dll(str(bin_dir))
             except (ValueError, OSError):
                 continue
+
+
+def _patch_windows_symlinks() -> None:
+    """Sustituye ``os.symlink`` por una copia en Windows sin Developer Mode.
+
+    ``huggingface_hub`` usa ``os.symlink`` para cachear modelos y falla con
+    ``WinError 1314`` sin Developer Mode, lo que impide descargar
+    ``large-v3-turbo`` y otros modelos. El fallback copia el archivo o el
+    árbol para que la descarga complete; otros errores se relanzan.
+
+    Es idempotente: si ya se parcheó, no vuelve a envolver.
+    """
+    if sys.platform != "win32":
+        return
+    if getattr(os.symlink, "__name__", "") == "safe_symlink":
+        return
+    original = os.symlink
+
+    def safe_symlink(
+        src: str | os.PathLike[str],
+        dst: str | os.PathLike[str],
+        *args: object,
+        dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> None:
+        dynamic = cast("Callable[..., None]", original)
+        call_kwargs: dict[str, object] = dict(kwargs)
+        if dir_fd is not None:
+            call_kwargs["dir_fd"] = dir_fd
+        try:
+            dynamic(src, dst, *args, **call_kwargs)
+        except OSError as error:
+            if getattr(error, "winerror", None) != _WINERROR_SYMLINK_PRIVILEGE:
+                raise
+            src_str = os.fspath(src)
+            dst_str = os.fspath(dst)
+            if Path(src_str).is_dir():
+                _ = shutil.copytree(src_str, dst_str)
+            else:
+                _ = shutil.copy2(src_str, dst_str)
+        else:
+            return
+        return
+
+    os.symlink = safe_symlink
 
 
 def _build_transcript(
