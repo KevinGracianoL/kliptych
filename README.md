@@ -2,14 +2,16 @@
 
 **Deterministic, Fail-Closed Short-Form Video Production & Compliance Gate Engine**
 
-![CI](https://img.shields.io/badge/CI-ubuntu_%7C_windows-passing-brightgreen)
-![Release](https://img.shields.io/badge/release-v1.1.0-blue)
-![Tests](https://img.shields.io/badge/tests-1091_passed-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-96.61%25-brightgreen)
-![Types](https://img.shields.io/badge/basedpyright-0_errors-brightgreen)
-![Lint](https://img.shields.io/badge/ruff-clean-brightgreen)
-![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900)
-![Python](https://img.shields.io/badge/python-3.13%2B-blue)
+[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions)
+![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white)
+[![Release](https://img.shields.io/badge/release-v1.1.1-2563eb)](https://github.com/KevinGracianoL/kliptych/releases/tag/v1.1.1)
+![Tests](https://img.shields.io/badge/tests-1%2C091_passed-10b981?logo=pytest&logoColor=white)
+![Coverage](https://img.shields.io/badge/coverage-96.61%25-0d9488)
+![Types](https://img.shields.io/badge/basedpyright-0_errors-6366f1)
+![Lint](https://img.shields.io/badge/ruff-clean-261230?logo=ruff&logoColor=d7ff64)
+![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white)
+![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
 
 Kliptych converts a chaotic campaign brief into a validated vertical-video delivery package through a
 versioned JSON contract and a fail-closed compliance gate. The pipeline does the heavy lifting
