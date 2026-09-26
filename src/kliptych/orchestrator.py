@@ -1088,7 +1088,8 @@ def _revalidate_remote_source(
 
     El servidor es la fuente de verdad: si los bytes difieren, el archivo
     local se reemplaza y la firma de contenido posterior invalida las etapas
-    hijas. Si la revalidación falla, se reutiliza el archivo local.
+    hijas. Si la revalidación falla, se lanza ``PipelineError`` (fail-closed):
+    una red inestable nunca publica bytes obsoletos sin conocimiento del operador.
 
     Args:
         url: URL http/https del vídeo fuente.
@@ -1097,19 +1098,19 @@ def _revalidate_remote_source(
         registry: Registro donde se anota el temporal de revalidación.
 
     Returns:
-        La ruta del archivo fuente local (actualizado o reutilizado).
+        La ruta del archivo fuente local (actualizado).
+
+    Raises:
+        PipelineError: Si la re-descarga o la verificación del hash falla.
     """
     temporary = registry.register(_temporary_path(source_path))
-    try:
-        with _translated("revalidación de la fuente"):
-            _ = downloader.download_video(url=url, destination=temporary)
-    except Exception:
-        logger.warning("No se pudo revalidar la fuente remota; se reutiliza el archivo local")
-        return source_path
+    with _translated("revalidación de la fuente"):
+        _ = downloader.download_video(url=url, destination=temporary)
     try:
         changed = sha256_file(temporary) != sha256_file(source_path)
-    except OSError:
-        return source_path
+    except OSError as error:
+        msg = f"no se pudo verificar la fuente revalidada {source_path}: {error}"
+        raise PipelineError(msg) from error
     if changed:
         logger.warning("La fuente remota cambió; actualizando el archivo local")
         _ = temporary.replace(source_path)
