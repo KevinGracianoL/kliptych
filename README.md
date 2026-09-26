@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions)
 ![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white)
-[![Release](https://img.shields.io/badge/release-v1.1.1-2563eb)](https://github.com/KevinGracianoL/kliptych/releases/tag/v1.1.1)
+[![Release](https://img.shields.io/badge/release-v1.1.1-2563eb?logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases/tag/v1.1.1)
 ![Tests](https://img.shields.io/badge/tests-1%2C091_passed-10b981?logo=pytest&logoColor=white)
 ![Coverage](https://img.shields.io/badge/coverage-96.61%25-0d9488)
 ![Types](https://img.shields.io/badge/basedpyright-0_errors-6366f1)
