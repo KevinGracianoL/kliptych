@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 _STDERR_TAIL = 400
 _SOURCE_NAME = "source.mp4"
+_AUDIO_TRACK_NAME = "audio_track.mp3"
 _FINAL_NAME = "final.mp4"
 _FFPROBE = "ffprobe"
 _AUDIO_DURATION_TOLERANCE_S = 0.1
@@ -762,7 +763,6 @@ def _run_slideshow_stages(
     state: PipelineStateManager,
     resume: bool = False,
 ) -> SlideshowResult:
-    _ = state
     resolved = _resolve_slideshow_images(
         images,
         config=config,
@@ -789,6 +789,7 @@ def _run_slideshow_stages(
         downloader=downloader,
         registry=registry,
         resume=resume,
+        state=state,
     )
     final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
     return SlideshowResult(
@@ -1117,6 +1118,104 @@ def _revalidate_remote_source(
     return source_path
 
 
+def _revalidate_remote_audio_track(
+    url: str,
+    track_path: Path,
+    *,
+    downloader: MediaDownloader,
+    registry: _CleanupRegistry,
+) -> Path:
+    """Re-descarga la pista remota y actualiza el local solo si cambió.
+
+    Mismo patrón fail-closed que la fuente de video: si la re-descarga
+    falla, se lanza ``PipelineError`` y nunca se reutilizan bytes obsoletos
+    en silencio.
+
+    Args:
+        url: URL http/https de la pista de audio.
+        track_path: Archivo local descargado en una corrida previa.
+        downloader: Descargador acotado para re-descargar los bytes.
+        registry: Registro donde se anota el temporal de revalidación.
+
+    Returns:
+        La ruta de la pista local (actualizada).
+
+    Raises:
+        PipelineError: Si la re-descarga o la verificación del hash falla.
+    """
+    temporary = registry.register(_temporary_path(track_path))
+    with _translated("revalidación del audio"):
+        _ = downloader.download_video(url=url, destination=temporary)
+    try:
+        changed = sha256_file(temporary) != sha256_file(track_path)
+    except OSError as error:
+        msg = f"no se pudo verificar el audio revalidado {track_path}: {error}"
+        raise PipelineError(msg) from error
+    if changed:
+        logger.warning("La pista remota cambió; actualizando el archivo local")
+        _ = temporary.replace(track_path)
+    return track_path
+
+
+def _audio_track_signature(config: PipelineConfig) -> str | None:
+    """Calcula la firma de contenido de la pista externa para --resume.
+
+    Incluye el hash del archivo local (``audio_track_path`` o el
+    ``audio_track.mp3`` descargado) para que un cambio de bytes invalide
+    las etapas dependientes aunque la URL sea idéntica.
+
+    Args:
+        config: Configuración con la pista local o remota.
+
+    Returns:
+        La firma ``ruta:sha256`` del archivo, la URL si aún no se descargó,
+        o None si no hay pista configurada.
+    """
+    if config.audio_track_path is not None:
+        return _file_signature(config.audio_track_path)
+    if config.audio_track_url is not None:
+        downloaded = config.output_dir / _AUDIO_TRACK_NAME
+        if downloaded.is_file():
+            return _file_signature(downloaded)
+        return config.audio_track_url
+    return None
+
+
+def _check_audio_content_signature(
+    *,
+    config: PipelineConfig,
+    state: PipelineStateManager,
+    resume: bool,
+) -> bool:
+    """Compara la firma de la pista con el checkpoint e invalida si cambió.
+
+    Args:
+        config: Configuración con la pista externa.
+        state: Administrador del checkpoint persistente.
+        resume: Si es True, se compara con el hash almacenado.
+
+    Returns:
+        True si se puede continuar con resume; False si el audio cambió y
+        se invalidaron las etapas dependientes.
+    """
+    if not config.audio_locked:
+        return resume
+    current = _audio_track_signature(config)
+    if current is None:
+        return resume
+    stored = state.checkpoint.audio_content_hash
+    if resume and stored is not None and stored != current:
+        logger.warning("El audio externo cambió; invalidando etapas dependientes...")
+        state.invalidate_audio_dependents()
+        for pattern in ("final*.mp4", "audio_injected*.mp4"):
+            for path in config.output_dir.glob(pattern):
+                with suppress(OSError):
+                    path.unlink(missing_ok=True)
+        resume = False
+    state.set_audio_content_hash(current)
+    return resume
+
+
 def _resolve_transcript_stage(
     source: Path,
     *,
@@ -1438,6 +1537,7 @@ def _render_segment(
             registry=registry,
             resume=resume,
             suffix=suffix,
+            state=state,
         )
         if config.audio_locked
         else reframed
@@ -2060,20 +2160,23 @@ def _inject_audio(
     registry: _CleanupRegistry,
     resume: bool = False,
     suffix: str = "",
+    state: PipelineStateManager | None = None,
 ) -> Path:
     """Inyecta la pista externa reemplazando o mezclando la original.
 
     La pista se resuelve desde ``audio_track_path`` o ``audio_track_url`` y el
     render escribe en un temporal hermano registrado para limpieza. El vídeo se
-    copia y solo se recodifica el audio.
+    copia y solo se recodifica el audio. Tras resolver, la firma de contenido
+    se compara con el checkpoint: si cambió, se invalidan los finales.
 
     Args:
         video: Vídeo reframeado sin la pista externa.
         config: Configuración con la pista, la proporción y el render.
         downloader: Descargador acotado para pistas entregadas por URL.
         registry: Registro de temporales para limpiar la pista y el resultado.
-        resume: Si es True, aprovecha la pista ya descargada si existe.
+        resume: Si es True, revalida la pista ya descargada si existe.
         suffix: Sufijo opcional para nombres de archivo en lote.
+        state: Checkpoint para la firma de contenido del audio.
 
     Returns:
         La ruta del vídeo con la pista externa inyectada.
@@ -2082,7 +2185,11 @@ def _inject_audio(
         PipelineError: Si la pista no existe, no se configuró ninguna o ffmpeg
             falla.
     """
-    track = _resolve_audio_track(config, downloader=downloader, registry=registry, resume=resume)
+    track = _resolve_audio_track(
+        config, downloader=downloader, registry=registry, resume=resume, state=state
+    )
+    if state is not None:
+        _ = _check_audio_content_signature(config=config, state=state, resume=resume)
     video_info = _probe_video(video, render=config.render)
     audio_duration_s = _probe_audio_duration(track, render=config.render)
     if audio_duration_s < video_info.duration_s - _AUDIO_DURATION_TOLERANCE_S:
@@ -2119,21 +2226,29 @@ def _resolve_audio_track(
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
     resume: bool = False,
+    state: PipelineStateManager | None = None,
 ) -> Path:
     """Resuelve la pista de audio externa, descargándola si llega por URL.
+
+    La pista descargada persiste en ``output_dir`` (como ``source.mp4``)
+    para permitir la revalidación en ``--resume``: no se registra como
+    artefacto temporal para que la limpieza final no la elimine. En resume,
+    una URL remota se re-descarga y compara (fail-closed, mismo patrón que
+    la fuente de video); si los bytes cambiaron, el local se actualiza.
 
     Args:
         config: Configuración con la ruta local o la URL de la pista.
         downloader: Descargador acotado que se usa cuando la pista es una URL.
-        registry: Registro donde se anota la pista descargada como temporal.
-        resume: Si es True, aprovecha la pista ya descargada si existe.
+        registry: Registro donde se anota el temporal de descarga.
+        resume: Si es True, revalida la pista ya descargada si existe.
+        state: Administrador del checkpoint para saber si download terminó.
 
     Returns:
         La ruta local de la pista de audio.
 
     Raises:
-        PipelineError: Si se configuraron ambas fuentes, ninguna o la ruta no
-            existe.
+        PipelineError: Si se configuraron ambas fuentes, ninguna, la ruta no
+            existe o la revalidación remota falla.
     """
     if config.audio_track_path is not None and config.audio_track_url is not None:
         msg = "audio_locked acepta audio_track_path o audio_track_url, no ambos"
@@ -2144,15 +2259,24 @@ def _resolve_audio_track(
             raise PipelineError(msg)
         return config.audio_track_path
     if config.audio_track_url is not None:
-        destination = config.output_dir / "audio_track.mp3"
-        if resume and destination.is_file() and destination.stat().st_size > 0:
-            _ = registry.register(destination, is_artifact=True)
-            return destination
+        destination = config.output_dir / _AUDIO_TRACK_NAME
+        download_done = state is not None and state.is_done(PipelineStage.DOWNLOAD)
+        if (
+            resume
+            and destination.is_file()
+            and destination.stat().st_size > 0
+            and (state is None or download_done)
+        ):
+            return _revalidate_remote_audio_track(
+                config.audio_track_url,
+                destination,
+                downloader=downloader,
+                registry=registry,
+            )
         temporary = registry.register(_temporary_path(destination))
         with _translated("descarga de audio"):
             _ = downloader.download_video(url=config.audio_track_url, destination=temporary)
             _ = temporary.replace(destination)
-        _ = registry.register(destination, is_artifact=True)
         return destination
     msg = "audio_locked requiere audio_track_path o audio_track_url"
     raise PipelineError(msg)
