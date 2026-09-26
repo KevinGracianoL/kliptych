@@ -31,7 +31,7 @@ from kliptych.gate.probe import FFprobeProbe
 from kliptych.gc import clean_temporary_directories
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
-from kliptych.intelligence import LLMCampaignClassifier
+from kliptych.intelligence import Archetype, LLMCampaignClassifier
 from kliptych.logging_setup import setup_logging
 from kliptych.pipeline import PipelineError, RunOutcome, RunRequest, RunResult, run_given_clips
 from kliptych.resolver import ProvenanceError, resolve_contract
@@ -651,8 +651,13 @@ def _process_campaign(
     resume = cast("bool", getattr(args, "resume", False))
     approve_manual_review = cast("bool", getattr(args, "approve_manual_review", False))
     approved_by = cast("str | None", getattr(args, "approved_by", None))
-    if approve_manual_review and not approved_by:
-        approved_by = "cli-operator"
+    if approve_manual_review and (approved_by is None or not approved_by.strip()):
+        return CampaignOutcome(
+            campaign_id=campaign.campaign_id,
+            archetype=Archetype.NEW_ARCHETYPE,
+            status=CampaignStatus.PENDING,
+            error="se requiere --approved-by cuando --approve-manual-review está activo",
+        )
     audio_track_path, audio_track_url = _campaign_audio_tracks(args)
 
     return active_manager.process(
@@ -717,8 +722,15 @@ def _run_command(args: argparse.Namespace) -> int:
     root = cast("str | None", getattr(args, "root", None))
     approve_manual_review = cast("bool", getattr(args, "approve_manual_review", False))
     approved_by = cast("str | None", getattr(args, "approved_by", None))
-    if approve_manual_review and not approved_by:
-        approved_by = "cli-operator"
+    if approve_manual_review and (approved_by is None or not approved_by.strip()):
+        _ = sys.stderr.write(
+            json.dumps(
+                {"error": "se requiere --approved-by cuando --approve-manual-review está activo"},
+                indent=2,
+            )
+            + "\n"
+        )
+        return 1
 
     contract_draft, draft_err = _load_contract_draft_file(
         cast("str | None", getattr(args, "contract_draft", None))

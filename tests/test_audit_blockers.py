@@ -218,7 +218,7 @@ def test_cli_run_help_exposes_approve_manual_review() -> None:
 
 
 def test_cli_campaign_approved_by_defaults_and_explicit(tmp_path: Path) -> None:
-    """Verifica que --approve-manual-review asigne cli-operator o el valor explícito."""
+    """Verifica que --approve-manual-review exige --approved-by explícito."""
 
     class RecordingManager:
         def __init__(self) -> None:
@@ -251,7 +251,7 @@ def test_cli_campaign_approved_by_defaults_and_explicit(tmp_path: Path) -> None:
     brief_file = tmp_path / "brief.txt"
     _ = brief_file.write_text("texto del brief", encoding="utf-8")
 
-    # 1. Con --approve-manual-review sin --approved-by -> default "cli-operator"
+    # 1. Con --approve-manual-review sin --approved-by -> error 1 sin llamar al manager
     mgr1 = RecordingManager()
     code1 = main(
         [
@@ -263,9 +263,8 @@ def test_cli_campaign_approved_by_defaults_and_explicit(tmp_path: Path) -> None:
         ],
         manager=mgr1,
     )
-    assert code1 == 0
-    assert mgr1.calls[0]["approve_manual_review"] is True
-    assert mgr1.calls[0]["approved_by"] == "cli-operator"
+    assert code1 == 1
+    assert mgr1.calls == []
 
     # 2. Con --approve-manual-review y --approved-by "auditor-x"
     mgr2 = RecordingManager()

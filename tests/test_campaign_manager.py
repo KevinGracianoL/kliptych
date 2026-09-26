@@ -927,6 +927,7 @@ def test_known_route_with_manual_review_requires_approval(tmp_path: Path) -> Non
         url=_VIDEO_URL,
         destination=tmp_path / "delivery_approved",
         approve_manual_review=True,
+        approved_by="auditor-fixture",
     )
     assert approved_outcome.status is CampaignStatus.COMPLETED
     assert approved_outcome.delivery_report is not None

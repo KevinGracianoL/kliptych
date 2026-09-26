@@ -168,6 +168,21 @@ class _ExportContext:
     approved_by: str | None = None
 
 
+def _require_manual_approval(*, approve_manual_review: bool, approved_by: str | None) -> None:
+    """Valida que la aprobación manual tenga un responsable explícito.
+
+    Args:
+        approve_manual_review: Si es True, se exige ``approved_by`` no vacío.
+        approved_by: Identificador del operador o sistema que aprueba.
+
+    Raises:
+        ExportError: Si se pide aprobación manual sin responsable explícito.
+    """
+    if approve_manual_review and (approved_by is None or not approved_by.strip()):
+        msg = "se requiere --approved-by cuando --approve-manual-review está activo"
+        raise ExportError(msg)
+
+
 def export_delivery(
     *,
     contract: Contract,
@@ -206,6 +221,7 @@ def export_delivery(
     if not pieces:
         msg = "no hay piezas para exportar"
         raise ExportError(msg)
+    _require_manual_approval(approve_manual_review=approve_manual_review, approved_by=approved_by)
     if not destination.name:
         msg = f"destino de entrega inválido: {destination}"
         raise ExportError(msg)
@@ -288,7 +304,7 @@ def _build_report(
         dict.fromkeys(r for p in exported for r in p.manually_approved_rules)
     )
     has_manual_approval = bool(all_approved_rules)
-    approved_by = (context.approved_by or "cli-operator") if has_manual_approval else None
+    approved_by = context.approved_by if has_manual_approval else None
     approved_at_utc = (
         next((p.approved_at_utc for p in exported if p.approved_at_utc is not None), None)
         if has_manual_approval
@@ -444,7 +460,7 @@ def _export_piece(
         if is_manual_approval
         else ()
     )
-    effective_approved_by = (context.approved_by or "cli-operator") if is_manual_approval else None
+    effective_approved_by = context.approved_by if is_manual_approval else None
     approved_at = datetime.now(UTC).isoformat() if is_manual_approval else None
     return ExportedPiece(
         piece_id=piece.piece_id,
