@@ -313,13 +313,15 @@ def _relative_filter_path(subtitles: Path, base: Path) -> str:
         base: Directorio base (padre del destino) usado como cwd.
 
     Returns:
-        La ruta relativa en formato POSIX, escapada para el filtro.
+        La ruta relativa en formato POSIX, sin escape de ':' (las rutas
+        relativas no llevan letra de unidad; solo el fallback absoluto
+        de :func:`_filter_path` escapa el ':' de la unidad Windows).
     """
     try:
         rel = os.path.relpath(subtitles, start=base)
     except (ValueError, OSError):
         return _filter_path(subtitles)
-    return _filter_path(Path(rel))
+    return Path(rel).as_posix()
 
 
 def _require_file(path: Path, *, what: str) -> None:
