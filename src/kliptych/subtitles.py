@@ -236,8 +236,10 @@ class SubtitleRenderer:
         return tuple(self._build_argv(video=video, subtitles=subtitles, destination=destination))
 
     def _build_argv(self, *, video: Path, subtitles: Path, destination: Path) -> list[str]:
+        video_resolved = video.resolve()
+        destination_resolved = destination.resolve()
         filter_graph = (
-            f"subtitles=filename='{_relative_filter_path(subtitles, destination.parent)}'"
+            f"subtitles=filename='{_relative_filter_path(subtitles, destination_resolved.parent)}'"
         )
         argv = [
             self._render.ffmpeg,
@@ -247,7 +249,7 @@ class SubtitleRenderer:
             "error",
             "-y",
             "-i",
-            str(video),
+            str(video_resolved),
             "-vf",
             filter_graph,
             "-map",
@@ -257,7 +259,7 @@ class SubtitleRenderer:
         ]
         argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
         argv += list(audio_and_container_arguments())
-        argv.append(str(destination))
+        argv.append(str(destination_resolved))
         return argv
 
 
