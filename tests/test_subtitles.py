@@ -214,7 +214,8 @@ def test_render_arguments_reference_subtitles_filter(tmp_path: Path) -> None:
         video=_video(tmp_path), subtitles=ass, destination=tmp_path / "out.mp4"
     )
     filter_index = argv.index("-vf") + 1
-    assert argv[filter_index] == f"subtitles=filename='{_filter_path(ass)}'"
+    assert argv[filter_index] == "subtitles=filename='subs.ass'"
+    assert "C\\:" not in argv[filter_index]
 
 
 def test_burn_missing_video_raises(tmp_path: Path) -> None:

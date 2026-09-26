@@ -52,6 +52,7 @@ class PipelineCheckpoint(BaseModel):
     updated_at: str
     input_fingerprint: str | None = None
     source_content_hash: str | None = None
+    audio_content_hash: str | None = None
     segment_coords: tuple[tuple[float, float], ...] = ()
 
 
@@ -146,6 +147,25 @@ class PipelineStateManager:
             content_hash: Hash o firma del contenido del archivo fuente.
         """
         self.checkpoint.source_content_hash = content_hash
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
+    def set_audio_content_hash(self, content_hash: str | None) -> None:
+        """Asigna y persiste la firma de contenido de la pista de audio.
+
+        Args:
+            content_hash: Firma del archivo de audio externo, o None si no hay pista.
+        """
+        self.checkpoint.audio_content_hash = content_hash
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
+    def invalidate_audio_dependents(self) -> None:
+        """Invalida las etapas que dependen de la pista de audio externa."""
+        for stage in (PipelineStage.SUBTITLES, PipelineStage.COMPLETED):
+            stage_name = stage.value
+            _ = self.checkpoint.stages.pop(stage_name, None)
+            _ = self.checkpoint.artifacts.pop(stage_name, None)
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 

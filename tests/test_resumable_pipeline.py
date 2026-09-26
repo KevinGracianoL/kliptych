@@ -284,6 +284,13 @@ class _Injectables:
 def _mock_ffmpeg() -> object:
     def run(argv: list[str], **kwargs: object) -> object:
         _ = kwargs
+        if argv and argv[0] == "ffprobe":
+            return SimpleNamespace(
+                args=argv,
+                returncode=0,
+                stdout="width=320\nheight=240\nduration=2.0\n",
+                stderr="",
+            )
         # escribe el destino para comandos ffmpeg simulados
         out_path = Path(argv[-1])
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -678,14 +685,16 @@ def test_audio_track_caching_and_stable_path(
     assert isinstance(result, PipelineResult)
     assert audio_downloads == 1
 
-    # Simulamos que audio_track.mp3 existe en disco en ruta estable
+    # La pista persiste en ruta estable para --resume
     audio_path = config.output_dir / "audio_track.mp3"
-    _ = audio_path.write_bytes(b"cached_audio_bytes")
+    assert audio_path.is_file()
+    assert audio_path.read_bytes() == b"audio_bytes"
 
-    # Segundo intento con resume=True
+    # Segundo intento con resume=True: se revalida (una descarga más)
+    # pero con los mismos bytes se reutilizan las etapas
     _ = _run(config, deps, resume=True)
-    # audio_downloads sigue siendo 1: se reutilizó el audio en caché
-    assert audio_downloads == 1
+    assert audio_downloads == 2
+    assert audio_path.read_bytes() == b"audio_bytes"
 
 
 def test_reframe_and_subtitles_idempotency_on_resume(

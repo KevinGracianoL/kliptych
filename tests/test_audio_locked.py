@@ -382,7 +382,8 @@ def test_resolve_audio_track_downloads_url(tmp_path: Path) -> None:
     )
     assert track.is_file()
     assert events == [f"download:{_AUDIO_URL}"]
-    assert track in registry.paths
+    assert track.name == "audio_track.mp3"
+    assert track.parent == config.output_dir
 
 
 def test_inject_audio_builds_replace_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,5 +553,6 @@ def test_cleanup_registry_captures_downloaded_audio(
     result = _run(events, config)
     assert f"download:{_AUDIO_URL}" in events
     assert "inject_replace" in events
-    assert len(result.cleaning) == 5
+    assert len(result.cleaning) == 4
+    assert (config.output_dir / "audio_track.mp3").is_file()
     assert _leftovers(tmp_path / "out") == []

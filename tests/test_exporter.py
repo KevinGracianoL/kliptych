@@ -71,7 +71,13 @@ def _export(
     destination: Path | None = None,
     gate: Gate | None = None,
     approve_manual_review: bool = False,
+    approved_by: str | None = None,
 ) -> DeliveryReport:
+    effective_approved_by = (
+        approved_by
+        if approved_by is not None
+        else ("auditor-fixture" if approve_manual_review else None)
+    )
     return export_delivery(
         contract=contract if contract is not None else make_contract(audio_rule="any"),
         pieces=pieces if pieces is not None else [make_piece(_artifact(tmp_path))],
@@ -79,6 +85,7 @@ def _export(
         assets=AssetRegistry(tmp_path),
         destination=tmp_path / "delivery" if destination is None else destination,
         approve_manual_review=approve_manual_review,
+        approved_by=effective_approved_by,
     )
 
 

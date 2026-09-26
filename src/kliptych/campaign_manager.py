@@ -205,6 +205,12 @@ class CampaignManager:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
         """
         _resolve_outcome_model()
+        if approve_manual_review and (approved_by is None or not approved_by.strip()):
+            return _error_outcome(
+                campaign,
+                "se requiere --approved-by cuando --approve-manual-review está activo",
+                Archetype.NEW_ARCHETYPE,
+            )
         contract = campaign.contract
         if contract is None:
             return _error_outcome(

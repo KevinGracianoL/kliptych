@@ -12,6 +12,8 @@ Todo fallo externo se traduce a ``SubtitleError`` conservando la causa.
 """
 
 import contextlib
+import functools
+import os
 import subprocess
 import uuid
 from collections.abc import Sequence
@@ -202,7 +204,7 @@ class SubtitleRenderer:
             raise SubtitleError(msg) from error
         temporary = _temporary_path(destination)
         argv = self._build_argv(video=video, subtitles=subtitles, destination=temporary)
-        _run_ffmpeg(argv, temporary=temporary, render=self._render)
+        _run_ffmpeg(argv, temporary=temporary, render=self._render, cwd=destination.parent)
         try:
             _ = temporary.replace(destination)
         except OSError as error:
@@ -234,7 +236,11 @@ class SubtitleRenderer:
         return tuple(self._build_argv(video=video, subtitles=subtitles, destination=destination))
 
     def _build_argv(self, *, video: Path, subtitles: Path, destination: Path) -> list[str]:
-        filter_graph = f"subtitles=filename='{_filter_path(subtitles)}'"
+        video_resolved = video.resolve()
+        destination_resolved = destination.resolve()
+        filter_graph = (
+            f"subtitles=filename='{_relative_filter_path(subtitles, destination_resolved.parent)}'"
+        )
         argv = [
             self._render.ffmpeg,
             "-hide_banner",
@@ -243,7 +249,7 @@ class SubtitleRenderer:
             "error",
             "-y",
             "-i",
-            str(video),
+            str(video_resolved),
             "-vf",
             filter_graph,
             "-map",
@@ -253,7 +259,7 @@ class SubtitleRenderer:
         ]
         argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
         argv += list(audio_and_container_arguments())
-        argv.append(str(destination))
+        argv.append(str(destination_resolved))
         return argv
 
 
@@ -290,7 +296,30 @@ def _dialogue_line(word: Word) -> str:
 
 def _filter_path(path: Path) -> str:
     # En Windows el ':' de la unidad rompe el parser de filtros; se escapa.
+    # Solo se usa como fallback cuando no se puede relativizar: el filtro
+    # `subtitles` en Windows solo acepta rutas relativas al cwd.
     return path.as_posix().replace(":", "\\:")
+
+
+def _relative_filter_path(subtitles: Path, base: Path) -> str:
+    r"""Devuelve la ruta del .ass relativa al cwd de ffmpeg.
+
+    ffmpeg ejecuta con ``cwd`` en el directorio de salida, así que una ruta
+    relativa funciona en Windows donde una absoluta rompe el parser del
+    filtro ``subtitles``.
+
+    Args:
+        subtitles: Ruta del archivo ``.ass``.
+        base: Directorio base (padre del destino) usado como cwd.
+
+    Returns:
+        La ruta relativa en formato POSIX, escapada para el filtro.
+    """
+    try:
+        rel = os.path.relpath(subtitles, start=base)
+    except (ValueError, OSError):
+        return _filter_path(subtitles)
+    return _filter_path(Path(rel))
 
 
 def _require_file(path: Path, *, what: str) -> None:
@@ -299,13 +328,16 @@ def _require_file(path: Path, *, what: str) -> None:
         raise SubtitleError(msg)
 
 
-def _run_ffmpeg(argv: Sequence[str], *, temporary: Path, render: RenderConfig) -> None:
+def _run_ffmpeg(
+    argv: Sequence[str], *, temporary: Path, render: RenderConfig, cwd: Path | None = None
+) -> None:
+    runner = subprocess.run if cwd is None else functools.partial(subprocess.run, cwd=cwd)
     run_ffmpeg_with_fallback(
         argv,
         render=render,
         temporary=temporary,
         error_cls=SubtitleError,
-        runner=subprocess.run,
+        runner=runner,
     )
 
 

@@ -15,12 +15,17 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from kliptych import transcribe as transcribe_module
 from kliptych.transcribe import (
     FasterWhisperTranscriber,
     Transcript,
     TranscriptionError,
     Word,
 )
+
+
+def _clear_cache() -> None:
+    transcribe_module.clear_model_cache()
 
 
 @dataclass
@@ -78,6 +83,8 @@ class FakeEngine:
 
 
 def _install_engine(monkeypatch: pytest.MonkeyPatch, engine: FakeEngine) -> FakeEngine:
+    _clear_cache()
+
     def whisper_model(
         model_size_or_path: str,
         *,
@@ -330,6 +337,7 @@ def test_missing_faster_whisper_becomes_transcription_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_cache()
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     with pytest.raises(TranscriptionError):
         _ = FasterWhisperTranscriber().transcribe(_audio(tmp_path))
@@ -339,6 +347,7 @@ def test_module_without_whisper_model_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_cache()
     monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace())
     with pytest.raises(TranscriptionError, match="WhisperModel"):
         _ = FasterWhisperTranscriber().transcribe(_audio(tmp_path))
