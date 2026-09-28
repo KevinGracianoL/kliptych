@@ -78,6 +78,27 @@ def test_watermark_rejects_scale_below_minimum_width() -> None:
         )
 
 
+@pytest.mark.parametrize("opacity", [0.0, 0.05, 0.149])
+def test_watermark_rejects_near_invisible_opacity(opacity: float) -> None:
+    with pytest.raises(ValidationError, match="opacity"):
+        _ = Watermark(
+            required=True,
+            asset_id="wm-marca",
+            visible_full_video=True,
+            opacity=opacity,
+        )
+
+
+def test_watermark_accepts_opacity_floor() -> None:
+    watermark = Watermark(
+        required=True,
+        asset_id="wm-marca",
+        visible_full_video=True,
+        opacity=0.15,
+    )
+    assert watermark.opacity == pytest.approx(0.15)
+
+
 def test_default_watermark_config_keeps_digest() -> None:
     assert contract_digest(make_contract()) == contract_digest(
         make_contract(watermark_position="top_right")

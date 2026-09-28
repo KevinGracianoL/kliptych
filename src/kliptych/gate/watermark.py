@@ -7,12 +7,33 @@
 
 Cada muestra extrae un frame con ffmpeg (lista de argumentos, sin shell;
 ``-ss`` después de ``-i`` para seek exacto) y lo compara con el PNG de
-referencia mediante ``cv2.matchTemplate`` (con máscara alfa cuando el PNG
-la trae). La muestra exige tres condiciones: correlación sobre el umbral,
-posición en la zona del contrato (con margen desde los bordes) y ancho
-relativo sobre ``min_width_ratio``. El template se reescala al tamaño
-esperado del render (``scale_ratio`` del ancho del frame): un logo más
-pequeño o más grande que el contratado no correlaciona y falla.
+referencia reescalado al tamaño esperado del render (con máscara alfa
+cuando el PNG la trae). La ubicación se busca con ``TM_SQDIFF``
+enmascarado (estable, sin NaN ni inf en parches planos) y la similitud se
+puntúa con la correlación cruzada normalizada calculada explícitamente en
+la caja esperada: al restar las medias locales, la mezcla del render
+(``opacidad * logo + (1 - opacidad) * fondo``) es una transformación afín
+de la intensidad y puntúa igual con cualquier opacidad, así que un logo
+semitransparente (opacidad mínima del contrato: 0.15) se detecta igual que
+uno opaco. (El mapa de ``TM_CCOEFF_NORMED`` enmascarado de OpenCV es
+numéricamente inestable —valores fuera de [-1, 1], ±inf— y su argmax
+global no es fiable; por eso la NCC se calcula a mano en una sola caja.)
+Los parches planos del fondo (varianza cero) no correlacionan: la muestra
+falla en vez de producir un falso positivo.
+
+Los templates uniformes (varianza ~0 bajo la máscara, p. ej. un logo
+blanco plano) dejan a CCOEFF sin varianza que correlacionar: esas muestras
+se verifican por contraste de borde en la posición esperada (media
+interior del logo frente al anillo de fondo que lo rodea), con un umbral
+que escala con la opacidad esperada del contrato. Sin watermark ambas
+medias son el mismo fondo y el contraste es ~0.
+
+La muestra exige tres condiciones: similitud sobre el umbral (correlación
+o contraste de borde según el template), posición en la zona del contrato
+(con margen desde los bordes) y ancho relativo sobre ``min_width_ratio``.
+El template se reescala al tamaño esperado del render (``scale_ratio`` del
+ancho del frame): un logo más pequeño o más grande que el contratado no
+correlaciona y falla.
 
 Fail-closed: sin PNG resoluble, sin video legible, sin duración medible,
 sin ffmpeg/cv2 o con cualquier muestra no evaluable, el resultado es
@@ -27,7 +48,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, assert_never, cast
+from typing import TYPE_CHECKING, Literal, assert_never, cast
 
 from kliptych.assets import AssetError
 from kliptych.contract import Watermark, WatermarkPosition
@@ -35,17 +56,22 @@ from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
 
 if TYPE_CHECKING:
     import cv2
+    import numpy as np
 
 _PRESENT_FRACTIONS: tuple[float, ...] = (0.10, 0.50, 0.90)
 _FULL_VIDEO_FRACTIONS: tuple[float, ...] = (0.10, 0.30, 0.50, 0.70, 0.90)
 _MATCH_THRESHOLD = 0.75
 _MARGIN = 20
 _FRAME_TIMEOUT_S = 30.0
-_MAX_PIXEL_SQDIFF = 255.0 * 255.0
 _GRAY_IMAGE_DIMS = 2
 _COLOR_IMAGE_DIMS = 3
 _RGB_CHANNELS = 3
 _RGBA_CHANNELS = 4
+_UNIFORM_TEMPLATE_STD = 2.0
+_EDGE_NOISE_FLOOR = 5.0
+_EDGE_OPACITY_GAIN = 12.0
+_EDGE_RING_PAD = 8
+_NCC_MIN_DENOMINATOR = 1e-6
 
 
 class WatermarkError(Exception):
@@ -85,9 +111,14 @@ class Sample:
     expected_x: float
     expected_y: float
     reason: str | None = None
+    metric: Literal["ccoeff", "edge"] = "ccoeff"
 
     def evidence(self) -> dict[str, object]:
         """Serializa la muestra para la evidencia del check.
+
+        ``correlation`` guarda la correlación CCOEFF (métrica
+        ``ccoeff``) o el contraste de borde en niveles de gris
+        (métrica ``edge``, para templates uniformes).
 
         Returns:
             El dict con tiempo, correlación, posición detectada y esperada.
@@ -95,6 +126,7 @@ class Sample:
         detail: dict[str, object] = {
             "t_s": round(self.t_s, 3),
             "matched": self.matched,
+            "metric": self.metric,
             "correlation": round(self.correlation, 4),
             "loc": [self.x, self.y],
             "expected_loc": [round(self.expected_x, 1), round(self.expected_y, 1)],
@@ -209,6 +241,7 @@ def _verdict(
         "rule": rule,
         "mode": "all" if full_video else "any",
         "threshold": _MATCH_THRESHOLD,
+        "opacity": config.opacity,
         "position": config.position.value,
         "scale_ratio": config.scale_ratio,
         "min_width_ratio": config.min_width_ratio,
@@ -331,6 +364,11 @@ def _match_sample(
 ) -> Sample:
     """Compara un frame decodificado contra el template y veredea la muestra.
 
+    La opacidad esperada viaja en ``ready.config`` (contrato): con
+    templates estructurados la NCC enmascarada ya es invariante a ella
+    (mezcla afín); con templates uniformes el contraste de borde se exige
+    contra un umbral que escala con esa opacidad.
+
     Args:
         frame: Frame en grises ya decodificado.
         frame_size: (ancho, alto) del frame, en píxeles.
@@ -351,19 +389,35 @@ def _match_sample(
     if expected_w <= 0 or expected_h <= 0 or expected_w > frame_w or expected_h > frame_h:
         msg = f"tamaño esperado degenerado {expected_w}x{expected_h} en t={t_s:.3f}s"
         raise WatermarkError(msg)
-    correlation, x, y = _best_match(frame, ready.template, expected_w, expected_h, t_s)
+    resized, mask = _resized_template(ready.template, expected_w, expected_h)
     expected_x, expected_y = expected_top_left(
         frame_w, frame_h, expected_w, expected_h, ready.config.position
     )
-    sample = Sample(
-        t_s=t_s,
-        matched=True,
-        correlation=correlation,
-        x=x,
-        y=y,
-        expected_x=expected_x,
-        expected_y=expected_y,
-    )
+    if _template_std(resized, mask) < _UNIFORM_TEMPLATE_STD:
+        contrast = _edge_contrast(frame, resized, mask, round(expected_x), round(expected_y))
+        sample = Sample(
+            t_s=t_s,
+            matched=True,
+            correlation=0.0 if contrast is None else contrast,
+            x=round(expected_x),
+            y=round(expected_y),
+            expected_x=expected_x,
+            expected_y=expected_y,
+            metric="edge",
+        )
+    else:
+        x, y = _locate(frame, resized, mask, t_s)
+        score = _masked_ncc(frame, resized, mask, round(expected_x), round(expected_y))
+        sample = Sample(
+            t_s=t_s,
+            matched=True,
+            correlation=0.0 if score is None else score,
+            x=x,
+            y=y,
+            expected_x=expected_x,
+            expected_y=expected_y,
+            metric="ccoeff",
+        )
     failure = _sample_failure(sample, frame_w, frame_h, expected_w, ready.config)
     if failure is None:
         return sample
@@ -376,44 +430,331 @@ def _match_sample(
         expected_x=sample.expected_x,
         expected_y=sample.expected_y,
         reason=failure,
+        metric=sample.metric,
     )
 
 
-def _best_match(
-    frame: cv2.typing.MatLike, template: _Template, width: int, height: int, t_s: float
-) -> tuple[float, int, int]:
-    """Busca el template en el frame con SQDIFF enmascarado (acotado [0, 1]).
+def _locate(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    t_s: float,
+) -> tuple[int, int]:
+    """Localiza el template en el frame con SQDIFF enmascarado.
 
-    SQDIFF crudo con máscara suma diferencias cuadráticas sobre los píxeles
-    visibles. Sin normalización por energía local no hay 0/0 ni cocientes
-    infinitos en regiones planas u oscuras (el fallo de CCORR_NORMED con
-    máscara); la similitud se normaliza con la constante N·255², acotada en
-    [0, 1] por construcción (1 es idéntico).
+    SQDIFF crudo suma diferencias cuadráticas sin normalizar por energía
+    local: no produce NaN ni inf en parches planos u oscuros y su argmin
+    es estable. Solo ubica la detección (criterio de zona); la puntuación
+    invariante a la opacidad la calcula ``_masked_ncc`` en la caja
+    esperada.
 
     Args:
         frame: Frame en grises ya decodificado.
-        template: PNG de referencia ya cargado.
-        width: Ancho esperado en el frame, en píxeles.
-        height: Alto esperado en el frame, en píxeles.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
         t_s: Segundo del video muestreado, para los errores.
 
     Returns:
-        La (similitud, x, y) del mejor ajuste.
+        La (x, y) del mejor ajuste.
 
     Raises:
         WatermarkError: Si cv2 no está disponible o la máscara quedó vacía.
     """
     import cv2
 
-    resized, mask = _resized_template(template, width, height)
     match = cv2.matchTemplate(frame, resized, cv2.TM_SQDIFF, mask=mask)
-    count = cv2.countNonZero(mask) if mask is not None else width * height
+    count = cv2.countNonZero(mask) if mask is not None else _pixel_count(resized)
     if count <= 0:
         msg = f"máscara vacía en t={t_s:.3f}s"
         raise WatermarkError(msg)
-    minimum, _, location, _ = cv2.minMaxLoc(match)
-    correlation = 1.0 - math.sqrt(min(1.0, minimum / (count * _MAX_PIXEL_SQDIFF)))
-    return float(correlation), int(location[0]), int(location[1])
+    _, _, location, _ = cv2.minMaxLoc(match)
+    return int(location[0]), int(location[1])
+
+
+def _masked_ncc(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    x: int,
+    y: int,
+) -> float | None:
+    """Correlación cruzada normalizada en la caja esperada, con máscara.
+
+    Se calcula explícitamente (medias y covarianza con ``meanStdDev`` y
+    el producto en float32) en vez de leer el mapa de
+    ``TM_CCOEFF_NORMED``: la variante enmascarada de OpenCV es
+    numéricamente inestable (valores fuera de [-1, 1], ±inf) y su argmax
+    global no es fiable. Al restar las medias locales, la mezcla afín del
+    render (``opacidad * logo + (1 - opacidad) * fondo``) puntúa igual con
+    cualquier opacidad.
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+        x: Columna esperada de la esquina superior izquierda.
+        y: Fila esperada de la esquina superior izquierda.
+
+    Returns:
+        La NCC en [-1, 1], o ``None`` si la caja quedó degenerada o sin
+        varianza medible (fail-closed aguas arriba).
+    """
+    frame_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", frame)
+    template_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", resized)
+    mask_array = (
+        None if mask is None else cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", mask)
+    )
+    frame_h, frame_w = frame_array.shape[0], frame_array.shape[1]
+    box = _clamp_box((frame_w, frame_h), (template_array.shape[1], template_array.shape[0]), x, y)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    patch = frame_array[y0:y1, x0:x1]
+    template_crop = template_array[y0 - y : y0 - y + (y1 - y0), x0 - x : x0 - x + (x1 - x0)]
+    mask_crop = (
+        None
+        if mask_array is None
+        else mask_array[y0 - y : y0 - y + (y1 - y0), x0 - x : x0 - x + (x1 - x0)]
+    )
+    return _crops_ncc(patch, template_crop, mask_crop)
+
+
+def _clamp_box(
+    frame_size: tuple[int, int], box_size: tuple[int, int], x: int, y: int
+) -> tuple[int, int, int, int] | None:
+    """Recorta la caja esperada al frame.
+
+    Args:
+        frame_size: (ancho, alto) del frame, en píxeles.
+        box_size: (ancho, alto) de la caja, en píxeles.
+        x: Columna esperada de la esquina superior izquierda.
+        y: Fila esperada de la esquina superior izquierda.
+
+    Returns:
+        La (x0, y0, x1, y1) recortada, o ``None`` si quedó degenerada.
+    """
+    frame_w, frame_h = frame_size
+    box_w, box_h = box_size
+    x0 = min(max(x, 0), frame_w - 1)
+    y0 = min(max(y, 0), frame_h - 1)
+    x1 = min(x0 + box_w, frame_w)
+    y1 = min(y0 + box_h, frame_h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _crops_ncc(
+    patch: cv2.typing.MatLike,
+    template: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+) -> float | None:
+    """NCC enmascarada entre dos recortes del mismo tamaño.
+
+    Args:
+        patch: Recorte del frame en grises.
+        template: Recorte del template en grises.
+        mask: Máscara alfa del recorte (o ``None`` sin canal alfa).
+
+    Returns:
+        La NCC en [-1, 1], o ``None`` sin varianza medible en el
+        denominador.
+    """
+    import cv2
+
+    template_mean, template_std = cv2.meanStdDev(template, mask=mask)
+    frame_mean, frame_std = cv2.meanStdDev(patch, mask=mask)
+    denominator = _scalar(template_std) * _scalar(frame_std)
+    if denominator < _NCC_MIN_DENOMINATOR:
+        return None
+    product = cv2.multiply(patch, template, dtype=cv2.CV_32F)
+    covariance = cv2.mean(product, mask=mask)[0] - _scalar(template_mean) * _scalar(frame_mean)
+    return max(-1.0, min(1.0, covariance / denominator))
+
+
+def _scalar(matrix: cv2.typing.MatLike) -> float:
+    """Extrae el escalar de una matriz 1x1 de OpenCV.
+
+    Indexar ``MatLike`` (unión de ``Mat`` y ``ndarray``) degrada a ``Any``
+    en los stubs: el cast a ndarray tipado deja el escalar con tipo
+    declarado para el chequeo estricto.
+
+    Args:
+        matrix: Matriz 1x1 (media o desviación de ``meanStdDev``).
+
+    Returns:
+        El escalar como float.
+    """
+    array = cast("np.ndarray[tuple[int, ...], np.dtype[np.float64]]", matrix)
+    return cast("float", array[0, 0])
+
+
+def _pixel_count(image: cv2.typing.MatLike) -> int:
+    """Cuenta los píxeles de una imagen en grises.
+
+    Args:
+        image: Imagen de un solo canal.
+
+    Returns:
+        El número de píxeles (ancho por alto).
+    """
+    shape = cast("tuple[int, ...]", image.shape)
+    return shape[1] * shape[0]
+
+
+def _template_std(resized: cv2.typing.MatLike, mask: cv2.typing.MatLike | None) -> float:
+    """Mide la desviación del template bajo la máscara, en niveles de gris.
+
+    Un template uniforme (p. ej. un logo blanco plano) deja a CCOEFF sin
+    varianza que correlacionar: por debajo de ``_UNIFORM_TEMPLATE_STD`` la
+    muestra se verifica por contraste de borde en vez de por correlación.
+
+    Args:
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+
+    Returns:
+        La desviación estándar de los píxeles visibles del template.
+    """
+    import cv2
+
+    _, stddev = cv2.meanStdDev(resized, mask=mask)
+    return _scalar(stddev)
+
+
+def _edge_contrast(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    x: int,
+    y: int,
+) -> float | None:
+    """Mide el contraste interior/exterior del logo en la posición esperada.
+
+    Compara la media interior del logo (bajo la máscara erosionada, o de
+    toda la caja sin canal alfa) con la media del anillo de fondo que lo
+    rodea: sin watermark ambas son el mismo fondo y el contraste es ~0
+    (ruido de compresión); con watermark difieren en ``opacidad * |logo -
+    fondo|``. El anillo se calcula por diferencia de sumas para no
+    construir máscaras del tamaño del frame.
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+        x: Columna esperada de la esquina superior izquierda.
+        y: Fila esperada de la esquina superior izquierda.
+
+    Returns:
+        El |interior - exterior| en niveles de gris, o ``None`` si la caja
+        quedó degenerada, la máscara vacía o el anillo vacío (fail-closed
+        aguas arriba).
+    """
+    frame_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", frame)
+    template_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", resized)
+    mask_array = (
+        None if mask is None else cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", mask)
+    )
+    frame_h, frame_w = frame_array.shape[0], frame_array.shape[1]
+    box = _clamp_box((frame_w, frame_h), (template_array.shape[1], template_array.shape[0]), x, y)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    crop = frame_array[y0:y1, x0:x1]
+    interior = _interior_mean(
+        crop,
+        None if mask_array is None else mask_array[0 : y1 - y0, 0 : x1 - x0],
+    )
+    if interior is None:
+        return None
+    exterior = _surrounding_mean(frame_array, x0, y0, x1, y1)
+    if exterior is None:
+        return None
+    return abs(interior - exterior)
+
+
+def _interior_mean(
+    crop: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+    mask: np.ndarray[tuple[int, ...], np.dtype[np.uint8]] | None,
+) -> float | None:
+    """Media del interior del logo en un recorte.
+
+    Bajo la máscara erosionada cuando hay canal alfa (el borde
+    semitransparente del reescalado no contamina la media); de todo el
+    recorte sin canal alfa.
+
+    Args:
+        crop: Recorte del frame en la caja esperada.
+        mask: Máscara alfa del recorte (o ``None`` sin canal alfa).
+
+    Returns:
+        La media interior, o ``None`` si la máscara quedó vacía.
+    """
+    import cv2
+
+    if mask is None:
+        return cv2.mean(crop)[0]
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    inner = cv2.erode(mask, kernel)
+    if cv2.countNonZero(inner) == 0:
+        inner = mask
+    if cv2.countNonZero(inner) == 0:
+        return None
+    return cv2.mean(crop, mask=inner)[0]
+
+
+def _surrounding_mean(
+    frame: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> float | None:
+    """Media del anillo de fondo alrededor de la caja (x0, y0, x1, y1).
+
+    Por diferencia de sumas —suma de la vecindad acolchada menos suma de
+    la caja, entre los píxeles del anillo— para no construir máscaras del
+    tamaño del frame.
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        x0: Columna izquierda de la caja, recortada al frame.
+        y0: Fila superior de la caja, recortada al frame.
+        x1: Columna derecha (excluida) de la caja, recortada al frame.
+        y1: Fila inferior (excluida) de la caja, recortada al frame.
+
+    Returns:
+        La media del anillo, o ``None`` si quedó vacío.
+    """
+    import cv2
+
+    pad = _EDGE_RING_PAD
+    frame_h, frame_w = frame.shape[0], frame.shape[1]
+    outer = frame[
+        max(y0 - pad, 0) : min(y1 + pad, frame_h),
+        max(x0 - pad, 0) : min(x1 + pad, frame_w),
+    ]
+    inner = frame[y0:y1, x0:x1]
+    ring_pixels = int(outer.size) - int(inner.size)
+    if ring_pixels <= 0:
+        return None
+    return (cv2.sumElems(outer)[0] - cv2.sumElems(inner)[0]) / ring_pixels
+
+
+def _edge_threshold(opacity: float) -> float:
+    """Contraste de borde mínimo exigido, según la opacidad esperada.
+
+    El borde visible escala con la opacidad (``opacidad * |logo -
+    fondo|``): a menor opacidad se exige menos, pero nunca por debajo del
+    suelo de ruido de compresión.
+
+    Args:
+        opacity: Opacidad del watermark según el contrato.
+
+    Returns:
+        El contraste mínimo en niveles de gris.
+    """
+    return max(_EDGE_NOISE_FLOOR, _EDGE_OPACITY_GAIN * opacity)
 
 
 def _sample_failure(
@@ -422,23 +763,52 @@ def _sample_failure(
     """Aplica los tres criterios de la muestra en orden de evidencia.
 
     Args:
-        sample: Muestra con correlación y posición detectada.
+        sample: Muestra con similitud y posición detectada.
         frame_w: Ancho del frame, en píxeles.
         frame_h: Alto del frame, en píxeles.
         expected_w: Ancho esperado del logo, en píxeles.
         config: Watermark exigido por el contrato.
 
     Returns:
-        El motivo del rechazo, o ``None`` si la muestra cumple correlación,
+        El motivo del rechazo, o ``None`` si la muestra cumple similitud,
         tamaño mínimo y zona.
     """
-    if sample.correlation < _MATCH_THRESHOLD:
-        return f"correlación {sample.correlation:.3f} bajo el umbral {_MATCH_THRESHOLD}"
+    similarity = _similarity_failure(sample, config)
+    if similarity is not None:
+        return similarity
     ratio = expected_w / frame_w
     if ratio < config.min_width_ratio:
         return f"ancho relativo {ratio:.3f} bajo el mínimo {config.min_width_ratio}"
     if not sample_within_zone(sample, frame_w, frame_h):
         return "el watermark no está en la zona exigida por el contrato"
+    return None
+
+
+def _similarity_failure(sample: Sample, config: Watermark) -> str | None:
+    """Aplica el criterio de similitud según la métrica de la muestra.
+
+    La correlación CCOEFF es invariante a la opacidad (mezcla afín) y se
+    exige contra el umbral fijo; el contraste de borde de templates
+    uniformes escala con la opacidad y se exige contra un umbral que
+    escala con la opacidad esperada del contrato.
+
+    Args:
+        sample: Muestra con similitud y métrica (``ccoeff`` o ``edge``).
+        config: Watermark exigido por el contrato.
+
+    Returns:
+        El motivo del rechazo por similitud, o ``None`` si la supera.
+    """
+    if sample.metric == "edge":
+        threshold = _edge_threshold(config.opacity)
+        if sample.correlation < threshold:
+            return (
+                f"contraste de borde {sample.correlation:.1f} bajo el umbral "
+                f"{threshold:.1f} (opacidad {config.opacity})"
+            )
+        return None
+    if sample.correlation < _MATCH_THRESHOLD:
+        return f"correlación {sample.correlation:.3f} bajo el umbral {_MATCH_THRESHOLD}"
     return None
 
 

@@ -95,14 +95,28 @@ def _watermark_png(path: Path) -> Path:
     return path
 
 
-def _registry_with_png(tmp_path: Path) -> AssetRegistry:
+def _white_watermark_png(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas: np.ndarray = np.zeros((80, 120, 4), dtype=np.uint8)
+    canvas[:, :, 0:3] = 255
+    canvas[:, :, 3] = 255
+    _ = cv2.imwrite(str(path), canvas)
+    return path
+
+
+def _registry_with_png(tmp_path: Path, *, white: bool = False) -> AssetRegistry:
     registry = AssetRegistry(tmp_path)
-    _ = _watermark_png(tmp_path / "assets" / "wm.png")
+    if white:
+        _ = _white_watermark_png(tmp_path / "assets" / "wm.png")
+    else:
+        _ = _watermark_png(tmp_path / "assets" / "wm.png")
     _ = registry.register(asset_id="wm-marca", kind="image", uri="assets/wm.png", origin="brief")
     return registry
 
 
-def _contract(*, full_video: bool, position: str = "center_bottom") -> Contract:
+def _contract(
+    *, full_video: bool, position: str = "center_bottom", opacity: float = 1.0
+) -> Contract:
     rule = "watermark.full_video" if full_video else "watermark.present"
     return make_contract(
         hard=["artifact.integrity", rule],
@@ -114,20 +128,28 @@ def _contract(*, full_video: bool, position: str = "center_bottom") -> Contract:
         watermark_required=True,
         watermark_visible_full_video=full_video,
         watermark_position=position,
+        watermark_opacity=opacity,
     )
 
 
 def _context(
-    tmp_path: Path, video: Path, *, full_video: bool, position: str = "center_bottom"
+    tmp_path: Path,
+    video: Path,
+    *,
+    full_video: bool,
+    position: str = "center_bottom",
+    opacity: float = 1.0,
+    duration_s: float = 2.0,
+    white_template: bool = False,
 ) -> GateContext:
-    contract = _contract(full_video=full_video, position=position)
+    contract = _contract(full_video=full_video, position=position, opacity=opacity)
     return GateContext(
         contract=contract,
         rules=contract.platforms[Platform.TIKTOK],
         piece=make_piece(video),
         artifact_sha256="a" * 64,
-        media=make_media(duration_s=2.0),
-        assets=_registry_with_png(tmp_path),
+        media=make_media(duration_s=duration_s),
+        assets=_registry_with_png(tmp_path, white=white_template),
     )
 
 
@@ -160,12 +182,18 @@ def _generate_clip(path: Path, *, duration: float = 2.0) -> Path:
 
 
 def _render(
-    tmp_path: Path, name: str, *, position: WatermarkPosition | None, duration: float = 2.0
+    tmp_path: Path,
+    name: str,
+    *,
+    position: WatermarkPosition | None,
+    duration: float = 2.0,
+    opacity: float = 1.0,
+    white_template: bool = False,
 ) -> Path:
     assert _FFMPEG is not None
     clip = _generate_clip(tmp_path / f"{name}-clip.mp4", duration=duration)
     destination = tmp_path / f"{name}.mp4"
-    watermark = _registry_with_png(tmp_path).path_for("wm-marca")
+    watermark = _registry_with_png(tmp_path, white=white_template).path_for("wm-marca")
     if position is None:
         _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
         return destination
@@ -174,10 +202,45 @@ def _render(
         asset_id="wm-marca",
         visible_full_video=True,
         position=position,
+        opacity=opacity,
     )
     _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
         clip=clip, destination=destination, watermark=watermark, watermark_config=config
     )
+    return destination
+
+
+def _generate_textured_clip(path: Path, *, lavfi: str, duration: float = 2.0) -> Path:
+    assert _FFMPEG is not None
+    argv = [
+        _FFMPEG,
+        "-y",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        lavfi,
+        "-t",
+        f"{duration}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(path),
+    ]
+    _ = subprocess.run(argv, capture_output=True, check=True, timeout=120)
+    return path
+
+
+def _render_plain_from_source(
+    tmp_path: Path, name: str, *, lavfi: str, duration: float = 2.0
+) -> Path:
+    assert _FFMPEG is not None
+    clip = _generate_textured_clip(tmp_path / f"{name}-clip.mp4", lavfi=lavfi, duration=duration)
+    destination = tmp_path / f"{name}.mp4"
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
     return destination
 
 
@@ -317,3 +380,124 @@ def test_unrequired_watermark_passes_without_png(tmp_path: Path) -> None:
     )
     assert check_watermark_present(context).status is CheckStatus.PASS
     assert check_watermark_full_video(context).status is CheckStatus.PASS
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+@pytest.mark.parametrize("opacity", [0.3, 0.5])
+def test_semitransparent_watermark_passes_present_and_full_video(
+    tmp_path: Path, opacity: float
+) -> None:
+    video = _render(
+        tmp_path,
+        f"translucent-{opacity}",
+        position=WatermarkPosition.CENTER_BOTTOM,
+        opacity=opacity,
+    )
+    assert (
+        check_watermark_present(_context(tmp_path, video, full_video=False, opacity=opacity)).status
+        is CheckStatus.PASS
+    )
+    assert (
+        check_watermark_full_video(
+            _context(tmp_path, video, full_video=True, opacity=opacity)
+        ).status
+        is CheckStatus.PASS
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+@pytest.mark.parametrize("opacity", [0.3, 0.5])
+def test_plain_background_fails_with_configured_opacity(tmp_path: Path, opacity: float) -> None:
+    video = _render(tmp_path, f"plain-{opacity}", position=None)
+    assert (
+        check_watermark_present(_context(tmp_path, video, full_video=False, opacity=opacity)).status
+        is CheckStatus.FAIL
+    )
+    assert (
+        check_watermark_full_video(
+            _context(tmp_path, video, full_video=True, opacity=opacity)
+        ).status
+        is CheckStatus.FAIL
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+@pytest.mark.parametrize("lavfi", ["testsrc2=s=320x240:r=30", "rgbtestsrc=size=320x240:rate=30"])
+@pytest.mark.parametrize("opacity", [0.3, 0.5])
+def test_textured_background_without_watermark_fails(
+    tmp_path: Path, lavfi: str, opacity: float
+) -> None:
+    name = "testsrc2" if lavfi.startswith("testsrc2") else "rgbtestsrc"
+    video = _render_plain_from_source(tmp_path, f"{name}-plain-{opacity}", lavfi=lavfi)
+    assert (
+        check_watermark_present(_context(tmp_path, video, full_video=False, opacity=opacity)).status
+        is CheckStatus.FAIL
+    )
+    assert (
+        check_watermark_full_video(
+            _context(tmp_path, video, full_video=True, opacity=opacity)
+        ).status
+        is CheckStatus.FAIL
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+@pytest.mark.parametrize("opacity", [0.3, 0.5])
+def test_white_template_on_white_background_fails(tmp_path: Path, opacity: float) -> None:
+    video = _render_plain_from_source(
+        tmp_path, f"white-plain-{opacity}", lavfi="color=c=white:s=540x960", duration=2.0
+    )
+    assert (
+        check_watermark_present(
+            _context(
+                tmp_path,
+                video,
+                full_video=False,
+                position="top_left",
+                opacity=opacity,
+                white_template=True,
+            )
+        ).status
+        is CheckStatus.FAIL
+    )
+    assert (
+        check_watermark_full_video(
+            _context(
+                tmp_path,
+                video,
+                full_video=True,
+                position="top_left",
+                opacity=opacity,
+                white_template=True,
+            )
+        ).status
+        is CheckStatus.FAIL
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_uniform_white_watermark_on_blue_passes(tmp_path: Path) -> None:
+    video = _render(
+        tmp_path,
+        "white-on-blue",
+        position=WatermarkPosition.CENTER_BOTTOM,
+        opacity=0.5,
+        white_template=True,
+    )
+    assert (
+        check_watermark_present(
+            _context(tmp_path, video, full_video=False, opacity=0.5, white_template=True)
+        ).status
+        is CheckStatus.PASS
+    )
+    assert (
+        check_watermark_full_video(
+            _context(tmp_path, video, full_video=True, opacity=0.5, white_template=True)
+        ).status
+        is CheckStatus.PASS
+    )

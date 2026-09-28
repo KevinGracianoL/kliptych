@@ -31,8 +31,9 @@ Catálogo de reglas que el contrato puede declarar:
   y con locks declarados el resultado es ``unsupported``.
 - ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
   todo el video o en alguna parte; se verifica con OpenCV frame por frame
-  (``cv2.matchTemplate`` contra el PNG del contrato, con zona y tamaño
-  mínimos) y cualquier fallo es ``fail`` (fail-closed).
+  (``cv2.matchTemplate`` contra el PNG del contrato, con zona, tamaño
+  mínimo y opacidad del contrato) y cualquier fallo es ``fail``
+  (fail-closed).
 
 Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 ``unsupported`` (o ``manual_review`` si el contrato las clasificó así).

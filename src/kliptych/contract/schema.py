@@ -122,9 +122,10 @@ class Watermark(ContractBase):
 
     ``position`` fija la zona del lienzo donde el ensamblado superpone el
     PNG y donde el gate lo busca; ``scale_ratio`` es el ancho del watermark
-    relativo al ancho del video; ``opacity`` atenúa el PNG al componer; y
-    ``min_width_ratio`` es el ancho mínimo relativo que el gate acepta en
-    la detección (nunca mayor que ``scale_ratio``).
+    relativo al ancho del video; ``opacity`` atenúa el PNG al componer (con
+    suelo en 0.15: por debajo el logo es inverificable y el contrato se
+    rechaza); y ``min_width_ratio`` es el ancho mínimo relativo que el gate
+    acepta en la detección (nunca mayor que ``scale_ratio``).
     """
 
     required: bool
@@ -132,7 +133,7 @@ class Watermark(ContractBase):
     visible_full_video: bool
     position: WatermarkPosition = WatermarkPosition.TOP_RIGHT
     scale_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
-    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    opacity: float = Field(default=1.0, ge=0.15, le=1.0)
     min_width_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @field_validator("asset_id")
