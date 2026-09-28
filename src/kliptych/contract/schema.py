@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self, cast
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
 from kliptych.contract.base import ContractBase
-from kliptych.contract.enums import AttributionType, AudioRule, Format, Mode, Platform
+from kliptych.contract.enums import AttributionType, AudioPolicy, AudioRule, Format, Mode, Platform
 from kliptych.hashing import sha256_canonical_json
 from kliptych.naming import is_safe_segment
 
@@ -232,6 +232,7 @@ class GlobalRestrictions(ContractBase):
     has_required_assets: bool = False
     spelling_locks: tuple[str, ...] = ()
     prohibitions: tuple[str, ...] = ()
+    audio_policy: AudioPolicy | None = None
 
 
 class Contract(ContractBase):
@@ -244,6 +245,13 @@ class Contract(ContractBase):
     platforms: dict[Platform, PlatformRules] = Field(min_length=1)
     languages: Languages
     official_audio: OfficialAudio | None = None
+    audio_policy: AudioPolicy | None = Field(
+        default=None,
+        description=(
+            "Política de audio de la campaña; 'internal_official_sound' activa "
+            "la regla 'audio.policy' (revisión manual obligatoria)"
+        ),
+    )
     watermark: Watermark
     spelling_locks: list[str] = Field(default_factory=list)
     prohibitions: list[str] = Field(default_factory=list)
@@ -280,6 +288,7 @@ class Contract(ContractBase):
             has_required_assets=bool(self.assets.required),
             spelling_locks=tuple(self.spelling_locks),
             prohibitions=tuple(self.prohibitions),
+            audio_policy=self.audio_policy,
         )
         aliases: dict[str, tuple[str, ...]] = {
             "audio.official_track": (
@@ -351,9 +360,10 @@ def contract_digest(contract: Contract) -> str:
 
     Excluye metadatos volátiles de resolución (``resolved_at`` de los assets):
     el mismo contrato resuelto dos veces produce el mismo digest. Los
-    opcionales añadidos tras v1.1 (``languages.language``) se excluyen cuando
-    no se declaran, para no mover el hash de contratos ya grabados; al
-    declararlos sí entran al digest e invalidan la caché de ``--resume``.
+    opcionales añadidos tras v1.1 (``languages.language``, ``audio_policy``)
+    se excluyen cuando no se declaran, para no mover el hash de contratos ya
+    grabados; al declararlos sí entran al digest e invalidan la caché de
+    ``--resume``.
 
     Args:
         contract: Contrato validado.
@@ -381,6 +391,8 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         languages = cast("dict[str, object]", dump["languages"])
         if "language" in languages:
             del languages["language"]
+    if contract.audio_policy is None:
+        _ = dump.pop("audio_policy", None)
 
 
 def _platform_restriction_rules(
@@ -435,6 +447,8 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
         active.append(watermark_rule)
     if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
+    if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
+        active.append("audio.policy")
     return active
 
 

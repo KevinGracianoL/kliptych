@@ -7,6 +7,9 @@ Catálogo de reglas que el contrato puede declarar:
 - ``assets.required``: los assets obligatorios están registrados, íntegros y
   coinciden con el hash y tamaño declarados en el contrato.
 - ``audio.present``: el artefacto tiene pista de audio.
+- ``audio.policy``: política de audio de la campaña; ``internal_official_sound``
+  exige aprobación humana (``manual_review``, jamás ``pass`` ni
+  ``unsupported``).
 - ``caption.first_line``: el caption abre con la primera línea exigida.
 - ``caption.forbidden``: no aparecen términos prohibidos en el caption
   (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
@@ -31,7 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import AudioRule, Contract, Format, PlatformRules
+from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, PlatformRules
 from kliptych.gate.models import CheckStatus, MediaInfo, Piece
 
 
@@ -127,6 +130,35 @@ def check_audio_present(context: GateContext) -> CheckOutcome:
     if context.media.has_audio:
         return _pass(has_audio=True)
     return _fail(has_audio=False)
+
+
+def check_audio_policy(context: GateContext) -> CheckOutcome:
+    """Verifica la política de audio declarada por la campaña.
+
+    El sonido oficial interno nunca pasa en silencio ni queda sin verificar:
+    exige aprobación humana explícita. Las demás políticas (o la ausencia de
+    política) no imponen revisión por sí mismas; el audio por plataforma lo
+    siguen gobernando ``audio.present`` y las reglas de ``audio_rule``.
+
+    Args:
+        context: Contexto resuelto del gate.
+
+    Returns:
+        MANUAL_REVIEW con ``internal_official_sound``; PASS en otro caso.
+    """
+    if context.contract.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
+        return CheckOutcome(
+            status=CheckStatus.MANUAL_REVIEW,
+            evidence={
+                "audio_policy": AudioPolicy.INTERNAL_OFFICIAL_SOUND.value,
+                "reason": (
+                    "el sonido oficial interno exige aprobación humana "
+                    "(--approve-manual-review --approved-by)"
+                ),
+            },
+        )
+    policy = context.contract.audio_policy
+    return _pass(audio_policy=None if policy is None else policy.value)
 
 
 def check_video_stream(context: GateContext) -> CheckOutcome:
@@ -325,6 +357,7 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "artifact.video_stream": check_video_stream,
     "assets.required": check_required_assets,
     "audio.present": check_audio_present,
+    "audio.policy": check_audio_policy,
     "caption.first_line": check_first_line,
     "caption.forbidden": check_forbidden_terms,
     "caption.required_hashtag": check_required_hashtags,

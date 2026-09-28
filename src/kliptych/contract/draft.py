@@ -9,7 +9,14 @@ from typing import Literal
 from pydantic import Field
 
 from kliptych.contract.base import ContractBase
-from kliptych.contract.enums import AttributionType, AudioRule, Format, Mode, Platform
+from kliptych.contract.enums import (
+    AttributionType,
+    AudioPolicy,
+    AudioRule,
+    Format,
+    Mode,
+    Platform,
+)
 from kliptych.contract.evidence import FieldCandidate
 
 
@@ -133,6 +140,7 @@ class ContractDraft(ContractBase):
     platforms: dict[Platform, PlatformDraft] = Field(default_factory=dict)
     languages: LanguagesDraft | None = None
     official_audio: OfficialAudioDraft | None = None
+    audio_policy: FieldCandidate[AudioPolicy] | None = None
     watermark: WatermarkDraft | None = None
     spelling_locks: FieldCandidate[list[str]] | None = None
     prohibitions: FieldCandidate[list[str]] | None = None

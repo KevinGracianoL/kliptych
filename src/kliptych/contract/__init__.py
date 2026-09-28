@@ -19,6 +19,7 @@ from kliptych.contract.draft import (
 )
 from kliptych.contract.enums import (
     AttributionType,
+    AudioPolicy,
     AudioRule,
     Format,
     Mode,
@@ -59,6 +60,7 @@ __all__ = [
     "Attribution",
     "AttributionDraft",
     "AttributionType",
+    "AudioPolicy",
     "AudioRule",
     "CaptionRules",
     "CaptionRulesDraft",
