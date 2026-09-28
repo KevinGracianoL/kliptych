@@ -18,6 +18,10 @@ Catálogo de reglas que el contrato puede declarar:
   ffmpeg solo mide la pista por defecto, así que un MP4 con 0 o más de 1
   pista se rechaza sin medir; con exactamente 1 pista se mide con
   ``-map 0:a:0``.
+- ``brand.safety``: riesgo de controversia/toxicidad solo si la campaña lo
+  exige explícitamente (menciones en ``prohibitions``); con la regla
+  activa un evaluador LLM decide (riesgo → ``manual_review``) y cualquier
+  fallo del evaluador es ``manual_review`` (fail-closed, jamás ``pass``).
 - ``caption.first_line``: el caption abre con la primera línea exigida.
 - ``caption.forbidden``: no aparecen términos prohibidos en lo publicado
   por la cuenta (caption y hashtags, unión de ``caption_rules.forbidden``
@@ -53,6 +57,7 @@ from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError
 from kliptych.contract import AudioPolicy, AudioRule, Format
+from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 
@@ -65,6 +70,7 @@ __all__ = [
     "check_audio_policy",
     "check_audio_present",
     "check_audio_silence",
+    "check_brand_safety",
     "check_duration_max",
     "check_duration_min",
     "check_first_line",
@@ -603,6 +609,7 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "audio.present": check_audio_present,
     "audio.policy": check_audio_policy,
     "audio.silence": check_audio_silence,
+    "brand.safety": check_brand_safety,
     "caption.first_line": check_first_line,
     "caption.forbidden": check_forbidden_terms,
     "caption.required_hashtag": check_required_hashtags,

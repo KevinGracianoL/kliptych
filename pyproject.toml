@@ -166,13 +166,15 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"src/kliptych/gate/brand_safety.py" = [
+    # Frontera fail-closed: cualquier fallo del evaluador LLM (excepción,
+    # timeout, respuesta inválida) se traduce a manual_review, nunca a pass;
+    # por eso se captura Exception y se devuelve un error preciso.
+    "blind-except",
+]
 "src/kliptych/gate/watermark.py" = [
-    # ffmpeg se invoca con lista de argumentos y shell=False para extraer los
-    # frames muestreados; el binario se resuelve del PATH, nunca de texto del
-    # LLM. cv2 es dependencia declarada del proyecto pero se importa de forma
+    # cv2 es dependencia declarada del proyecto pero se importa de forma
     # diferida para que el gate no la cargue sin reglas de watermark activas.
-    "subprocess-without-shell-equals-true",
-    "suspicious-subprocess-import",
     "import-outside-top-level",
 ]
 "src/kliptych/gate/models.py" = [
