@@ -2,8 +2,8 @@
 
 - ``watermark.present``: el logo aparece al menos en una muestra del video.
 - ``watermark.full_video``: el logo aparece en todas las muestras,
-  distribuidas por la duración (10/30/50/70/90%): si desaparece a mitad o al
-  final del clip, el resultado es ``fail``.
+  distribuidas con densidad temporal por la duración: si desaparece a
+  mitad o al final del clip, el resultado es ``fail``.
 
 Cada muestra extrae un frame con ffmpeg (lista de argumentos, sin shell;
 ``-ss`` después de ``-i`` para seek exacto) y lo compara con el PNG de
@@ -55,11 +55,15 @@ from kliptych.contract import Watermark, WatermarkPosition
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import cv2
     import numpy as np
 
 _PRESENT_FRACTIONS: tuple[float, ...] = (0.10, 0.50, 0.90)
-_FULL_VIDEO_FRACTIONS: tuple[float, ...] = (0.10, 0.30, 0.50, 0.70, 0.90)
+_FULL_VIDEO_MIN_SAMPLES = 12
+_FULL_VIDEO_MAX_SAMPLES = 120
+_FULL_VIDEO_SAMPLES_PER_SECOND = 4
 _MATCH_THRESHOLD = 0.75
 _MARGIN = 20
 _FRAME_TIMEOUT_S = 30.0
@@ -181,9 +185,12 @@ def _check_watermark(context: GateContext, *, full_video: bool) -> CheckOutcome:
     ready = _prepare_evaluation(context, rule)
     if isinstance(ready, CheckOutcome):
         return ready
-    fractions = _FULL_VIDEO_FRACTIONS if full_video else _PRESENT_FRACTIONS
+    if full_video:
+        timestamps = _full_video_timestamps(ready.duration)
+    else:
+        timestamps = [fraction * ready.duration for fraction in _PRESENT_FRACTIONS]
     try:
-        samples = _evaluate_samples(ready, fractions)
+        samples = _evaluate_samples(ready, timestamps)
     except WatermarkError as error:
         return _fail(rule=rule, reason=str(error))
     return _verdict(rule, ready.config, samples, full_video=full_video)
@@ -313,21 +320,45 @@ def _load_template(context: GateContext) -> _Template:
     raise WatermarkError(msg)
 
 
-def _evaluate_samples(ready: _Ready, fractions: tuple[float, ...]) -> list[Sample]:
-    """Evalúa las muestras temporales distribuidas por la duración.
+def _full_video_timestamps(duration: float) -> list[float]:
+    """Segundos a muestrear para ``watermark.full_video``, con densidad temporal.
+
+    Cinco fracciones fijas (10/30/50/70/90%) dejan huecos ciegos: un bache
+    de 0.3 s entre dos fracciones pasaba inadvertido. En su lugar se
+    muestrean ``_FULL_VIDEO_SAMPLES_PER_SECOND`` instantes por segundo
+    (paso <= 0.25 s), centrados en celdas uniformes de principio a fin del
+    video, con un mínimo de muestras para clips cortos y un tope para
+    clips largos. Todo bache de al menos un paso de muestreo contiene una
+    muestra y falla.
+
+    Args:
+        duration: Duración medida del artefacto, en segundos.
+
+    Returns:
+        Los segundos a muestrear, en orden temporal.
+    """
+    count = min(
+        _FULL_VIDEO_MAX_SAMPLES,
+        max(_FULL_VIDEO_MIN_SAMPLES, math.ceil(duration * _FULL_VIDEO_SAMPLES_PER_SECOND)),
+    )
+    return [duration * (index + 0.5) / count for index in range(count)]
+
+
+def _evaluate_samples(ready: _Ready, timestamps: Sequence[float]) -> list[Sample]:
+    """Evalúa las muestras temporales del video.
 
     Args:
         ready: Entradas verificadas de la evaluación.
-        fractions: Fracciones de la duración a muestrear.
+        timestamps: Segundos del video a muestrear, en orden temporal.
 
     Returns:
-        Una muestra por fracción, en orden temporal.
+        Una muestra por instante, en orden temporal.
     """
     with tempfile.TemporaryDirectory(prefix="kliptych-wm-") as tmpdir:
         tmp = Path(tmpdir)
         return [
-            _evaluate_frame(ready, tmp / f"frame-{index:02d}.png", fraction * ready.duration)
-            for index, fraction in enumerate(fractions)
+            _evaluate_frame(ready, tmp / f"frame-{index:02d}.png", t_s)
+            for index, t_s in enumerate(timestamps)
         ]
 
 

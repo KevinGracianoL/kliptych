@@ -1,14 +1,17 @@
 """Sprint 2 (Objetivo 4): validador OpenCV del watermark en el gate.
 
 `watermark.present` exige el logo en alguna muestra; `watermark.full_video`
-lo exige en todas las muestras de la duración (10/30/50/70/90%). Cada muestra
-verifica correlación (`cv2.matchTemplate`), zona (`WatermarkPosition` con
-margen) y tamaño mínimo (`min_width_ratio`). Fail-closed: sin PNG, sin video
-o con cualquier fallo, el resultado es FAIL.
+lo exige en todas las muestras con densidad temporal (<= 0.25 s por
+muestra). Cada muestra verifica similitud invariante a la opacidad
+(`cv2.matchTemplate` para ubicar + NCC enmascarada o contraste de borde
+para puntuar), zona (`WatermarkPosition` con margen) y tamaño mínimo
+(`min_width_ratio`). Fail-closed: sin PNG, sin video o con cualquier
+fallo, el resultado es FAIL.
 """
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -245,9 +248,13 @@ def _render_plain_from_source(
 
 
 def _concat(first: Path, second: Path, destination: Path) -> Path:
+    return _concat_all((first, second), destination)
+
+
+def _concat_all(parts: Sequence[Path], destination: Path) -> Path:
     assert _FFMPEG is not None
     listing = destination.with_suffix(".txt")
-    _ = listing.write_text(f"file '{first.as_posix()}'\nfile '{second.as_posix()}'\n")
+    _ = listing.write_text("".join(f"file '{part.as_posix()}'\n" for part in parts))
     argv = [
         _FFMPEG,
         "-y",
@@ -362,6 +369,25 @@ def test_partial_watermark_fails_full_video_but_passes_present(tmp_path: Path) -
     )
     assert (
         check_watermark_present(_context(tmp_path, video, full_video=False)).status
+        is CheckStatus.PASS
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_narrow_gap_fails_full_video_but_passes_present(tmp_path: Path) -> None:
+    head = _render(tmp_path, "gap-head", position=WatermarkPosition.CENTER_BOTTOM, duration=1.05)
+    mid = _render(tmp_path, "gap-mid", position=None, duration=0.30)
+    tail = _render(tmp_path, "gap-tail", position=WatermarkPosition.CENTER_BOTTOM, duration=1.65)
+    video = _concat_all((head, mid, tail), tmp_path / "gap.mp4")
+    assert (
+        check_watermark_full_video(
+            _context(tmp_path, video, full_video=True, duration_s=3.0)
+        ).status
+        is CheckStatus.FAIL
+    )
+    assert (
+        check_watermark_present(_context(tmp_path, video, full_video=False, duration_s=3.0)).status
         is CheckStatus.PASS
     )
 
