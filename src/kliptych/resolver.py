@@ -379,6 +379,7 @@ def _collect_top_level_conflicts(
     for field, draft_candidate in (
         ("spelling_locks", draft.spelling_locks),
         ("prohibitions", draft.prohibitions),
+        ("audio_policy", draft.audio_policy),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
@@ -830,6 +831,12 @@ def _resolve_rules(
                     detail="regla obligatoria reclasificada como hard (fail-closed)",
                 )
             )
+    _force_policy_review_when_official_without_policy(
+        context,
+        classified=classified,
+        manual_review=manual_review,
+        issues=issues,
+    )
     _apply_platform_restrictions(
         context,
         classified=classified,
@@ -854,6 +861,47 @@ _MANUAL_REVIEW_DEFAULTS: frozenset[str] = frozenset(
         "link_rules.link_in_bio",
     }
 )
+
+
+def _force_policy_review_when_official_without_policy(
+    context: _RuleContext,
+    *,
+    classified: set[str],
+    manual_review: list[str],
+    issues: list[ResolutionIssue],
+) -> None:
+    """Clasifica ``audio.policy`` como manual_review si falta la política (fail-closed).
+
+    Cuando alguna plataforma exige sonido oficial (``official_required``) pero
+    el draft no resolvió ``audio_policy``, el contrato no puede pasar en
+    silencio sin política ni mute: la regla ``audio.policy`` exige revisión
+    humana en el gate.
+
+    Args:
+        context: Plataformas y restricciones globales ya resueltas.
+        classified: Reglas ya clasificadas; se amplía en sitio.
+        manual_review: Reglas de revisión manual; se amplía en sitio.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+    """
+    needs_official = any(
+        rules.audio_rule is AudioRule.OFFICIAL_REQUIRED for rules in context.platforms.values()
+    )
+    if not needs_official or context.global_restrictions.audio_policy is not None:
+        return
+    if "audio.policy" in classified:
+        return
+    classified.add("audio.policy")
+    manual_review.append("audio.policy")
+    issues.append(
+        ResolutionIssue(
+            code=IssueCode.RULE_DEFAULTED,
+            field="rules.audio.policy",
+            detail=(
+                "audio_rule 'official_required' sin audio_policy resuelta; "
+                "se clasifica como manual_review (fail-closed)"
+            ),
+        )
+    )
 
 
 def _apply_platform_restrictions(

@@ -466,6 +466,34 @@ def compute_slideshow_fingerprint(
     return sha256_canonical_json(payload)
 
 
+def _validate_audio_combination(config: PipelineConfig) -> None:
+    """Rechaza la inyección externa de audio con política de silencio (fail-closed).
+
+    ``internal_official_sound`` exige silenciar el render final (el sonido
+    oficial se añade al publicar): inyectar una pista externa (``audio_locked``
+    o ``audio_track_path``/``audio_track_url``) y luego silenciarla es
+    contradictorio y nunca se degrada en silencio.
+
+    Args:
+        config: Configuración con el contrato y la pista externa.
+
+    Raises:
+        PipelineError: Si el contrato silencia el audio y se pidió inyección
+            externa.
+    """
+    if contract_mutes_audio(config.contract) and (
+        config.audio_locked
+        or config.audio_track_path is not None
+        or config.audio_track_url is not None
+    ):
+        msg = (
+            "audio_policy 'internal_official_sound' exige silenciar el render final; "
+            "es incompatible con la inyección de audio externo "
+            "(audio_locked o audio_track_path/audio_track_url)"
+        )
+        raise PipelineError(msg)
+
+
 def run_long_video(
     url: str,
     *,
@@ -498,6 +526,7 @@ def run_long_video(
     Raises:
         PipelineError: Si una etapa falla o no se puede construir el reframe.
     """
+    _validate_audio_combination(config)
     try:
         config.output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -674,6 +703,7 @@ def run_slideshow(
         PipelineError: Si la duración no es positiva, falta ``audio_locked``,
             no hay imágenes, una imagen no existe o una etapa falla.
     """
+    _validate_audio_combination(config)
     _validate_slideshow(images, config=config, slide_duration_s=slide_duration_s)
     try:
         config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -2294,9 +2324,11 @@ def _inject_audio(
         La ruta del vídeo con la pista externa inyectada.
 
     Raises:
-        PipelineError: Si la pista no existe, no se configuró ninguna o ffmpeg
+        PipelineError: Si la pista no existe, no se configuró ninguna, la
+            combinación con la política de audio es contradictoria o ffmpeg
             falla.
     """
+    _validate_audio_combination(config)
     track = _resolve_audio_track(
         config, downloader=downloader, registry=registry, resume=resume, state=state
     )

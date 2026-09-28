@@ -1,9 +1,12 @@
 """Fixtures compartidas de los tests del gate."""
 
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from kliptych.contract import AssetRef, AudioPolicy, Contract, ContractDraft, Platform
 from kliptych.gate import MediaInfo, Piece, ProbeError
@@ -125,6 +128,9 @@ def make_contract(
     if audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND and "audio.policy" not in classified:
         manual.append("audio.policy")
         classified.add("audio.policy")
+    if audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND and "audio.silence" not in classified:
+        plan.append("audio.silence")
+        classified.add("audio.silence")
     for rule_id in _active_rule_ids(
         min_s=min_s,
         max_s=max_s,
@@ -320,3 +326,29 @@ def write_fixture_clip(root: Path, *, content: bytes = b"clip") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     _ = path.write_bytes(content)
     return path
+
+
+SILENT_VOLUMEDETECT_STDERR = (
+    "[Parsed_volumedetect_0 @ 0x7fab] n: 48000 | mean_volume: -91.0 dB | max_volume: -91.0 dB"
+)
+
+
+def mock_silent_volumedetect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simula un render correctamente silenciado para el gate, sin ffmpeg real.
+
+    Los tests unitarios del gate usan artefactos falsos (bytes, no MP4): sin
+    este mock, ``audio.silence`` fallaría en cerrado sobre ellos. La medición
+    real con ffmpeg vive en ``tests/test_audio_silence.py``.
+
+    Args:
+        monkeypatch: Fixture de pytest para parchear ``subprocess.run``.
+    """
+
+    def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        assert isinstance(argv, list)
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=SILENT_VOLUMEDETECT_STDERR
+        )
+
+    monkeypatch.setattr("kliptych.gate.checks.subprocess.run", fake_run)

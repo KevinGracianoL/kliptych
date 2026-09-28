@@ -42,7 +42,11 @@ _EXTRACT_SYSTEM_PROMPT = (
     '"location": str}, "confidence": "explicit" | "inferred" | "missing" | '
     '"conflict"}. Reglas: si un campo no tiene cita textual, usa "missing" '
     'sin value ni evidence; si el brief se contradice, usa "conflict" con '
-    "la cita; nunca inventes valores ni campos fuera del esquema."
+    "la cita; nunca inventes valores ni campos fuera del esquema. Extrae "
+    '"audio_policy" con su evidencia ("internal_official_sound" si el brief '
+    'exige usar el sonido oficial de la plataforma, "original_audio" si '
+    'exige conservar el audio original, "any_audio" si declara audio libre); '
+    'sin cita textual usa "missing".'
 )
 
 _CAPTION_SYSTEM_PROMPT = (

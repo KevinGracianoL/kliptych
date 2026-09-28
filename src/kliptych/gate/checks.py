@@ -10,6 +10,11 @@ Catálogo de reglas que el contrato puede declarar:
 - ``audio.policy``: política de audio de la campaña; ``internal_official_sound``
   exige aprobación humana (``manual_review``, jamás ``pass`` ni
   ``unsupported``).
+- ``audio.silence``: silencio digital real del artefacto con ``volumedetect``;
+  solo aplica con ``internal_official_sound``. El gate no confía en que se
+  pasara ``-af volume=0`` a ffmpeg: mide el ``max_volume`` del MP4 final
+  (``<= -80.0`` dB pasa) y cualquier fallo de medición es ``fail``
+  (fail-closed).
 - ``caption.first_line``: el caption abre con la primera línea exigida.
 - ``caption.forbidden``: no aparecen términos prohibidos en el caption
   (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
@@ -30,12 +35,20 @@ Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 """
 
 import re
+import shutil
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
 from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, PlatformRules
 from kliptych.gate.models import CheckStatus, MediaInfo, Piece
+
+_SILENCE_THRESHOLD_DB = -80.0
+_VOLUMEDETECT_TIMEOUT_S = 60.0
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
+_STDERR_TAIL = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +172,114 @@ def check_audio_policy(context: GateContext) -> CheckOutcome:
         )
     policy = context.contract.audio_policy
     return _pass(audio_policy=None if policy is None else policy.value)
+
+
+def check_audio_silence(context: GateContext) -> CheckOutcome:
+    """Verifica silencio digital real en el artefacto con ``volumedetect``.
+
+    Solo aplica con ``audio_policy=internal_official_sound``: el gate no
+    confía en que el render pasara ``-af volume=0`` a ffmpeg, mide el
+    ``max_volume`` real del MP4 final con ``ffmpeg -af volumedetect -f null -``
+    (lista de argumentos, sin shell). Fail-closed: sin ffmpeg, sin archivo o
+    sin medición, el resultado es ``fail``.
+
+    Args:
+        context: Contexto resuelto del gate.
+
+    Returns:
+        PASS si la política no exige silencio o el ``max_volume`` medido no
+        supera los -80.0 dB; FAIL si hay audio audible o no se pudo medir.
+    """
+    policy = context.contract.audio_policy
+    if policy is not AudioPolicy.INTERNAL_OFFICIAL_SOUND:
+        return _pass(audio_policy=None if policy is None else policy.value)
+    artifact = context.piece.artifact_path
+    if not artifact.is_file():
+        return _fail(reason="el artefacto no existe; no se pudo verificar el silencio")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return _fail(reason="ffmpeg no está disponible; no se pudo verificar el silencio")
+    return _measure_silence(ffmpeg, artifact)
+
+
+def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
+    """Mide el ``max_volume`` del artefacto con ``volumedetect`` (fail-closed).
+
+    Args:
+        ffmpeg: Binario ffmpeg resuelto en el PATH.
+        artifact: Ruta del MP4 final a medir.
+
+    Returns:
+        PASS si el ``max_volume`` no supera los -80.0 dB; FAIL si hay audio
+        audible, ffmpeg falla o no se pudo medir.
+    """
+    # `volumedetect` reporta en nivel info: `-v info` es obligatorio para que
+    # el `max_volume` aparezca en stderr (`-v error` lo silenciaría).
+    argv = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "info",
+        "-i",
+        str(artifact),
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_VOLUMEDETECT_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        return _fail(reason=f"ffmpeg no está disponible: {error}")
+    except subprocess.TimeoutExpired:
+        return _fail(reason=f"volumedetect excedió el timeout de {_VOLUMEDETECT_TIMEOUT_S} s")
+    except OSError as error:
+        return _fail(reason=f"no se pudo ejecutar ffmpeg: {error}")
+    return _parse_volumedetect(completed)
+
+
+def _parse_volumedetect(completed: subprocess.CompletedProcess[str]) -> CheckOutcome:
+    """Interpreta la salida de ``volumedetect`` contra el umbral de silencio.
+
+    Args:
+        completed: Proceso ffmpeg ya terminado.
+
+    Returns:
+        PASS si el ``max_volume`` reportado no supera los -80.0 dB; FAIL en
+        cualquier otro caso (fallo de ffmpeg, salida sin medición o audio
+        audible).
+    """
+    if completed.returncode != 0:
+        return _fail(
+            reason=f"volumedetect falló con código {completed.returncode}",
+            stderr=completed.stderr.strip()[-_STDERR_TAIL:],
+        )
+    match = _MAX_VOLUME_RE.search(completed.stderr)
+    if match is None:
+        return _fail(
+            reason="volumedetect no reportó max_volume",
+            stderr=completed.stderr.strip()[-_STDERR_TAIL:],
+        )
+    raw = match.group(1)
+    try:
+        max_volume = float(raw)
+    except ValueError:
+        return _fail(reason=f"max_volume no medible: {raw!r}")
+    if max_volume <= _SILENCE_THRESHOLD_DB:
+        return _pass(max_volume_db=raw, threshold_db=_SILENCE_THRESHOLD_DB)
+    return _fail(
+        max_volume_db=raw,
+        threshold_db=_SILENCE_THRESHOLD_DB,
+        reason="el artefacto no está en silencio digital",
+    )
 
 
 def check_video_stream(context: GateContext) -> CheckOutcome:
@@ -358,6 +479,7 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "assets.required": check_required_assets,
     "audio.present": check_audio_present,
     "audio.policy": check_audio_policy,
+    "audio.silence": check_audio_silence,
     "caption.first_line": check_first_line,
     "caption.forbidden": check_forbidden_terms,
     "caption.required_hashtag": check_required_hashtags,

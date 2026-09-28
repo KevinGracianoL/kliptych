@@ -30,7 +30,22 @@ from tests.support import (
     make_contract,
     make_draft,
     make_media,
+    mock_silent_volumedetect,
 )
+
+
+@pytest.fixture
+def _silent_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simula un render correctamente silenciado: cero ffmpeg real en este módulo.
+
+    Estos tests afirman resultados del gate sobre contratos silenciados con
+    artefactos falsos; la medición real con ffmpeg vive en
+    ``tests/test_audio_silence.py``.
+    """
+    mock_silent_volumedetect(monkeypatch)
+
+
+pytestmark = pytest.mark.usefixtures("_silent_render")
 
 
 def _artifact(tmp_path: Path) -> Path:
