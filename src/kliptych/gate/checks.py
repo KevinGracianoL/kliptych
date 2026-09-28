@@ -14,7 +14,10 @@ Catálogo de reglas que el contrato puede declarar:
   solo aplica con ``internal_official_sound``. El gate no confía en que se
   pasara ``-af volume=0`` a ffmpeg: mide el ``max_volume`` del MP4 final
   (``<= -80.0`` dB pasa) y cualquier fallo de medición es ``fail``
-  (fail-closed).
+  (fail-closed). Antes de medir, cuenta las pistas de audio con ffprobe:
+  ffmpeg solo mide la pista por defecto, así que un MP4 con 0 o más de 1
+  pista se rechaza sin medir; con exactamente 1 pista se mide con
+  ``-map 0:a:0``.
 - ``caption.first_line``: el caption abre con la primera línea exigida.
 - ``caption.forbidden``: no aparecen términos prohibidos en el caption
   (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
@@ -47,6 +50,7 @@ from kliptych.gate.models import CheckStatus, MediaInfo, Piece
 
 _SILENCE_THRESHOLD_DB = -80.0
 _VOLUMEDETECT_TIMEOUT_S = 60.0
+_FFPROBE_TIMEOUT_S = 30.0
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
 _STDERR_TAIL = 500
 
@@ -183,12 +187,18 @@ def check_audio_silence(context: GateContext) -> CheckOutcome:
     (lista de argumentos, sin shell). Fail-closed: sin ffmpeg, sin archivo o
     sin medición, el resultado es ``fail``.
 
+    Antes de medir cuenta las pistas de audio con ffprobe: ``volumedetect``
+    solo mide la pista por defecto, así que una pista extra audible pasaría
+    inadvertida. Con 0 o más de 1 pista el resultado es ``fail`` sin medir;
+    con exactamente 1 pista se mide con ``-map 0:a:0``.
+
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
         PASS si la política no exige silencio o el ``max_volume`` medido no
-        supera los -80.0 dB; FAIL si hay audio audible o no se pudo medir.
+        supera los -80.0 dB; FAIL si hay audio audible, el conteo de pistas
+        no es exactamente 1 o no se pudo medir.
     """
     policy = context.contract.audio_policy
     if policy is not AudioPolicy.INTERNAL_OFFICIAL_SOUND:
@@ -199,7 +209,78 @@ def check_audio_silence(context: GateContext) -> CheckOutcome:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         return _fail(reason="ffmpeg no está disponible; no se pudo verificar el silencio")
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return _fail(reason="ffprobe no está disponible; no se pudo contar las pistas de audio")
+    single_track = _require_single_audio_track(ffprobe, artifact)
+    if single_track is not None:
+        return single_track
     return _measure_silence(ffmpeg, artifact)
+
+
+def _require_single_audio_track(ffprobe: str, artifact: Path) -> CheckOutcome | None:
+    """Exige exactamente 1 pista de audio antes de medir el silencio (fail-closed).
+
+    Args:
+        ffprobe: Binario ffprobe resuelto en el PATH.
+        artifact: Ruta del MP4 final a inspeccionar.
+
+    Returns:
+        None si el artefacto tiene exactamente 1 pista de audio; el FAIL
+        correspondiente si no se pudo contar o el conteo difiere de 1.
+    """
+    tracks = _count_audio_tracks(ffprobe, artifact)
+    if tracks is None:
+        return _fail(reason="no se pudo contar las pistas de audio del artefacto")
+    if tracks != 1:
+        return _fail(
+            audio_tracks=tracks,
+            reason=(
+                f"el artefacto tiene {tracks} pistas de audio; se exige exactamente 1 "
+                "para que la medición de silencio sea fiable"
+            ),
+        )
+    return None
+
+
+def _count_audio_tracks(ffprobe: str, artifact: Path) -> int | None:
+    """Cuenta las pistas de audio del artefacto con ffprobe (fail-closed).
+
+    Args:
+        ffprobe: Binario ffprobe resuelto en el PATH.
+        artifact: Ruta del MP4 final a inspeccionar.
+
+    Returns:
+        El número de pistas de audio, o ``None`` si no se pudo contar.
+    """
+    # ffprobe no acepta `-nostdin` (falla con "Option not found"): solo
+    # `-hide_banner` y `-v error` lo silencian sin romper la inspección.
+    argv = [
+        ffprobe,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(artifact),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_FFPROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return sum(1 for line in completed.stdout.splitlines() if line.strip())
 
 
 def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
@@ -215,6 +296,8 @@ def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
     """
     # `volumedetect` reporta en nivel info: `-v info` es obligatorio para que
     # el `max_volume` aparezca en stderr (`-v error` lo silenciaría).
+    # `-map 0:a:0` fija la única pista de audio (el conteo previo ya exigió
+    # exactamente 1): sin el mapa, ffmpeg elegiría la pista por defecto.
     argv = [
         ffmpeg,
         "-hide_banner",
@@ -223,6 +306,8 @@ def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
         "info",
         "-i",
         str(artifact),
+        "-map",
+        "0:a:0",
         "-af",
         "volumedetect",
         "-f",

@@ -347,6 +347,8 @@ def mock_silent_volumedetect(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         assert isinstance(argv, list)
+        if "-select_streams" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="0\n", stderr="")
         return subprocess.CompletedProcess(
             args=argv, returncode=0, stdout="", stderr=SILENT_VOLUMEDETECT_STDERR
         )
