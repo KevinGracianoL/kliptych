@@ -7,7 +7,7 @@ y debe fallar con error explícito, nunca degradarse en silencio.
 """
 
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
@@ -25,25 +25,34 @@ from kliptych.orchestrator import (
 )
 from tests.support import make_contract
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _URL = "https://example.com/video"
+
+
+def _private(name: str) -> object:
+    return cast("object", getattr(orchestrator, name))
+
+
+_inject_audio = cast("Callable[..., Path]", _private("_inject_audio"))
+_cleanup_registry = cast("Callable[[], object]", _private("_CleanupRegistry"))
 
 
 def _muted_contract() -> Contract:
     return make_contract(audio_rule="any", audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND)
 
 
-def _contradictory_config(tmp_path: Path, **overrides: object) -> PipelineConfig:
+def _contradictory_config(tmp_path: Path, *, audio_locked: bool = True) -> PipelineConfig:
     track = tmp_path / "track.mp3"
     _ = track.write_bytes(b"audio")
-    params: dict[str, object] = {
-        "output_dir": tmp_path / "out",
-        "contract": _muted_contract(),
-        "render": RenderConfig(),
-        "audio_locked": True,
-        "audio_track_path": track,
-    }
-    params.update(overrides)
-    return PipelineConfig(**params)  # type: ignore[arg-type]
+    return PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_muted_contract(),
+        render=RenderConfig(),
+        audio_locked=audio_locked,
+        audio_track_path=track,
+    )
 
 
 def _model() -> LongVideoModel:
@@ -80,15 +89,13 @@ def test_run_slideshow_rejects_external_audio_with_internal_policy(tmp_path: Pat
 
 
 def test_inject_audio_rejects_internal_policy(tmp_path: Path) -> None:
-    inject_audio = getattr(orchestrator, "_inject_audio")
-    cleanup_registry = getattr(orchestrator, "_CleanupRegistry")
     config = _contradictory_config(tmp_path)
     with pytest.raises(PipelineError, match="internal_official_sound"):
-        _ = inject_audio(
+        _ = _inject_audio(
             tmp_path / "clip.mp4",
             config=config,
             downloader=MediaDownloader(),
-            registry=cleanup_registry(),
+            registry=_cleanup_registry(),
         )
 
 

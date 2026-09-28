@@ -7,12 +7,20 @@ política resuelta: jamás pasa en silencio sin política/mute.
 """
 
 from pathlib import Path
+from typing import cast
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import ContractDraft
 from kliptych.resolver import IssueCode, ResolutionStatus, resolve_contract
-from kliptych.runtime.openai_compatible import _EXTRACT_SYSTEM_PROMPT
+from kliptych.runtime import openai_compatible
 from tests.support import candidate, conflict_candidate, make_draft
+
+
+def _prompt_text(name: str) -> str:
+    return cast("str", getattr(openai_compatible, name))
+
+
+_EXTRACT_SYSTEM_PROMPT = _prompt_text("_EXTRACT_SYSTEM_PROMPT")
 
 
 def test_extract_prompt_instructs_audio_policy_with_evidence() -> None:
