@@ -270,6 +270,34 @@ class Contract(ContractBase):
         return self
 
     @model_validator(mode="after")
+    def _audio_policy_compatible_with_mode(self) -> Self:
+        """Exige la matriz audio_rule × audio_policy a nivel de contrato.
+
+        Combinaciones válidas:
+
+        - ``official_required`` × ``internal_official_sound``: el render se
+          silencia y el sonido oficial se añade al publicar.
+        - ``any`` / ``own_clip`` / ``no_trending`` × ``internal_official_sound``:
+          el mute aplica igual al publicar; la pista del render queda inaudible.
+        - Cualquier ``audio_rule`` × ``original_audio`` / ``any_audio`` / None:
+          se conserva el audio del render.
+
+        El modo ``audio_locked`` inyecta una pista externa, lo contrario de
+        silenciar: es incompatible con ``internal_official_sound`` (la pista
+        externa también se rechaza en el orquestador).
+        """
+        if (
+            self.mode is Mode.AUDIO_LOCKED
+            and self.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND
+        ):
+            msg = (
+                "mode 'audio_locked' inyecta una pista de audio externa, incompatible con "
+                "audio_policy 'internal_official_sound' (el render debe silenciarse)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _official_audio_is_present_when_required(self) -> Self:
         needs_audio = any(
             rules.audio_rule is AudioRule.OFFICIAL_REQUIRED for rules in self.platforms.values()
