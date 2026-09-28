@@ -30,8 +30,9 @@ Catálogo de reglas que el contrato puede declarar:
 - ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
   y con locks declarados el resultado es ``unsupported``.
 - ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
-  todo el video o en alguna parte; sin validador mecánico todavía (fase B), el
-  motor las marca ``unsupported``.
+  todo el video o en alguna parte; se verifica con OpenCV frame por frame
+  (``cv2.matchTemplate`` contra el PNG del contrato, con zona y tamaño
+  mínimos) y cualquier fallo es ``fail`` (fail-closed).
 
 Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 ``unsupported`` (o ``manual_review`` si el contrato las clasificó así).
@@ -41,38 +42,40 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, PlatformRules
-from kliptych.gate.models import CheckStatus, MediaInfo, Piece
+from kliptych.assets import AssetError, AssetNotFoundError
+from kliptych.contract import AudioPolicy, AudioRule, Format
+from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
+
+__all__ = [
+    "DEFAULT_VALIDATORS",
+    "CheckOutcome",
+    "GateContext",
+    "Validator",
+    "check_artifact_integrity",
+    "check_audio_policy",
+    "check_audio_present",
+    "check_audio_silence",
+    "check_duration_max",
+    "check_duration_min",
+    "check_first_line",
+    "check_forbidden_terms",
+    "check_required_assets",
+    "check_required_hashtags",
+    "check_required_mentions",
+    "check_spelling_locks",
+    "check_video_stream",
+    "check_watermark_full_video",
+    "check_watermark_present",
+]
 
 _SILENCE_THRESHOLD_DB = -80.0
 _VOLUMEDETECT_TIMEOUT_S = 60.0
 _FFPROBE_TIMEOUT_S = 30.0
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
 _STDERR_TAIL = 500
-
-
-@dataclass(frozen=True, slots=True)
-class CheckOutcome:
-    """Resultado interno de un validador, sin el id de la regla."""
-
-    status: CheckStatus
-    evidence: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class GateContext:
-    """Datos resueltos que recibe cada validador."""
-
-    contract: Contract
-    rules: PlatformRules
-    piece: Piece
-    artifact_sha256: str | None
-    media: MediaInfo | None
-    assets: AssetRegistry
 
 
 Validator = Callable[[GateContext], CheckOutcome]
@@ -572,6 +575,8 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "duration.max": check_duration_max,
     "duration.min": check_duration_min,
     "subtitles.spelling_lock": check_spelling_locks,
+    "watermark.full_video": check_watermark_full_video,
+    "watermark.present": check_watermark_present,
 }
 
 

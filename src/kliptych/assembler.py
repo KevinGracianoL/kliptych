@@ -12,6 +12,7 @@ render exitoso reemplaza el destino; un fallo deja intacto el artefacto previo.
 """
 
 import contextlib
+import math
 import subprocess
 import uuid
 from pathlib import Path
@@ -217,7 +218,7 @@ class FFmpegAssembler:
                 "-i",
                 str(watermark),
                 "-filter_complex",
-                _watermark_filter(base, config),
+                _watermark_filter(base, config, canvas_width=width),
                 "-map",
                 "[v]",
                 "-map",
@@ -245,39 +246,35 @@ class FFmpegAssembler:
         return argv
 
 
-def _watermark_filter(base: str, config: Watermark) -> str:
+def _watermark_filter(base: str, config: Watermark, *, canvas_width: int) -> str:
     """Construye el ``filter_complex`` que escala y superpone el watermark.
 
     El PNG viaja como segunda entrada explícita (``-i``), nunca como
     ``movie=``: así las rutas Windows con ``:`` no rompen el parser del
-    grafo. El PNG se escala con ``scale2ref`` al ``scale_ratio`` del ancho
-    del lienzo y se superpone con ``overlay`` en la zona de
-    ``config.position`` con el margen de seguridad.
+    grafo. El PNG se escala con ``scale`` de una sola entrada al
+    ``scale_ratio`` del ancho del lienzo (altura con ``-2`` para preservar
+    su aspecto en píxeles pares) y se superpone con ``overlay`` en la zona
+    de ``config.position`` con el margen de seguridad. Sin filtros de doble
+    entrada el framesync no puede truncar el video (``overlay`` repite el
+    frame único del PNG hasta el fin del lienzo de forma determinista).
 
     Args:
         base: Cadena de filtros que normaliza el clip al lienzo vertical.
         config: Posición, tamaño y opacidad del watermark.
+        canvas_width: Ancho del lienzo vertical, en píxeles.
 
     Returns:
         El grafo completo, con el video final en la etiqueta ``[v]``.
     """
     x, y = _overlay_xy(config.position)
-    # En `scale2ref`, `iw`/`ih` son el lienzo de referencia (segunda entrada)
-    # y `main_w`/`main_h` el PNG a escalar (primera entrada); `h=-1/-2`
-    # heredaría el aspecto del lienzo y deformaría el logo, por eso la altura
-    # se calcula explícita preservando el aspecto del PNG.
-    ratio = config.scale_ratio
-    scale = (
-        "[1:v]format=rgba[wmraw];"
-        f"[wmraw][base]scale2ref=w='trunc(iw*{ratio}/2)*2'"
-        f":h='trunc(iw*{ratio}*main_h/main_w/2)*2'[wm][ref]"
-    )
+    target_w = int(math.trunc(canvas_width * config.scale_ratio / 2) * 2)
+    scale = f"[1:v]format=rgba,scale={target_w}:-2[wm]"
     if config.opacity >= 1.0:
-        return f"[0:v]{base}[base];{scale};[ref][wm]overlay={x}:{y}[v]"
+        return f"[0:v]{base}[base];{scale};[base][wm]overlay={x}:{y}[v]"
     return (
         f"[0:v]{base}[base];{scale};"
         f"[wm]colorchannelmixer=aa={config.opacity}[wmf];"
-        f"[ref][wmf]overlay={x}:{y}[v]"
+        f"[base][wmf]overlay={x}:{y}[v]"
     )
 
 

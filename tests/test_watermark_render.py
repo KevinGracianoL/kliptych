@@ -15,6 +15,7 @@ import pytest
 
 from kliptych.assembler import FFmpegAssembler
 from kliptych.contract import Watermark, WatermarkPosition
+from kliptych.gate.probe import FFprobeProbe
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -75,10 +76,10 @@ def test_overlay_matches_configured_position(
     assert f"overlay={overlay}[v]" in graph
 
 
-def test_watermark_scales_with_scale2ref(tmp_path: Path) -> None:
+def test_watermark_scales_to_configured_ratio(tmp_path: Path) -> None:
     graph = _graph(tmp_path, _config(WatermarkPosition.CENTER_BOTTOM, scale_ratio=0.25))
-    assert "scale2ref=w='trunc(iw*0.25/2)*2'" in graph
-    assert ":h='trunc(iw*0.25*main_h/main_w/2)*2'" in graph
+    assert "[1:v]format=rgba,scale=270:-2[wm]" in graph
+    assert "scale2ref" not in graph
 
 
 def test_opacity_filter_only_when_partial(tmp_path: Path) -> None:
@@ -86,7 +87,7 @@ def test_opacity_filter_only_when_partial(tmp_path: Path) -> None:
     assert "colorchannelmixer" not in opaque
     translucent = _graph(tmp_path, _config(WatermarkPosition.CENTER, opacity=0.5))
     assert "[wm]colorchannelmixer=aa=0.5[wmf]" in translucent
-    assert "[ref][wmf]overlay=" in translucent
+    assert "[base][wmf]overlay=" in translucent
 
 
 def test_watermark_uses_explicit_inputs_never_movie(tmp_path: Path) -> None:
@@ -235,3 +236,7 @@ def test_renders_scaled_watermark_at_center_bottom(tmp_path: Path) -> None:
     marked_frame = _gray_frame(marked, width=1080, height=1920)
     assert _box_mean(plain_frame, **box) < 50
     assert _box_mean(marked_frame, **box) > 200
+    # El PNG en loop no debe truncar el video al primer frame.
+    assert _FFPROBE is not None
+    marked_info = FFprobeProbe(ffprobe=_FFPROBE).probe(marked)
+    assert marked_info.duration_s == pytest.approx(1.0, abs=0.2)

@@ -196,11 +196,7 @@ def test_watermark_argv_binds_watermark_input(
     inputs = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-i"]
     assert inputs == [str(clip), str(watermark)]
     assert argv[argv.index("-filter_complex") + 1] == (
-        f"[0:v]{_SCALE}[base];"
-        "[1:v]format=rgba[wmraw];"
-        "[wmraw][base]scale2ref=w='trunc(iw*0.2/2)*2'"
-        ":h='trunc(iw*0.2*main_h/main_w/2)*2'[wm][ref];"
-        "[ref][wm]overlay=W-w-20:20[v]"
+        f"[0:v]{_SCALE}[base];[1:v]format=rgba,scale=216:-2[wm];[base][wm]overlay=W-w-20:20[v]"
     )
     assert argv[argv.index("-map") + 1] == "[v]"
     assert "-vf" not in argv

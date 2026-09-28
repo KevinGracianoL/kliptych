@@ -769,7 +769,7 @@ def test_pipeline_blocks_required_watermark_even_if_soft_classified(
         request=request,
     )
     assert result.outcome is RunOutcome.BLOCKED
-    _assert_rejected_check(result, "watermark.full_video", status="unsupported")
+    _assert_rejected_check(result, "watermark.full_video", status="fail")
 
 
 def test_pipeline_rejects_assets_under_private_scope(tmp_path: Path) -> None:

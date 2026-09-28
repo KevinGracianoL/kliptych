@@ -727,7 +727,7 @@ def test_nul_uri_on_registered_asset_is_rejected(tmp_path: Path) -> None:
     assert _issue_fields(result, IssueCode.UNRESOLVED_ASSET) == ["assets.required[0]"]
 
 
-def test_partial_watermark_blocks_until_validator_exists(tmp_path: Path) -> None:
+def test_partial_watermark_without_png_is_rejected(tmp_path: Path) -> None:
     draft = make_draft(
         watermark={
             "required": candidate(value=True),
@@ -747,8 +747,8 @@ def test_partial_watermark_blocks_until_validator_exists(tmp_path: Path) -> None
         piece=make_piece(artifact, caption="mira @marca #marca"),
         assets=AssetRegistry(tmp_path),
     )
-    assert gate_result.status is GateStatus.UNSUPPORTED
-    assert _check(gate_result, "watermark.present").status is CheckStatus.UNSUPPORTED
+    assert gate_result.status is GateStatus.REJECTED
+    assert _check(gate_result, "watermark.present").status is CheckStatus.FAIL
 
 
 def test_absent_assets_resolve_to_empty_bundle(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from kliptych.gate.models import (
     Piece,
 )
 from kliptych.gate.probe import FFprobeProbe, MediaProbe, ProbeError
+from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 
 __all__ = [
     "DEFAULT_VALIDATORS",
@@ -28,4 +29,6 @@ __all__ = [
     "Piece",
     "ProbeError",
     "Validator",
+    "check_watermark_full_video",
+    "check_watermark_present",
 ]
