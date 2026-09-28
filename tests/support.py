@@ -112,6 +112,7 @@ def make_contract(
     watermark_required: bool = False,
     watermark_visible_full_video: bool = False,
     audio_rule: str = "own_clip",
+    language: str | None = None,
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
@@ -158,7 +159,13 @@ def make_contract(
                     "link_rules": {"link_in_bio": False},
                 }
             },
-            "languages": {"source": "es", "subtitles": None, "caption": "es", "voice": None},
+            "languages": {
+                "source": "es",
+                "subtitles": None,
+                "caption": "es",
+                "voice": None,
+                "language": language,
+            },
             "official_audio": None,
             "watermark": {
                 "required": watermark_required,

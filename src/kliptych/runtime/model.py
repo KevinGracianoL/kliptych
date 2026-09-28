@@ -15,7 +15,7 @@ from typing import Protocol
 
 from pydantic import Field
 
-from kliptych.contract import Contract, ContractDraft, Hashtag, Platform
+from kliptych.contract import Contract, ContractDraft, Hashtag, Platform, prompt_languages
 from kliptych.contract.base import ContractBase
 
 
@@ -80,7 +80,7 @@ def caption_prompt_payload(contract: Contract, piece: PieceContext) -> dict[str,
         "campaign_id": contract.campaign_id,
         "platform": piece.platform.value,
         "piece_id": piece.piece_id,
-        "languages": contract.languages.model_dump(mode="json"),
+        "languages": prompt_languages(contract),
         "caption_rules": platform_rules.caption_rules.model_dump(mode="json"),
         "required_mentions": list(platform_rules.required_mentions),
         "required_hashtags": list(platform_rules.required_hashtags),

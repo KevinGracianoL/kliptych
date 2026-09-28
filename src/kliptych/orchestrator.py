@@ -982,7 +982,11 @@ def _resolve_dependencies(
             max_size_bytes=config.download_max_size_bytes,
         ),
         detector=FFmpegMomentDetector() if detector is None else detector,
-        transcriber=FasterWhisperTranscriber() if transcriber is None else transcriber,
+        transcriber=(
+            FasterWhisperTranscriber(language=config.contract.languages.language)
+            if transcriber is None
+            else transcriber
+        ),
         selector=LLMSegmentSelector() if selector is None else selector,
         reframer=_resolve_reframer(config, injected=reframer),
         subtitle_renderer=(

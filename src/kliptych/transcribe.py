@@ -14,6 +14,7 @@ import gc
 import importlib
 import logging
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Iterable
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _ALLOWED_MODEL_SIZES = frozenset({"small", "large-v3-turbo"})
 _ALLOWED_COMPUTE_TYPES = frozenset({"int8"})
 _ALLOWED_DEVICES = frozenset({"auto", "cpu", "cuda"})
+_LANGUAGE_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[a-z]{2})?$")
 
 _MODEL_CACHE: dict[tuple[str, str, str, int], object] = {}
 
@@ -110,6 +112,7 @@ class _WhisperEngine(Protocol):
         audio: str,
         *,
         word_timestamps: bool,
+        language: str | None = None,
     ) -> tuple[Iterable[_WhisperSegment], _WhisperInfo]: ...
 
 
@@ -162,6 +165,7 @@ class FasterWhisperTranscriber:
         device: str = "auto",
         compute_type: str = "int8",
         num_workers: int = 1,
+        language: str | None = None,
     ) -> None:
         """Configura el motor de transcripción.
 
@@ -170,14 +174,17 @@ class FasterWhisperTranscriber:
 
         Args:
             model_size: Modelo de faster-whisper. Por defecto ``small`` o
-               变量 de entorno ``KLIPTYCH_WHISPER_MODEL`` si está definida.
+                variable de entorno ``KLIPTYCH_WHISPER_MODEL`` si está definida.
             device: Dispositivo de inferencia (``auto``, ``cpu`` o ``cuda``).
             compute_type: Cuantización; debe ser ``int8``.
             num_workers: Número de workers del modelo; debe ser positivo.
+            language: Locale explícito de transcripción (``es``, ``en``,
+                ``pt-br``); ``None`` conserva la autodetección de
+                faster-whisper.
 
         Raises:
-            ValueError: Si el modelo, la cuantización, el dispositivo o el
-                número de workers no son válidos.
+            ValueError: Si el modelo, la cuantización, el dispositivo, el
+                número de workers o el idioma no son válidos.
         """
         if model_size is None:
             model_size = os.environ.get("KLIPTYCH_WHISPER_MODEL", "small")
@@ -197,11 +204,24 @@ class FasterWhisperTranscriber:
         if num_workers <= 0:
             msg = f"num_workers inválido: {num_workers}"
             raise ValueError(msg)
+        if language is not None and _LANGUAGE_PATTERN.fullmatch(language) is None:
+            msg = f"idioma no válido: {language!r}; se esperan códigos como 'es' o 'en'"
+            raise ValueError(msg)
         self._model_size: str = model_size
         self._device: str = device
         self._compute_type: str = compute_type
         self._num_workers: int = num_workers
+        self._language: str | None = language
         self._model: _WhisperEngine | None = None
+
+    @property
+    def language(self) -> str | None:
+        """Locale de transcripción configurado, o ``None`` si autodetecta.
+
+        Returns:
+            El idioma explícito (``es``, ``en``...) o ``None``.
+        """
+        return self._language
 
     def transcribe(self, audio: Path) -> Transcript:
         """Transcribe un audio a palabras con marca de tiempo.
@@ -223,7 +243,7 @@ class FasterWhisperTranscriber:
             msg = f"el audio no existe: {audio}"
             raise TranscriptionError(msg)
         try:
-            segments, info = self._ensure_model().transcribe(str(audio), word_timestamps=True)
+            segments, info = self._invoke(self._ensure_model(), str(audio))
             return _build_transcript(segments, info, audio)
         except TranscriptionError:
             raise
@@ -234,6 +254,25 @@ class FasterWhisperTranscriber:
             raise TranscriptionError(msg) from error
         finally:
             self._release_model()
+
+    def _invoke(
+        self, engine: _WhisperEngine, audio: str
+    ) -> tuple[Iterable[_WhisperSegment], _WhisperInfo]:
+        """Invoca al motor pasando el idioma solo cuando está fijado.
+
+        Sin idioma la llamada es idéntica a la histórica (autodetección):
+        los motores sin parámetro ``language`` siguen funcionando.
+
+        Args:
+            engine: Motor cargado de faster-whisper.
+            audio: Ruta del audio como texto.
+
+        Returns:
+            Los segmentos crudos y los metadatos de la transcripción.
+        """
+        if self._language is None:
+            return engine.transcribe(audio, word_timestamps=True)
+        return engine.transcribe(audio, word_timestamps=True, language=self._language)
 
     def _ensure_model(self) -> _WhisperEngine:
         if self._model is not None:

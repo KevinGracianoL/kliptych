@@ -60,6 +60,7 @@ class LanguagesDraft(ContractBase):
     subtitles: FieldCandidate[str] | None = None
     caption: FieldCandidate[str] | None = None
     voice: FieldCandidate[str] | None = None
+    language: FieldCandidate[str] | None = None
 
 
 class OfficialAudioDraft(ContractBase):

@@ -47,6 +47,7 @@ from kliptych.contract.schema import (
     Watermark,
     active_restriction_rules,
     contract_digest,
+    prompt_languages,
 )
 
 __all__ = [
@@ -94,4 +95,5 @@ __all__ = [
     "WatermarkDraft",
     "active_restriction_rules",
     "contract_digest",
+    "prompt_languages",
 ]

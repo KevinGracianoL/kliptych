@@ -16,7 +16,7 @@ from typing import ClassVar, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from kliptych.contract import Contract, Segment
+from kliptych.contract import Contract, Segment, prompt_languages
 from kliptych.moments import Moment
 from kliptych.transcribe import Transcript
 
@@ -127,7 +127,7 @@ class LLMSegmentSelector:
             "contract": {
                 "mode": contract.mode.value,
                 "format": contract.format.value,
-                "languages": contract.languages.model_dump(mode="json"),
+                "languages": prompt_languages(contract),
                 "duration": {
                     "source_s": bounds.duration_s,
                     "min_s": bounds.min_s,

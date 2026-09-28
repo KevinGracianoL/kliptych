@@ -418,6 +418,7 @@ def _collect_global_conflicts(
     if draft.languages is not None:
         _note_conflict(draft.languages.subtitles, "languages.subtitles", issues)
         _note_conflict(draft.languages.voice, "languages.voice", issues)
+        _note_conflict(draft.languages.language, "languages.language", issues)
     if draft.official_audio is not None:
         _note_conflict(draft.official_audio.tiktok_url, "official_audio.tiktok_url", issues)
         _note_conflict(draft.official_audio.instagram_url, "official_audio.instagram_url", issues)
@@ -566,6 +567,7 @@ def _resolve_languages(
         subtitles=_value(languages.subtitles),
         caption=caption,
         voice=_value(languages.voice),
+        language=_value(languages.language),
     )
 
 
