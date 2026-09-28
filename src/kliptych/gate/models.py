@@ -1,12 +1,14 @@
 """Modelos del gate: estados, resultado y pieza a validar."""
 
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kliptych.contract import Platform
+from kliptych.assets import AssetRegistry
+from kliptych.contract import Contract, Platform, PlatformRules
 
 
 class _GateBase(BaseModel):
@@ -30,6 +32,14 @@ class GateStatus(StrEnum):
     MANUAL_REVIEW = "manual_review"
     PENDING_REVIEW = "pending_review"
     UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class CheckOutcome:
+    """Resultado interno de un validador, sin el id de la regla."""
+
+    status: CheckStatus
+    evidence: dict[str, object] = field(default_factory=dict)
 
 
 class CheckResult(_GateBase):
@@ -82,3 +92,15 @@ class Piece(_GateBase):
     hashtags: tuple[str, ...] = ()
     subtitle_text: str | None = None
     artifact_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GateContext:
+    """Datos resueltos que recibe cada validador."""
+
+    contract: Contract
+    rules: PlatformRules
+    piece: Piece
+    artifact_sha256: str | None
+    media: MediaInfo | None
+    assets: AssetRegistry

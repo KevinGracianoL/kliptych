@@ -60,7 +60,7 @@ def test_all_checks_pass_yields_passed(tmp_path: Path) -> None:
 
 def test_hard_rule_without_validator_never_passes(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
-    contract = make_contract(hard=[*ALL_HARD_RULES, "watermark.full_video"])
+    contract = make_contract(hard=[*ALL_HARD_RULES, "attribution.required"])
     result = _gate().run(
         contract=contract,
         piece=make_piece(artifact),
@@ -68,7 +68,7 @@ def test_hard_rule_without_validator_never_passes(tmp_path: Path) -> None:
     )
     assert result.status is GateStatus.UNSUPPORTED
     assert result.passed is False
-    check = _check(result, "watermark.full_video")
+    check = _check(result, "attribution.required")
     assert check.status is CheckStatus.UNSUPPORTED
     assert "reason" in check.evidence
 

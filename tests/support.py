@@ -114,6 +114,10 @@ def make_contract(
     required_assets: Sequence[AssetRef] = (),
     watermark_required: bool = False,
     watermark_visible_full_video: bool = False,
+    watermark_position: str = "top_right",
+    watermark_scale_ratio: float = 0.20,
+    watermark_opacity: float = 1.0,
+    watermark_min_width_ratio: float = 0.05,
     audio_rule: str = "own_clip",
     language: str | None = None,
     audio_policy: AudioPolicy | None = None,
@@ -184,6 +188,10 @@ def make_contract(
                 "required": watermark_required,
                 "asset_id": "wm-marca" if watermark_required else None,
                 "visible_full_video": watermark_visible_full_video,
+                "position": watermark_position,
+                "scale_ratio": watermark_scale_ratio,
+                "opacity": watermark_opacity,
+                "min_width_ratio": watermark_min_width_ratio,
             },
             "spelling_locks": list(spelling_locks),
             "prohibitions": list(prohibitions),
@@ -347,6 +355,8 @@ def mock_silent_volumedetect(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         assert isinstance(argv, list)
+        if "-select_streams" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="0\n", stderr="")
         return subprocess.CompletedProcess(
             args=argv, returncode=0, stdout="", stderr=SILENT_VOLUMEDETECT_STDERR
         )

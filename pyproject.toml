@@ -6,7 +6,13 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = "LicenseRef-Proprietary"
 authors = [{ name = "Kevin Graciano" }]
-dependencies = ["pydantic>=2.11,<3", "pypdf>=5,<7"]
+dependencies = [
+    "pydantic>=2.11,<3",
+    "pypdf>=5,<7",
+    # Validación mecánica del watermark en el gate (template matching
+    # frame por frame). Headless para no exigir libGL en CI Linux.
+    "opencv-python-headless>=4.8,<6",
+]
 
 [project.optional-dependencies]
 # Herramientas pesadas de descarga/transcripción, fuera de las dependencias
@@ -23,6 +29,9 @@ kliptych = "kliptych.__main__:main"
 [dependency-groups]
 dev = [
     "basedpyright>=1.29",
+    # Generación determinista de PNG sintéticos en tests del gate (sin red ni
+    # fuentes del sistema); el runtime solo necesita opencv (que la incluye).
+    "numpy>=1.26,<3",
     "pytest>=8.3",
     "pytest-cov>=6",
     "ruff>=0.11",
@@ -157,6 +166,15 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"src/kliptych/gate/watermark.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para extraer los
+    # frames muestreados; el binario se resuelve del PATH, nunca de texto del
+    # LLM. cv2 es dependencia declarada del proyecto pero se importa de forma
+    # diferida para que el gate no la cargue sin reglas de watermark activas.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "import-outside-top-level",
+]
 "src/kliptych/gate/models.py" = [
     "hardcoded-password-string", # falso positivo: PASS/FAIL son estados del gate
 ]
@@ -225,6 +243,11 @@ ignore = [
     # analyze/reframe delegan en helpers que lanzan ReframeError; la sección
     # Raises documenta el contrato público.
     "docstring-extraneous-exception",
+]
+"src/kliptych/resolver.py" = [
+    # _build_contract compone draft, registry, mode, format, issues y brief_text;
+    # son las entradas fijas de la resolución, no parámetros coyunturales.
+    "too-many-arguments",
 ]
 "src/kliptych/subtitles.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False; el binario es
@@ -298,6 +321,19 @@ ignore = [
     # argumentos y shell=False.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"tests/test_watermark_render.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # fixtures sintéticos y el render bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_watermark_gate.py" = [
+    # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
+    # generar fixtures sintéticos y renderizar el watermark bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
 ]
 "tests/test_audio_silence.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el

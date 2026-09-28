@@ -178,6 +178,9 @@ class PipelineConfig:
             detección de momentos y selección LLM, usa el vídeo completo como
             segmento y sólo reframea cuando el vídeo no es 9:16. Coincide con
             ``audio_locked`` para inyectar una pista externa.
+        watermark_path: PNG del watermark superpuesto en el render; sus bytes
+            entran al fingerprint para que cualquier cambio invalide
+            ``--resume``.
     """
 
     output_dir: Path
@@ -191,6 +194,7 @@ class PipelineConfig:
     audio_track_url: str | None = None
     audio_mix_ratio: float = 1.0
     repost_mode: bool = False
+    watermark_path: Path | None = None
 
     def __post_init__(self) -> None:
         """Valida la proporción de mezcla de la pista externa.
@@ -425,8 +429,29 @@ def compute_long_video_fingerprint(
             "nvenc_available": config.render.nvenc_available,
         },
         "repost_mode": config.repost_mode,
+        "watermark": _watermark_signature(config),
     }
     return sha256_canonical_json(payload)
+
+
+def _watermark_signature(config: PipelineConfig) -> dict[str, object]:
+    """Firma la configuración y los bytes del PNG del watermark para ``--resume``.
+
+    La configuración entra por su digest canónico (un cambio de posición o
+    tamaño invalida el checkpoint) y el PNG por su firma de contenido
+    (``ruta:sha256``): retocar el asset sin tocar el contrato también
+    invalida las etapas dependientes.
+
+    Args:
+        config: Configuración con el contrato y la ruta opcional del PNG.
+
+    Returns:
+        El bloque determinista del watermark para el fingerprint.
+    """
+    return {
+        "config_sha256": sha256_canonical_json(config.contract.watermark.model_dump(mode="json")),
+        "png": _file_signature(config.watermark_path),
+    }
 
 
 def compute_slideshow_fingerprint(
@@ -462,6 +487,7 @@ def compute_slideshow_fingerprint(
             "timeout_s": config.render.timeout_s,
             "nvenc_available": config.render.nvenc_available,
         },
+        "watermark": _watermark_signature(config),
     }
     return sha256_canonical_json(payload)
 

@@ -25,6 +25,7 @@ from kliptych.contract.enums import (
     Mode,
     Platform,
     RuleStrength,
+    WatermarkPosition,
 )
 from kliptych.contract.evidence import Confidence, FieldCandidate, SourceEvidence
 from kliptych.contract.schema import (
@@ -46,6 +47,7 @@ from kliptych.contract.schema import (
     RuleSet,
     Segment,
     Watermark,
+    WatermarkConfig,
     active_restriction_rules,
     contract_digest,
     contract_mutes_audio,
@@ -95,7 +97,9 @@ __all__ = [
     "SegmentsDraft",
     "SourceEvidence",
     "Watermark",
+    "WatermarkConfig",
     "WatermarkDraft",
+    "WatermarkPosition",
     "active_restriction_rules",
     "contract_digest",
     "contract_mutes_audio",

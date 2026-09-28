@@ -22,6 +22,7 @@ Política de resolución:
   se puede resolver se descarta y se reporta (no bloquea).
 """
 
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -38,6 +39,7 @@ from kliptych.contract import (
     Attribution,
     AttributionDraft,
     AttributionType,
+    AudioPolicy,
     AudioRule,
     CaptionRules,
     Confidence,
@@ -60,6 +62,7 @@ from kliptych.contract import (
     Segment,
     SourceEvidence,
     Watermark,
+    WatermarkPosition,
     active_restriction_rules,
 )
 from kliptych.contract.base import ContractBase
@@ -126,6 +129,7 @@ class _RuleContext:
     platforms: dict[Platform, PlatformRules]
     global_restrictions: GlobalRestrictions
     format_: Format
+    brief_text: str | None = None
 
 
 class _ConfidenceCarrier(Protocol):
@@ -237,7 +241,9 @@ def resolve_contract(
         return ResolutionResult(status=status, issues=tuple(issues))
 
     try:
-        contract = _build_contract(draft, registry, mode=mode, format_=format_, issues=issues)
+        contract = _build_contract(
+            draft, registry, mode=mode, format_=format_, issues=issues, brief_text=brief_text
+        )
     except ValidationError as error:
         issues.append(
             ResolutionIssue(
@@ -261,6 +267,7 @@ def _build_contract(
     mode: Mode,
     format_: Format,
     issues: list[ResolutionIssue],
+    brief_text: str | None = None,
 ) -> Contract | None:
     campaign_id = _required_value(draft.campaign_id, "campaign_id", issues)
     platforms = _resolve_platforms(draft, issues)
@@ -284,6 +291,7 @@ def _build_contract(
                 prohibitions=tuple(prohibitions),
                 audio_policy=_value(draft.audio_policy),
             ),
+            brief_text=brief_text,
         ),
         issues=issues,
     )
@@ -429,6 +437,10 @@ def _collect_global_conflicts(
         _note_conflict(draft.watermark.required, "watermark.required", issues)
         _note_conflict(draft.watermark.asset_id, "watermark.asset_id", issues)
         _note_conflict(draft.watermark.visible_full_video, "watermark.visible_full_video", issues)
+        _note_conflict(draft.watermark.position, "watermark.position", issues)
+        _note_conflict(draft.watermark.scale_ratio, "watermark.scale_ratio", issues)
+        _note_conflict(draft.watermark.opacity, "watermark.opacity", issues)
+        _note_conflict(draft.watermark.min_width_ratio, "watermark.min_width_ratio", issues)
     if draft.rules is not None:
         _note_conflict(draft.rules.hard, "rules.hard", issues)
         _note_conflict(draft.rules.recommended, "rules.recommended", issues)
@@ -576,13 +588,27 @@ def _resolve_languages(
 
 def _resolve_watermark(draft: ContractDraft) -> Watermark:
     watermark = draft.watermark
+    position = _value(watermark.position) if watermark is not None else None
     return Watermark(
         required=bool(_value(watermark.required)) if watermark is not None else False,
         asset_id=_value(watermark.asset_id) if watermark is not None else None,
         visible_full_video=(
             bool(_value(watermark.visible_full_video)) if watermark is not None else False
         ),
+        position=position if position is not None else WatermarkPosition.TOP_RIGHT,
+        scale_ratio=_resolve_ratio(
+            watermark.scale_ratio if watermark is not None else None, default=0.20
+        ),
+        opacity=_resolve_ratio(watermark.opacity if watermark is not None else None, default=1.0),
+        min_width_ratio=_resolve_ratio(
+            watermark.min_width_ratio if watermark is not None else None, default=0.05
+        ),
     )
+
+
+def _resolve_ratio(candidate: FieldCandidate[float] | None, *, default: float) -> float:
+    value = _value(candidate)
+    return default if value is None else value
 
 
 def _resolve_official_audio(
@@ -837,6 +863,13 @@ def _resolve_rules(
         manual_review=manual_review,
         issues=issues,
     )
+    _force_policy_review_when_brief_mentions_official_sound(
+        context.brief_text,
+        audio_policy=context.global_restrictions.audio_policy,
+        classified=classified,
+        manual_review=manual_review,
+        issues=issues,
+    )
     _apply_platform_restrictions(
         context,
         classified=classified,
@@ -898,6 +931,91 @@ def _force_policy_review_when_official_without_policy(
             field="rules.audio.policy",
             detail=(
                 "audio_rule 'official_required' sin audio_policy resuelta; "
+                "se clasifica como manual_review (fail-closed)"
+            ),
+        )
+    )
+
+
+_OFFICIAL_SOUND_MENTIONS: tuple[str, ...] = (
+    "official sound",
+    "official audio",
+    "sonido oficial",
+    "audio oficial",
+)
+
+
+def _normalize_mention_text(text: str) -> str:
+    """Normaliza el brief para detectar menciones de sonido oficial.
+
+    Descompone con NFKD, elimina diacríticos y pliega a minúsculas: así
+    "SONIDO OFICIAL" u "Official Sound" coinciden con las menciones
+    canónicas sin falsos negativos por mayúsculas o tildes.
+
+    Args:
+        text: Texto crudo del brief.
+
+    Returns:
+        El texto normalizado para búsqueda de subcadenas.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return stripped.casefold()
+
+
+def _brief_mentions_official_sound(brief_text: str | None) -> bool:
+    """Indica si el brief menciona textualmente el sonido oficial.
+
+    Args:
+        brief_text: Texto crudo del brief original, o ``None`` si no se
+            proporcionó.
+
+    Returns:
+        True si alguna mención canónica aparece en el texto normalizado.
+    """
+    if not brief_text:
+        return False
+    normalized = _normalize_mention_text(brief_text)
+    return any(mention in normalized for mention in _OFFICIAL_SOUND_MENTIONS)
+
+
+def _force_policy_review_when_brief_mentions_official_sound(
+    brief_text: str | None,
+    *,
+    audio_policy: AudioPolicy | None,
+    classified: set[str],
+    manual_review: list[str],
+    issues: list[ResolutionIssue],
+) -> None:
+    """Clasifica ``audio.policy`` como manual_review si el brief lo menciona (fail-closed).
+
+    Aunque ninguna plataforma declare ``official_required``, un brief que
+    menciona textualmente el sonido oficial ("official sound", "sonido
+    oficial", "audio oficial", "official audio") sin ``audio_policy``
+    resuelta no puede pasar en silencio: la regla ``audio.policy`` exige
+    revisión humana en el gate.
+
+    Args:
+        brief_text: Texto crudo del brief original, o ``None``.
+        audio_policy: Política de audio ya resuelta del draft.
+        classified: Reglas ya clasificadas; se amplía en sitio.
+        manual_review: Reglas de revisión manual; se amplía en sitio.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+    """
+    if audio_policy is not None:
+        return
+    if "audio.policy" in classified:
+        return
+    if not _brief_mentions_official_sound(brief_text):
+        return
+    classified.add("audio.policy")
+    manual_review.append("audio.policy")
+    issues.append(
+        ResolutionIssue(
+            code=IssueCode.RULE_DEFAULTED,
+            field="rules.audio.policy",
+            detail=(
+                "el brief menciona el sonido oficial sin audio_policy resuelta; "
                 "se clasifica como manual_review (fail-closed)"
             ),
         )

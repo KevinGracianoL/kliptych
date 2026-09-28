@@ -46,7 +46,11 @@ _EXTRACT_SYSTEM_PROMPT = (
     '"audio_policy" con su evidencia ("internal_official_sound" si el brief '
     'exige usar el sonido oficial de la plataforma, "original_audio" si '
     'exige conservar el audio original, "any_audio" si declara audio libre); '
-    'sin cita textual usa "missing".'
+    'sin cita textual usa "missing". Extrae "watermark" con su evidencia '
+    '(posición: "center_bottom", "center_top", "center", "top_right", '
+    '"top_left", "bottom_right" o "bottom_left"; tamaño relativo '
+    '"scale_ratio", ancho mínimo "min_width_ratio" y "opacity"); sin cita '
+    'textual usa "missing".'
 )
 
 _CAPTION_SYSTEM_PROMPT = (

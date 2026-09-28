@@ -12,7 +12,7 @@ from typing import cast, override
 import pytest
 
 from kliptych.__main__ import main
-from kliptych.contract import Contract
+from kliptych.contract import Contract, Watermark
 from kliptych.contract.draft import ContractDraft
 from kliptych.gate import Gate
 from kliptych.pipeline import PieceAssembler
@@ -50,9 +50,10 @@ class _CopyAssembler(PieceAssembler):
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (watermark, mute_audio)
+        _ = (watermark, watermark_config, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(clip.read_bytes())
         return destination
@@ -64,9 +65,10 @@ class _CopyAssembler(PieceAssembler):
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, destination, watermark, mute_audio)
+        _ = (clip, destination, watermark, watermark_config, mute_audio)
         return ("cp",)
 
 

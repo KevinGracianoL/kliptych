@@ -254,7 +254,7 @@ def test_rejected_piece_is_not_exported_and_keeps_full_gate_result(tmp_path: Pat
 
 
 def test_unsupported_rule_is_not_exported(tmp_path: Path) -> None:
-    contract = make_contract(hard=[*ALL_HARD_RULES, "watermark.full_video"])
+    contract = make_contract(hard=[*ALL_HARD_RULES, "attribution.required"])
     report = _export(tmp_path, contract=contract)
     assert report.status is ExportStatus.BLOCKED
     assert report.rejected[0].gate_status is GateStatus.UNSUPPORTED
