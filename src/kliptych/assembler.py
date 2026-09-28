@@ -3,8 +3,9 @@
 El modo ``given_clips`` recibe clips ya cortados: el ensamblado los normaliza
 a un lienzo vertical (píxeles cuadrados, SAR del clip respetado) y conserva el
 audio propio del clip. El watermark opcional se superpone desde un asset local
-durante todo el video. El artefacto que sale de aquí es el que inspecciona el
-gate: nunca se valida sobre los parámetros de entrada.
+durante todo el video, en la zona y tamaño del ``WatermarkConfig``. El
+artefacto que sale de aquí es el que inspecciona el gate: nunca se valida
+sobre los parámetros de entrada.
 
 La publicación es atómica: ffmpeg escribe en un temporal hermano y solo un
 render exitoso reemplaza el destino; un fallo deja intacto el artefacto previo.
@@ -14,7 +15,9 @@ import contextlib
 import subprocess
 import uuid
 from pathlib import Path
+from typing import assert_never
 
+from kliptych.contract import Watermark, WatermarkPosition
 from kliptych.encoding import muted_audio_arguments
 
 _DEFAULT_WIDTH = 1080
@@ -52,6 +55,7 @@ class FFmpegAssembler:
         clip: Path,
         destination: Path,
         watermark: Path | None = None,
+        watermark_config: Watermark | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
         mute_audio: bool = False,
@@ -66,8 +70,10 @@ class FFmpegAssembler:
             clip: Clip entregado por la campaña (ya cortado).
             destination: Ruta del artefacto final; se reemplaza al publicar y
                 se crean los directorios padre que falten.
-            watermark: Imagen opcional para superponer en la esquina superior
-                derecha durante todo el video.
+            watermark: Imagen opcional para superponer durante todo el video,
+                en la zona y tamaño de ``watermark_config``.
+            watermark_config: Posición, tamaño y opacidad del watermark; sin
+                valor se usa el defecto del contrato (arriba a la derecha).
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
             mute_audio: Si es True, silencia la pista sin eliminarla
@@ -97,6 +103,7 @@ class FFmpegAssembler:
             clip=clip,
             destination=temporary,
             watermark=watermark,
+            watermark_config=watermark_config,
             width=width,
             height=height,
             mute_audio=mute_audio,
@@ -139,6 +146,7 @@ class FFmpegAssembler:
         clip: Path,
         destination: Path,
         watermark: Path | None = None,
+        watermark_config: Watermark | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
         mute_audio: bool = False,
@@ -152,6 +160,7 @@ class FFmpegAssembler:
             clip: Clip entregado por la campaña.
             destination: Ruta final del artefacto.
             watermark: Imagen opcional a superponer.
+            watermark_config: Posición, tamaño y opacidad del watermark.
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
             mute_audio: Si es True, la receta incluye el silenciado de audio.
@@ -164,6 +173,7 @@ class FFmpegAssembler:
                 clip=clip,
                 destination=destination,
                 watermark=watermark,
+                watermark_config=watermark_config,
                 width=width,
                 height=height,
                 mute_audio=mute_audio,
@@ -176,6 +186,7 @@ class FFmpegAssembler:
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None,
         width: int,
         height: int,
         mute_audio: bool,
@@ -197,12 +208,16 @@ class FFmpegAssembler:
         if watermark is None:
             argv += ["-vf", base, "-map", "0:v:0", "-map", "0:a?"]
         else:
-            overlay = f"[base][1:v]overlay=W-w-{_WATERMARK_MARGIN}:{_WATERMARK_MARGIN}[v]"
+            config = (
+                watermark_config
+                if watermark_config is not None
+                else Watermark(required=True, visible_full_video=True)
+            )
             argv += [
                 "-i",
                 str(watermark),
                 "-filter_complex",
-                f"[0:v]{base}[base];{overlay}",
+                _watermark_filter(base, config),
                 "-map",
                 "[v]",
                 "-map",
@@ -228,6 +243,72 @@ class FFmpegAssembler:
             str(destination),
         ]
         return argv
+
+
+def _watermark_filter(base: str, config: Watermark) -> str:
+    """Construye el ``filter_complex`` que escala y superpone el watermark.
+
+    El PNG viaja como segunda entrada explícita (``-i``), nunca como
+    ``movie=``: así las rutas Windows con ``:`` no rompen el parser del
+    grafo. El PNG se escala con ``scale2ref`` al ``scale_ratio`` del ancho
+    del lienzo y se superpone con ``overlay`` en la zona de
+    ``config.position`` con el margen de seguridad.
+
+    Args:
+        base: Cadena de filtros que normaliza el clip al lienzo vertical.
+        config: Posición, tamaño y opacidad del watermark.
+
+    Returns:
+        El grafo completo, con el video final en la etiqueta ``[v]``.
+    """
+    x, y = _overlay_xy(config.position)
+    # En `scale2ref`, `iw`/`ih` son el lienzo de referencia (segunda entrada)
+    # y `main_w`/`main_h` el PNG a escalar (primera entrada); `h=-1/-2`
+    # heredaría el aspecto del lienzo y deformaría el logo, por eso la altura
+    # se calcula explícita preservando el aspecto del PNG.
+    ratio = config.scale_ratio
+    scale = (
+        "[1:v]format=rgba[wmraw];"
+        f"[wmraw][base]scale2ref=w='trunc(iw*{ratio}/2)*2'"
+        f":h='trunc(iw*{ratio}*main_h/main_w/2)*2'[wm][ref]"
+    )
+    if config.opacity >= 1.0:
+        return f"[0:v]{base}[base];{scale};[ref][wm]overlay={x}:{y}[v]"
+    return (
+        f"[0:v]{base}[base];{scale};"
+        f"[wm]colorchannelmixer=aa={config.opacity}[wmf];"
+        f"[ref][wmf]overlay={x}:{y}[v]"
+    )
+
+
+def _overlay_xy(position: WatermarkPosition) -> tuple[str, str]:
+    """Devuelve las expresiones ``(x, y)`` del ``overlay`` para una posición.
+
+    Args:
+        position: Zona del lienzo exigida por el contrato.
+
+    Returns:
+        Las expresiones de ffmpeg para la esquina superior izquierda del
+        watermark, con el margen de seguridad desde los bordes.
+    """
+    margin = _WATERMARK_MARGIN
+    if position is WatermarkPosition.TOP_LEFT:
+        x, y = f"{margin}", f"{margin}"
+    elif position is WatermarkPosition.TOP_RIGHT:
+        x, y = f"W-w-{margin}", f"{margin}"
+    elif position is WatermarkPosition.BOTTOM_LEFT:
+        x, y = f"{margin}", f"H-h-{margin}"
+    elif position is WatermarkPosition.BOTTOM_RIGHT:
+        x, y = f"W-w-{margin}", f"H-h-{margin}"
+    elif position is WatermarkPosition.CENTER:
+        x, y = "(W-w)/2", "(H-h)/2"
+    elif position is WatermarkPosition.CENTER_TOP:
+        x, y = "(W-w)/2", f"{margin}"
+    elif position is WatermarkPosition.CENTER_BOTTOM:
+        x, y = "(W-w)/2", f"H-h-{margin}"
+    else:
+        assert_never(position)
+    return (x, y)
 
 
 def _temporary_path(destination: Path) -> Path:

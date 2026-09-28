@@ -14,7 +14,7 @@ from kliptych.__main__ import main
 from kliptych.assembler import AssembleError, FFmpegAssembler
 from kliptych.assets import AssetRegistry
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft
+from kliptych.contract import Contract, ContractDraft, Watermark
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportError, ExportStatus
 from kliptych.gate import Gate
@@ -162,6 +162,7 @@ class _StubAssembler(PieceAssembler):
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> Path:
         _ = clip
@@ -178,9 +179,10 @@ class _StubAssembler(PieceAssembler):
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (watermark, mute_audio)
+        _ = (watermark, watermark_config, mute_audio)
         return ("ffmpeg", str(clip), str(destination))
 
 

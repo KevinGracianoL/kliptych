@@ -15,7 +15,7 @@ from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft, Segment
+from kliptych.contract import Contract, ContractDraft, Segment, Watermark
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportStatus
 from kliptych.gate import CheckStatus, Gate, GateResult, Piece
@@ -254,9 +254,10 @@ class _StubAssembler:
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (clip, watermark, mute_audio)
+        _ = (clip, watermark, watermark_config, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         self.assembled.append(destination)
@@ -268,9 +269,10 @@ class _StubAssembler:
         clip: Path,
         destination: Path,
         watermark: Path | None,
+        watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, watermark, mute_audio)
+        _ = (clip, watermark, watermark_config, mute_audio)
         self.rendered.append(destination)
         return ("ffmpeg", str(destination))
 

@@ -304,6 +304,12 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"tests/test_watermark_render.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # fixtures sintéticos y el render bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
 "tests/test_audio_silence.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el
     # fixture sintético y medir el silencio real (volumedetect).

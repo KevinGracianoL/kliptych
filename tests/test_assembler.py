@@ -196,10 +196,15 @@ def test_watermark_argv_binds_watermark_input(
     inputs = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-i"]
     assert inputs == [str(clip), str(watermark)]
     assert argv[argv.index("-filter_complex") + 1] == (
-        f"[0:v]{_SCALE}[base];[base][1:v]overlay=W-w-20:20[v]"
+        f"[0:v]{_SCALE}[base];"
+        "[1:v]format=rgba[wmraw];"
+        "[wmraw][base]scale2ref=w='trunc(iw*0.2/2)*2'"
+        ":h='trunc(iw*0.2*main_h/main_w/2)*2'[wm][ref];"
+        "[ref][wm]overlay=W-w-20:20[v]"
     )
     assert argv[argv.index("-map") + 1] == "[v]"
     assert "-vf" not in argv
+    assert "movie=" not in argv[argv.index("-filter_complex") + 1]
 
 
 def test_missing_binary_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -416,7 +421,8 @@ def test_watermark_visible_in_top_right_box(tmp_path: Path) -> None:
         destination=marked,
         watermark=watermark,
     )
-    box = {"width": 1080, "x0": 996, "y0": 20, "x1": 1060, "y1": 84}
+    # 64x64 escalado al 20% de 1080 = 216 px, arriba a la derecha con margen 20.
+    box = {"width": 1080, "x0": 844, "y0": 20, "x1": 1060, "y1": 236}
     plain_frame = _gray_frame(plain, width=1080, height=1920)
     marked_frame = _gray_frame(marked, width=1080, height=1920)
     assert _box_mean(plain_frame, **box) < 50
