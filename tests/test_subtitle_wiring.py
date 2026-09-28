@@ -248,17 +248,29 @@ class _StubAssembler:
         self.assembled: list[Path] = []
         self.rendered: list[Path] = []
 
-    def assemble(self, *, clip: Path, destination: Path, watermark: Path | None) -> Path:
-        _ = (clip, watermark)
+    def assemble(
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
+    ) -> Path:
+        _ = (clip, watermark, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         self.assembled.append(destination)
         return destination
 
     def render_arguments(
-        self, *, clip: Path, destination: Path, watermark: Path | None
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, watermark)
+        _ = (clip, watermark, mute_audio)
         self.rendered.append(destination)
         return ("ffmpeg", str(destination))
 

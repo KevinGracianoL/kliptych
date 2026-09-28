@@ -228,8 +228,10 @@ class _SubtitleRenderer:
         _ = destination.write_text("ass", encoding="utf-8")
         return destination
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
-        _ = (video, subtitles)
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
+        _ = (video, subtitles, mute_audio)
         self._events.append("burn")
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"final")

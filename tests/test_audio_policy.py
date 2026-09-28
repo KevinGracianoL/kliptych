@@ -7,17 +7,22 @@ silencioso): exportar exige firma humana. Si además falla otra regla, el
 fallo manda (``REJECTED``): fail-closed.
 """
 
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from kliptych.assembler import FFmpegAssembler
 from kliptych.assets import AssetRegistry
 from kliptych.contract import AudioPolicy, Contract, Platform, contract_digest
+from kliptych.encoding import RenderConfig
 from kliptych.exporter import ExportStatus, export_delivery
 from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus, Piece
+from kliptych.orchestrator import PipelineConfig, compute_long_video_fingerprint
 from kliptych.resolver import resolve_contract
+from kliptych.subtitles import SubtitleRenderer
 from tests.support import (
     ALL_HARD_RULES,
     FakeProbe,
@@ -164,3 +169,99 @@ def test_declared_policy_changes_digest() -> None:
     assert contract_digest(
         make_contract(audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND)
     ) != contract_digest(make_contract())
+
+
+def _render_paths(tmp_path: Path) -> tuple[Path, Path]:
+    clip = tmp_path / "clip.mp4"
+    _ = clip.write_bytes(b"video")
+    return clip, tmp_path / "final.mp4"
+
+
+def test_muted_assemble_preserves_audio_track_and_silences(tmp_path: Path) -> None:
+    clip, destination = _render_paths(tmp_path)
+    recipe = FFmpegAssembler().render_arguments(
+        clip=clip, destination=destination, watermark=None, mute_audio=True
+    )
+    assert "-af" in recipe
+    assert "volume=0" in recipe
+    assert "0:a?" in recipe
+
+
+def test_assemble_without_mute_keeps_audible_argv(tmp_path: Path) -> None:
+    clip, destination = _render_paths(tmp_path)
+    recipe = FFmpegAssembler().render_arguments(clip=clip, destination=destination, watermark=None)
+    assert "-af" not in recipe
+    assert "volume=0" not in recipe
+
+
+def test_muted_subtitle_burn_preserves_audio_track_and_silences(tmp_path: Path) -> None:
+    clip, destination = _render_paths(tmp_path)
+    subtitles = tmp_path / "subtitles.ass"
+    _ = subtitles.write_text("[Events]\n", encoding="utf-8")
+    recipe = SubtitleRenderer().render_arguments(
+        video=clip, subtitles=subtitles, destination=destination, mute_audio=True
+    )
+    assert "-af" in recipe
+    assert "volume=0" in recipe
+    assert "0:a?" in recipe
+
+
+def test_subtitle_burn_without_mute_keeps_audible_argv(tmp_path: Path) -> None:
+    clip, destination = _render_paths(tmp_path)
+    subtitles = tmp_path / "subtitles.ass"
+    _ = subtitles.write_text("[Events]\n", encoding="utf-8")
+    recipe = SubtitleRenderer().render_arguments(
+        video=clip, subtitles=subtitles, destination=destination
+    )
+    assert "-af" not in recipe
+    assert "volume=0" not in recipe
+
+
+def test_muted_burn_reaches_ffmpeg_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        captured.append(list(argv))
+        _ = Path(argv[-1]).write_bytes(b"final")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.subtitles.subprocess.run", fake_run)
+    clip, destination = _render_paths(tmp_path)
+    subtitles = tmp_path / "subtitles.ass"
+    _ = subtitles.write_text("[Events]\n", encoding="utf-8")
+    _ = SubtitleRenderer(render=RenderConfig()).burn(
+        video=clip, subtitles=subtitles, destination=destination, mute_audio=True
+    )
+    assert len(captured) == 1
+    assert "volume=0" in captured[0]
+    assert "0:a?" in captured[0]
+    assert destination.is_file()
+
+
+def test_audio_policy_change_changes_resume_fingerprint(tmp_path: Path) -> None:
+    url = "https://example.com/video"
+    audible = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=make_contract(),
+        render=RenderConfig(),
+    )
+    muted = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=make_contract(audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND),
+        render=RenderConfig(),
+    )
+    assert compute_long_video_fingerprint(url, config=audible) == (
+        compute_long_video_fingerprint(url, config=audible)
+    )
+    assert compute_long_video_fingerprint(url, config=audible) != (
+        compute_long_video_fingerprint(url, config=muted)
+    )
+
+
+def test_muted_track_passes_presence_check_and_pends_review(tmp_path: Path) -> None:
+    contract = make_contract(audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND)
+    result = _run(contract, _piece(_artifact(tmp_path)), tmp_path)
+    assert _check(result, "audio.present").status is CheckStatus.PASS
+    assert _check(result, "audio.policy").status is CheckStatus.MANUAL_REVIEW
+    assert result.status is GateStatus.PENDING_REVIEW

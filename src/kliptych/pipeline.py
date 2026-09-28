@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kliptych.assembler import FFmpegAssembler
 from kliptych.assets import AssetNotFoundError, AssetRegistry
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft, Mode, contract_digest
+from kliptych.contract import Contract, ContractDraft, Mode, contract_digest, contract_mutes_audio
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
 from kliptych.gate import Gate, GateResult, Piece
@@ -72,12 +72,19 @@ class RunResult(BaseModel):
 class PieceAssembler(Protocol):
     """Ensambla el clip entregado en el artefacto final de la pieza."""
 
-    def assemble(self, *, clip: Path, destination: Path, watermark: Path | None) -> Path:
+    def assemble(
+        self, *, clip: Path, destination: Path, watermark: Path | None, mute_audio: bool = False
+    ) -> Path:
         """Ensambla el clip y devuelve la ruta del artefacto."""
         ...
 
     def render_arguments(
-        self, *, clip: Path, destination: Path, watermark: Path | None
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
         """Devuelve la receta de render que se registra en el manifiesto."""
         ...
@@ -301,13 +308,16 @@ def _assemble_pieces(
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
     subtitle_texts = context.request.subtitle_texts or {}
+    mute_audio = contract_mutes_audio(contract)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
             if asset.kind != _VIDEO_KIND:
                 continue
             clip = context.registry.path_for(asset.asset_id)
             artifact = context.run_dir / "artifacts" / platform.value / f"{asset.asset_id}.mp4"
-            _ = context.builder.assemble(clip=clip, destination=artifact, watermark=watermark)
+            _ = context.builder.assemble(
+                clip=clip, destination=artifact, watermark=watermark, mute_audio=mute_audio
+            )
             caption = context.model.write_caption(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
@@ -333,6 +343,7 @@ def _assemble_pieces(
                         clip=clip,
                         destination=artifact,
                         watermark=watermark,
+                        mute_audio=mute_audio,
                     ),
                 )
             )

@@ -66,6 +66,8 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
+    # assemble/render_arguments componen clip, destino, watermark, lienzo y silenciado.
+    "too-many-arguments",
 ]
 "src/kliptych/campaign_config.py" = [
     # generate_campaign_config/variations_md_entry delegan en helpers que
@@ -283,6 +285,12 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
+]
+"tests/test_audio_policy.py" = [
+    # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
+    # argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/test_download.py" = [
     # subprocess se usa solo para TimeoutExpired y para el runner real con

@@ -44,17 +44,29 @@ class _CopyAssembler(PieceAssembler):
     """Ensamblador que copia los bytes del clip al artefacto."""
 
     @override
-    def assemble(self, *, clip: Path, destination: Path, watermark: Path | None) -> Path:
-        _ = watermark
+    def assemble(
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
+    ) -> Path:
+        _ = (watermark, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(clip.read_bytes())
         return destination
 
     @override
     def render_arguments(
-        self, *, clip: Path, destination: Path, watermark: Path | None
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, destination, watermark)
+        _ = (clip, destination, watermark, mute_audio)
         return ("cp",)
 
 

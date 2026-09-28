@@ -355,6 +355,22 @@ def prompt_languages(contract: Contract) -> dict[str, object]:
     return dump
 
 
+def contract_mutes_audio(contract: Contract) -> bool:
+    """Indica si el contrato exige silenciar el render final de cada pieza.
+
+    Solo ``audio_policy=internal_official_sound`` silencia: el sonido oficial
+    se añade en la publicación y el MP4 debe llevar la pista presente pero en
+    silencio digital. Las demás políticas (o su ausencia) conservan el audio.
+
+    Args:
+        contract: Contrato validado de la campaña.
+
+    Returns:
+        True si el render final debe aplicar el filtro de silenciado.
+    """
+    return contract.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND
+
+
 def contract_digest(contract: Contract) -> str:
     """Calcula el hash canónico del contrato lógico.
 

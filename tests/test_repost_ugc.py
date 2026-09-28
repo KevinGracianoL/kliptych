@@ -17,7 +17,7 @@ from typing import Protocol, cast
 import pytest
 
 from kliptych import orchestrator
-from kliptych.contract import Contract, Segment
+from kliptych.contract import AudioPolicy, Contract, Segment
 from kliptych.encoding import RenderConfig
 from kliptych.moments import ChatMessage, Moment, MomentSource
 from kliptych.orchestrator import (
@@ -98,6 +98,16 @@ def _contract() -> Contract:
             "min_views_for_payout": {"value": None, "enforcement": "post_publication_manual"},
             "analytics_proof_required": {"value": False, "enforcement": "post_publication_manual"},
         }
+    )
+
+
+def _muted_contract() -> Contract:
+    base = _contract()
+    rules = base.rules.model_copy(
+        update={"manual_review": [*base.rules.manual_review, "audio.policy"]}
+    )
+    return base.model_copy(
+        update={"audio_policy": AudioPolicy.INTERNAL_OFFICIAL_SOUND, "rules": rules}
     )
 
 
@@ -271,8 +281,10 @@ class _SubtitleRenderer:
         _ = destination.write_text("ass", encoding="utf-8")
         return destination
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
-        _ = (video, subtitles)
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
+        _ = (video, subtitles, mute_audio)
         self._events.append("burn")
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"final")
@@ -650,6 +662,44 @@ def test_full_video_selection_rejects_zero_duration(
     )
     with pytest.raises(PipelineError, match="duración"):
         _ = _full_video_selection(tmp_path / "source.mp4", render=RenderConfig())
+
+
+def test_repost_publish_mutes_audio_for_internal_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness()
+    _install(monkeypatch, harness)
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_muted_contract(),
+        render=RenderConfig(),
+        repost_mode=True,
+    )
+    result = run_long_video(
+        _URL,
+        model=_Model(harness.events),
+        config=config,
+        detector=_Detector(harness.events),
+        transcriber=_Transcriber(harness.events),
+        selector=_Selector(harness.events),
+        subtitle_renderer=_SubtitleRenderer(harness.events),
+    )
+    assert result.transcript is None
+    assert "burn" not in harness.events
+    muted = [command for command in harness.commands if "volume=0" in command]
+    assert len(muted) == 1
+    assert muted[0][muted[0].index("-c:v") + 1] == "copy"
+    assert "0:a?" in muted[0]
+    assert result.final_video.is_file()
+
+
+def test_repost_publish_without_policy_keeps_audible_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _Harness()
+    _install(monkeypatch, harness)
+    _ = _run(harness.events, _config(tmp_path))
+    assert all("volume=0" not in command for command in harness.commands)
 
 
 def test_publish_copies_to_final(tmp_path: Path) -> None:

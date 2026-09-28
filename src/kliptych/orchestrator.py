@@ -39,12 +39,13 @@ from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
-from kliptych.contract import Contract, Segment, contract_digest
+from kliptych.contract import Contract, Segment, contract_digest, contract_mutes_audio
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
     audio_injection_arguments,
+    muted_audio_arguments,
     run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
@@ -260,13 +261,16 @@ class SubtitleBurner(Protocol):
         """
         ...
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
         """Quema los subtítulos en el vídeo.
 
         Args:
             video: Ruta del vídeo del segmento reframeado.
             subtitles: Ruta del archivo ``.ass``.
             destination: Ruta del artefacto final.
+            mute_audio: Si es True, silencia la pista sin eliminarla.
 
         Returns:
             La ruta del artefacto con subtítulos quemados.
@@ -791,7 +795,13 @@ def _run_slideshow_stages(
         resume=resume,
         state=state,
     )
-    final_video = _publish(with_audio, output_dir=config.output_dir, registry=registry)
+    final_video = _publish(
+        with_audio,
+        output_dir=config.output_dir,
+        registry=registry,
+        mute_audio=contract_mutes_audio(config.contract),
+        render=config.render,
+    )
     return SlideshowResult(
         images=resolved,
         slideshow_video=slideshow_video,
@@ -1514,12 +1524,15 @@ def _resolve_subtitles_and_burn_stage(
 ) -> tuple[Path | None, Path]:
     final_name = f"final{suffix}.mp4"
     subtitles_name = f"subtitles{suffix}.ass"
+    mute_audio = contract_mutes_audio(config.contract)
     if transcript is None:
         final_video = _publish(
             video,
             output_dir=config.output_dir,
             registry=registry,
             final_name=final_name,
+            mute_audio=mute_audio,
+            render=config.render,
         )
         return None, final_video
     expected_final = config.output_dir / final_name
@@ -1548,6 +1561,7 @@ def _resolve_subtitles_and_burn_stage(
             renderer=dependencies.subtitle_renderer,
             output_dir=config.output_dir,
             final_name=final_name,
+            mute_audio=mute_audio,
         )
         if is_primary:
             state.mark_done(PipelineStage.SUBTITLES, final)
@@ -2060,23 +2074,61 @@ def _publish(
     output_dir: Path,
     registry: _CleanupRegistry,
     final_name: str = _FINAL_NAME,
+    mute_audio: bool = False,
+    render: RenderConfig | None = None,
 ) -> Path:
     """Publica el vídeo procesado como artefacto final sin subtítulos.
+
+    Con ``mute_audio`` el vídeo no se copia: se re-publica con ffmpeg
+    copiando el vídeo y silenciando el audio (``volume=0``), de modo que la
+    pista sigue presente en el contenedor pero en silencio digital. Sin
+    ``mute_audio`` conserva la copia binaria histórica.
 
     Args:
         video: Vídeo procesado (cortado, reframeado y/o con audio inyectado).
         output_dir: Directorio donde se publica ``final.mp4``.
         registry: Registro del temporal de publicación.
         final_name: Nombre del archivo de video final publicado.
+        mute_audio: Si es True, silencia la pista sin eliminarla
+            (``audio_policy=internal_official_sound``).
+        render: Binario y timeout de ffmpeg; exigido cuando ``mute_audio``.
 
     Returns:
         La ruta del artefacto final.
 
     Raises:
-        PipelineError: Si no se puede copiar o publicar el artefacto.
+        PipelineError: Si no se puede copiar o publicar el artefacto, si
+            falta ``render`` para silenciar, o si ffmpeg falla.
     """
     destination = output_dir / final_name
     temporary = registry.register(_temporary_path(destination))
+    if mute_audio:
+        if render is None:
+            msg = "el silenciado del audio final requiere la configuración de render"
+            raise PipelineError(msg)
+        argv = [
+            render.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(video),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "copy",
+            *muted_audio_arguments(),
+            *audio_and_container_arguments(),
+            str(temporary),
+        ]
+        with _translated("silenciado del audio final"):
+            _run_ffmpeg(argv, render=render)
+            _ = temporary.replace(destination)
+        return destination
     with _translated("publicación del vídeo final"):
         _ = shutil.copyfile(video, temporary)
         _ = temporary.replace(destination)
@@ -2364,10 +2416,13 @@ def _burn(
     renderer: SubtitleBurner,
     output_dir: Path,
     final_name: str = _FINAL_NAME,
+    mute_audio: bool = False,
 ) -> Path:
     destination = output_dir / final_name
     with _translated("quemado de subtítulos"):
-        return renderer.burn(video=video, subtitles=subtitles, destination=destination)
+        return renderer.burn(
+            video=video, subtitles=subtitles, destination=destination, mute_audio=mute_audio
+        )
 
 
 def _segment_words(transcript: Transcript, segment: Segment) -> tuple[Word, ...]:

@@ -212,8 +212,10 @@ class _FakeSubtitleRenderer(SubtitleBurner):
         return destination
 
     @override
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
-        _ = (video, subtitles)
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
+        _ = (video, subtitles, mute_audio)
         _ = destination.write_bytes(b"final_video_bytes")
         return destination
 
