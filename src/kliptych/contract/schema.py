@@ -271,20 +271,26 @@ class Contract(ContractBase):
 
     @model_validator(mode="after")
     def _audio_policy_compatible_with_mode(self) -> Self:
-        """Exige la matriz audio_rule × audio_policy a nivel de contrato.
+        """Exige la matriz audio_rule x audio_policy a nivel de contrato.
 
         Combinaciones válidas:
 
-        - ``official_required`` × ``internal_official_sound``: el render se
+        - ``official_required`` x ``internal_official_sound``: el render se
           silencia y el sonido oficial se añade al publicar.
-        - ``any`` / ``own_clip`` / ``no_trending`` × ``internal_official_sound``:
+        - ``any`` / ``own_clip`` / ``no_trending`` x ``internal_official_sound``:
           el mute aplica igual al publicar; la pista del render queda inaudible.
-        - Cualquier ``audio_rule`` × ``original_audio`` / ``any_audio`` / None:
+        - Cualquier ``audio_rule`` x ``original_audio`` / ``any_audio`` / None:
           se conserva el audio del render.
 
         El modo ``audio_locked`` inyecta una pista externa, lo contrario de
         silenciar: es incompatible con ``internal_official_sound`` (la pista
         externa también se rechaza en el orquestador).
+
+        Returns:
+            El contrato validado.
+
+        Raises:
+            ValueError: Si el modo inyecta audio externo con política de silencio.
         """
         if (
             self.mode is Mode.AUDIO_LOCKED
@@ -492,7 +498,7 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
     if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
     if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
-        active.append("audio.policy")
+        active.extend(("audio.policy", "audio.silence"))
     return active
 
 

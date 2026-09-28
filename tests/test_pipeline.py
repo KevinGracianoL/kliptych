@@ -42,6 +42,7 @@ from tests.support import (
     make_asset_draft,
     make_draft,
     make_media,
+    mock_silent_volumedetect,
 )
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -311,7 +312,11 @@ def test_pipeline_blocks_artifact_without_audio(tmp_path: Path) -> None:
     _assert_rejected_check(result, "audio.present")
 
 
-def test_given_clips_mutes_audio_for_internal_official_sound(tmp_path: Path) -> None:
+def test_given_clips_mutes_audio_for_internal_official_sound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # El artefacto es falso (bytes, no MP4): se simula la medición de silencio.
+    mock_silent_volumedetect(monkeypatch)
     _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
     draft = make_draft(
         audio_policy=candidate("internal_official_sound"),
