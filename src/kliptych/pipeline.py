@@ -6,7 +6,7 @@ el artefacto final y el exportador solo publica piezas que pasan: un caption
 sin la mención obligatoria queda rechazado y el paquete lo reporta.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -101,6 +101,7 @@ class RunRequest:
     approve_manual_review: bool = False
     approved_by: str | None = None
     contract_draft: ContractDraft | None = None
+    subtitle_texts: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +300,7 @@ def _assemble_pieces(
     gates: list[GateResult] = []
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
+    subtitle_texts = context.request.subtitle_texts or {}
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
             if asset.kind != _VIDEO_KIND:
@@ -315,7 +317,7 @@ def _assemble_pieces(
                 platform=platform,
                 caption=caption.caption,
                 hashtags=caption.hashtags,
-                subtitle_text=None,
+                subtitle_text=subtitle_texts.get(asset.asset_id),
                 artifact_path=artifact,
             )
             pieces.append(piece)
