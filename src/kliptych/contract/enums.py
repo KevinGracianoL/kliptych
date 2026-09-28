@@ -54,6 +54,18 @@ class AttributionType(StrEnum):
     NONE = "none"
 
 
+class WatermarkPosition(StrEnum):
+    """Zona del lienzo donde se superpone el watermark."""
+
+    CENTER_BOTTOM = "center_bottom"
+    CENTER_TOP = "center_top"
+    CENTER = "center"
+    TOP_RIGHT = "top_right"
+    TOP_LEFT = "top_left"
+    BOTTOM_RIGHT = "bottom_right"
+    BOTTOM_LEFT = "bottom_left"
+
+
 class RuleStrength(StrEnum):
     """Fuerza con la que el contrato clasifica cada regla."""
 

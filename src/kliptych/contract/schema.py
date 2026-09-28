@@ -12,7 +12,15 @@ from typing import Annotated, Literal, Self, cast
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
 from kliptych.contract.base import ContractBase
-from kliptych.contract.enums import AttributionType, AudioPolicy, AudioRule, Format, Mode, Platform
+from kliptych.contract.enums import (
+    AttributionType,
+    AudioPolicy,
+    AudioRule,
+    Format,
+    Mode,
+    Platform,
+    WatermarkPosition,
+)
 from kliptych.hashing import sha256_canonical_json
 from kliptych.naming import is_safe_segment
 
@@ -110,11 +118,22 @@ class OfficialAudio(ContractBase):
 
 
 class Watermark(ContractBase):
-    """Configuración de watermark de la campaña."""
+    """Configuración de watermark de la campaña.
+
+    ``position`` fija la zona del lienzo donde el ensamblado superpone el
+    PNG y donde el gate lo busca; ``scale_ratio`` es el ancho del watermark
+    relativo al ancho del video; ``opacity`` atenúa el PNG al componer; y
+    ``min_width_ratio`` es el ancho mínimo relativo que el gate acepta en
+    la detección (nunca mayor que ``scale_ratio``).
+    """
 
     required: bool
     asset_id: str | None = None
     visible_full_video: bool
+    position: WatermarkPosition = WatermarkPosition.TOP_RIGHT
+    scale_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    min_width_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @field_validator("asset_id")
     @classmethod
@@ -123,6 +142,19 @@ class Watermark(ContractBase):
             msg = "asset_id no es un segmento de ruta seguro"
             raise ValueError(msg)
         return asset_id
+
+    @model_validator(mode="after")
+    def _scale_covers_minimum_width(self) -> Self:
+        if self.scale_ratio < self.min_width_ratio:
+            msg = (
+                f"scale_ratio ({self.scale_ratio}) no puede ser menor que "
+                f"min_width_ratio ({self.min_width_ratio})"
+            )
+            raise ValueError(msg)
+        return self
+
+
+WatermarkConfig = Watermark
 
 
 class Segment(ContractBase):
@@ -443,6 +475,40 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
             del languages["language"]
     if contract.audio_policy is None:
         _ = dump.pop("audio_policy", None)
+    _prune_default_watermark_options(dump)
+
+
+_DEFAULT_WATERMARK_JSON: dict[str, object] = Watermark(
+    required=False, visible_full_video=False
+).model_dump(mode="json")
+
+_WATERMARK_TUNABLE_KEYS: tuple[str, ...] = (
+    "position",
+    "scale_ratio",
+    "opacity",
+    "min_width_ratio",
+)
+
+
+def _prune_default_watermark_options(dump: dict[str, object]) -> None:
+    """Elimina del dump los ajustes de watermark que conservan el valor por defecto.
+
+    Los campos de posición y tamaño (fase sprint 2) no existían en contratos
+    ya grabados: podarlos cuando valen lo mismo que el defecto mantiene el
+    digest estable entre versiones; al declararlos sí entran al digest e
+    invalidan la caché de ``--resume``.
+
+    Args:
+        dump: Volcado JSON del contrato cuyo digest se va a calcular; se
+            modifica en sitio.
+    """
+    raw = dump.get("watermark")
+    if not isinstance(raw, dict):
+        return
+    watermark = cast("dict[str, object]", raw)
+    for key in _WATERMARK_TUNABLE_KEYS:
+        if watermark.get(key) == _DEFAULT_WATERMARK_JSON.get(key):
+            _ = watermark.pop(key, None)
 
 
 def _platform_restriction_rules(

@@ -62,6 +62,7 @@ from kliptych.contract import (
     Segment,
     SourceEvidence,
     Watermark,
+    WatermarkPosition,
     active_restriction_rules,
 )
 from kliptych.contract.base import ContractBase
@@ -436,6 +437,10 @@ def _collect_global_conflicts(
         _note_conflict(draft.watermark.required, "watermark.required", issues)
         _note_conflict(draft.watermark.asset_id, "watermark.asset_id", issues)
         _note_conflict(draft.watermark.visible_full_video, "watermark.visible_full_video", issues)
+        _note_conflict(draft.watermark.position, "watermark.position", issues)
+        _note_conflict(draft.watermark.scale_ratio, "watermark.scale_ratio", issues)
+        _note_conflict(draft.watermark.opacity, "watermark.opacity", issues)
+        _note_conflict(draft.watermark.min_width_ratio, "watermark.min_width_ratio", issues)
     if draft.rules is not None:
         _note_conflict(draft.rules.hard, "rules.hard", issues)
         _note_conflict(draft.rules.recommended, "rules.recommended", issues)
@@ -583,13 +588,27 @@ def _resolve_languages(
 
 def _resolve_watermark(draft: ContractDraft) -> Watermark:
     watermark = draft.watermark
+    position = _value(watermark.position) if watermark is not None else None
     return Watermark(
         required=bool(_value(watermark.required)) if watermark is not None else False,
         asset_id=_value(watermark.asset_id) if watermark is not None else None,
         visible_full_video=(
             bool(_value(watermark.visible_full_video)) if watermark is not None else False
         ),
+        position=position if position is not None else WatermarkPosition.TOP_RIGHT,
+        scale_ratio=_resolve_ratio(
+            watermark.scale_ratio if watermark is not None else None, default=0.20
+        ),
+        opacity=_resolve_ratio(watermark.opacity if watermark is not None else None, default=1.0),
+        min_width_ratio=_resolve_ratio(
+            watermark.min_width_ratio if watermark is not None else None, default=0.05
+        ),
     )
+
+
+def _resolve_ratio(candidate: FieldCandidate[float] | None, *, default: float) -> float:
+    value = _value(candidate)
+    return default if value is None else value
 
 
 def _resolve_official_audio(

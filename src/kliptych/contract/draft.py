@@ -16,6 +16,7 @@ from kliptych.contract.enums import (
     Format,
     Mode,
     Platform,
+    WatermarkPosition,
 )
 from kliptych.contract.evidence import FieldCandidate
 
@@ -83,6 +84,10 @@ class WatermarkDraft(ContractBase):
     required: FieldCandidate[bool] | None = None
     asset_id: FieldCandidate[str] | None = None
     visible_full_video: FieldCandidate[bool] | None = None
+    position: FieldCandidate[WatermarkPosition] | None = None
+    scale_ratio: FieldCandidate[float] | None = None
+    opacity: FieldCandidate[float] | None = None
+    min_width_ratio: FieldCandidate[float] | None = None
 
 
 class SegmentDraft(ContractBase):
