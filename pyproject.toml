@@ -335,6 +335,17 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"tests/test_sprint2_watermark.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # el fondo texturizado vertical y el clip de 20 s bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # Los dobles de VideoCapture replican su API camelCase (isOpened/set/read)
+    # para cubrir las ramas fail-closed sin video real.
+    "invalid-function-name",
+    "no-self-use",
+]
 "tests/test_audio_silence.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el
     # fixture sintético y medir el silencio real (volumedetect).
