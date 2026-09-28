@@ -36,6 +36,9 @@ Catálogo de reglas que el contrato puede declarar:
   de token y comparación insensible a mayúsculas.
 - ``duration.min`` / ``duration.max``: duración dentro del rango; si no se
   pudo medir, el resultado es ``unsupported`` (jamás ``pass``).
+- ``hook.keyword``: la palabra clave de apertura aparece en subtítulos o
+  texto en pantalla con inicio <= 3.0 s; ausente o tardía es ``fail``. El
+  volumen de los primeros 3 s se adjunta como nota informativa.
 - ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
   y con locks declarados el resultado es ``unsupported``.
 - ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
@@ -58,6 +61,7 @@ from pathlib import Path
 from kliptych.assets import AssetError, AssetNotFoundError
 from kliptych.contract import AudioPolicy, AudioRule, Format
 from kliptych.gate.brand_safety import check_brand_safety
+from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 
@@ -75,6 +79,7 @@ __all__ = [
     "check_duration_min",
     "check_first_line",
     "check_forbidden_terms",
+    "check_hook_keyword",
     "check_required_assets",
     "check_required_hashtags",
     "check_required_mentions",
@@ -616,6 +621,7 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "caption.required_mention": check_required_mentions,
     "duration.max": check_duration_max,
     "duration.min": check_duration_min,
+    "hook.keyword": check_hook_keyword,
     "subtitles.spelling_lock": check_spelling_locks,
     "watermark.full_video": check_watermark_full_video,
     "watermark.present": check_watermark_present,

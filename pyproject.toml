@@ -166,6 +166,13 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"src/kliptych/gate/hook.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para medir el
+    # volumen de los primeros 3 s (volumedetect); el binario se resuelve del
+    # PATH, nunca de texto del LLM.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
 "src/kliptych/gate/brand_safety.py" = [
     # Frontera fail-closed: cualquier fallo del evaluador LLM (excepción,
     # timeout, respuesta inválida) se traduce a manual_review, nunca a pass;
@@ -347,6 +354,13 @@ ignore = [
     # para cubrir las ramas fail-closed sin video real.
     "invalid-function-name",
     "no-self-use",
+]
+"tests/test_sprint2_hook.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético con audio.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
 ]
 "tests/test_audio_silence.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el

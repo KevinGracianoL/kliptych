@@ -266,6 +266,18 @@ class GlobalRestrictions(ContractBase):
     spelling_locks: tuple[str, ...] = ()
     prohibitions: tuple[str, ...] = ()
     audio_policy: AudioPolicy | None = None
+    hook_keyword: str | None = None
+
+
+class UnmappedRule(ContractBase):
+    """Requisito del brief sin validador mecánico, con su cita textual.
+
+    El gate no puede verificarlo con código: lo marca ``manual_review``
+    con la cita para que un humano lo revise contra el brief original.
+    """
+
+    rule: str = Field(min_length=1)
+    quote: str = Field(min_length=1)
 
 
 class Contract(ContractBase):
@@ -288,6 +300,8 @@ class Contract(ContractBase):
     watermark: Watermark
     spelling_locks: list[str] = Field(default_factory=list)
     prohibitions: list[str] = Field(default_factory=list)
+    hook_keyword: str | None = Field(default=None, min_length=1, max_length=140)
+    unmapped: tuple[UnmappedRule, ...] = ()
     rules: RuleSet
     assets: AssetBundle
     segments: tuple[Segment, ...] = ()
@@ -301,6 +315,14 @@ class Contract(ContractBase):
             msg = "mode 'slideshow' y format 'slideshow' deben aparecer juntos"
             raise ValueError(msg)
         return self
+
+    @field_validator("hook_keyword")
+    @classmethod
+    def _hook_keyword_is_meaningful(cls, hook_keyword: str | None) -> str | None:
+        if hook_keyword is not None and not hook_keyword.strip():
+            msg = "hook_keyword no puede ser vacío o solo espacios"
+            raise ValueError(msg)
+        return hook_keyword
 
     @model_validator(mode="after")
     def _audio_policy_compatible_with_mode(self) -> Self:
@@ -356,6 +378,7 @@ class Contract(ContractBase):
             spelling_locks=tuple(self.spelling_locks),
             prohibitions=tuple(self.prohibitions),
             audio_policy=self.audio_policy,
+            hook_keyword=self.hook_keyword,
         )
         aliases: dict[str, tuple[str, ...]] = {
             "audio.official_track": (
@@ -476,6 +499,10 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
             del languages["language"]
     if contract.audio_policy is None:
         _ = dump.pop("audio_policy", None)
+    if contract.hook_keyword is None:
+        _ = dump.pop("hook_keyword", None)
+    if not contract.unmapped:
+        _ = dump.pop("unmapped", None)
     _prune_default_watermark_options(dump)
 
 
@@ -564,6 +591,8 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
         active.append(watermark_rule)
     if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
+    if global_restrictions.hook_keyword:
+        active.append("hook.keyword")
     if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
         active.extend(("audio.policy", "audio.silence"))
     return active

@@ -111,13 +111,20 @@ class Gate:
     def _run_rule(self, rule_id: str, strength: RuleStrength, context: GateContext) -> CheckResult:
         validator = self._validators.get(rule_id)
         if validator is None:
+            citations = [
+                unmapped.quote for unmapped in context.contract.unmapped if unmapped.rule == rule_id
+            ]
             status = (
                 CheckStatus.MANUAL_REVIEW
-                if strength is RuleStrength.MANUAL_REVIEW
+                if strength is RuleStrength.MANUAL_REVIEW or bool(citations)
                 else CheckStatus.UNSUPPORTED
             )
-            reason = "no hay validador mecánico registrado para esta regla"
-            return CheckResult(id=rule_id, status=status, evidence={"reason": reason})
+            evidence: dict[str, object] = {
+                "reason": "no hay validador mecánico registrado para esta regla"
+            }
+            if citations:
+                evidence["citations"] = citations
+            return CheckResult(id=rule_id, status=status, evidence=evidence)
         outcome = validator(context)
         return CheckResult(id=rule_id, status=outcome.status, evidence=outcome.evidence)
 
