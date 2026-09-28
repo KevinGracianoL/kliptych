@@ -118,6 +118,7 @@ def _word(start: float, end: float, text: str, probability: float = 0.9) -> Fake
 def test_default_constructor_uses_small_int8(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("KLIPTYCH_WHISPER_MODEL", raising=False)
     engine = _install_engine(monkeypatch, FakeEngine(words=[_word(0.0, 0.5, " hola")]))
     transcriber = FasterWhisperTranscriber()
     _ = transcriber.transcribe(_audio(tmp_path))
