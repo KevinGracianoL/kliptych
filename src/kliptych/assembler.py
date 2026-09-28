@@ -15,6 +15,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from kliptych.encoding import muted_audio_arguments
+
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
 _DEFAULT_TIMEOUT_S = 300.0
@@ -52,6 +54,7 @@ class FFmpegAssembler:
         watermark: Path | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
+        mute_audio: bool = False,
     ) -> Path:
         """Ensambla un clip entregado en una pieza vertical para el gate.
 
@@ -67,6 +70,8 @@ class FFmpegAssembler:
                 derecha durante todo el video.
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
+            mute_audio: Si es True, silencia la pista sin eliminarla
+                (``audio_policy=internal_official_sound``).
 
         Returns:
             La ruta del artefacto ensamblado.
@@ -94,6 +99,7 @@ class FFmpegAssembler:
             watermark=watermark,
             width=width,
             height=height,
+            mute_audio=mute_audio,
         )
         try:
             completed = subprocess.run(
@@ -135,6 +141,7 @@ class FFmpegAssembler:
         watermark: Path | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
         """Devuelve el argv de ffmpeg que se usaría para este ensamblado.
 
@@ -147,6 +154,7 @@ class FFmpegAssembler:
             watermark: Imagen opcional a superponer.
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
+            mute_audio: Si es True, la receta incluye el silenciado de audio.
 
         Returns:
             El argv completo de ffmpeg, como tupla inmutable.
@@ -158,6 +166,7 @@ class FFmpegAssembler:
                 watermark=watermark,
                 width=width,
                 height=height,
+                mute_audio=mute_audio,
             )
         )
 
@@ -169,6 +178,7 @@ class FFmpegAssembler:
         watermark: Path | None,
         width: int,
         height: int,
+        mute_audio: bool,
     ) -> list[str]:
         square = "scale=trunc(iw*sar/2)*2:ih,setsar=1"
         scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
@@ -198,6 +208,8 @@ class FFmpegAssembler:
                 "-map",
                 "0:a?",
             ]
+        if mute_audio:
+            argv += list(muted_audio_arguments())
         argv += [
             "-c:v",
             "libx264",

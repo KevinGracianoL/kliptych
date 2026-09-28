@@ -282,6 +282,7 @@ def _build_contract(
                 has_required_assets=bool(assets.required),
                 spelling_locks=tuple(spelling_locks),
                 prohibitions=tuple(prohibitions),
+                audio_policy=_value(draft.audio_policy),
             ),
         ),
         issues=issues,
@@ -298,6 +299,7 @@ def _build_contract(
         platforms=platforms,
         languages=languages,
         official_audio=official_audio,
+        audio_policy=_value(draft.audio_policy),
         watermark=watermark,
         spelling_locks=spelling_locks,
         prohibitions=prohibitions,
@@ -418,6 +420,7 @@ def _collect_global_conflicts(
     if draft.languages is not None:
         _note_conflict(draft.languages.subtitles, "languages.subtitles", issues)
         _note_conflict(draft.languages.voice, "languages.voice", issues)
+        _note_conflict(draft.languages.language, "languages.language", issues)
     if draft.official_audio is not None:
         _note_conflict(draft.official_audio.tiktok_url, "official_audio.tiktok_url", issues)
         _note_conflict(draft.official_audio.instagram_url, "official_audio.instagram_url", issues)
@@ -566,6 +569,7 @@ def _resolve_languages(
         subtitles=_value(languages.subtitles),
         caption=caption,
         voice=_value(languages.voice),
+        language=_value(languages.language),
     )
 
 
@@ -843,6 +847,7 @@ _MANUAL_REVIEW_DEFAULTS: frozenset[str] = frozenset(
         "audio.rule",
         "audio.own_clip",
         "audio.no_trending",
+        "audio.policy",
         "attribution.required",
         "attribution.present",
         "link.in_bio",

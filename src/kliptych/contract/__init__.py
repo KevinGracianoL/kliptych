@@ -19,6 +19,7 @@ from kliptych.contract.draft import (
 )
 from kliptych.contract.enums import (
     AttributionType,
+    AudioPolicy,
     AudioRule,
     Format,
     Mode,
@@ -47,6 +48,8 @@ from kliptych.contract.schema import (
     Watermark,
     active_restriction_rules,
     contract_digest,
+    contract_mutes_audio,
+    prompt_languages,
 )
 
 __all__ = [
@@ -58,6 +61,7 @@ __all__ = [
     "Attribution",
     "AttributionDraft",
     "AttributionType",
+    "AudioPolicy",
     "AudioRule",
     "CaptionRules",
     "CaptionRulesDraft",
@@ -94,4 +98,6 @@ __all__ = [
     "WatermarkDraft",
     "active_restriction_rules",
     "contract_digest",
+    "contract_mutes_audio",
+    "prompt_languages",
 ]

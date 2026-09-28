@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
+    muted_audio_arguments,
     run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
@@ -175,7 +176,9 @@ class SubtitleRenderer:
             raise SubtitleError(msg) from error
         return destination
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
         """Quema los subtítulos en el video.
 
         El render ocurre en un temporal hermano y se publica con un reemplazo
@@ -187,6 +190,8 @@ class SubtitleRenderer:
             subtitles: Ruta del archivo ``.ass`` a quemar.
             destination: Ruta del artefacto final; se crean los directorios
                 padre que falten.
+            mute_audio: Si es True, silencia la pista sin eliminarla
+                (``audio_policy=internal_official_sound``).
 
         Returns:
             La ruta del artefacto con subtítulos quemados.
@@ -203,7 +208,9 @@ class SubtitleRenderer:
             msg = f"no se pudo preparar el directorio del destino {destination}: {error}"
             raise SubtitleError(msg) from error
         temporary = _temporary_path(destination)
-        argv = self._build_argv(video=video, subtitles=subtitles, destination=temporary)
+        argv = self._build_argv(
+            video=video, subtitles=subtitles, destination=temporary, mute_audio=mute_audio
+        )
         _run_ffmpeg(argv, temporary=temporary, render=self._render, cwd=destination.parent)
         try:
             _ = temporary.replace(destination)
@@ -219,6 +226,7 @@ class SubtitleRenderer:
         video: Path,
         subtitles: Path,
         destination: Path,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
         """Devuelve el argv de ffmpeg que se usaría para este quemado.
 
@@ -229,13 +237,20 @@ class SubtitleRenderer:
             video: Ruta del video fuente.
             subtitles: Ruta del archivo ``.ass``.
             destination: Ruta final del artefacto.
+            mute_audio: Si es True, la receta incluye el silenciado de audio.
 
         Returns:
             El argv completo de ffmpeg, como tupla inmutable.
         """
-        return tuple(self._build_argv(video=video, subtitles=subtitles, destination=destination))
+        return tuple(
+            self._build_argv(
+                video=video, subtitles=subtitles, destination=destination, mute_audio=mute_audio
+            )
+        )
 
-    def _build_argv(self, *, video: Path, subtitles: Path, destination: Path) -> list[str]:
+    def _build_argv(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool
+    ) -> list[str]:
         video_resolved = video.resolve()
         destination_resolved = destination.resolve()
         filter_graph = (
@@ -257,6 +272,8 @@ class SubtitleRenderer:
             "-map",
             "0:a?",
         ]
+        if mute_audio:
+            argv += list(muted_audio_arguments())
         argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
         argv += list(audio_and_container_arguments())
         argv.append(str(destination_resolved))

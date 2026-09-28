@@ -38,6 +38,14 @@ class AudioRule(StrEnum):
     ANY = "any"
 
 
+class AudioPolicy(StrEnum):
+    """Política de audio de la campaña."""
+
+    INTERNAL_OFFICIAL_SOUND = "internal_official_sound"
+    ORIGINAL_AUDIO = "original_audio"
+    ANY_AUDIO = "any_audio"
+
+
 class AttributionType(StrEnum):
     """Tipo de atribución requerida."""
 

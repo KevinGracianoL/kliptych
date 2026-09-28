@@ -61,6 +61,20 @@ def audio_and_container_arguments() -> tuple[str, ...]:
     return ("-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart")
 
 
+def muted_audio_arguments() -> tuple[str, ...]:
+    """Devuelve el filtro que silencia la pista sin eliminarla.
+
+    El filtro ``volume=0`` deja la pista de audio presente en el contenedor
+    (``ffprobe`` y las plataformas la siguen viendo) pero a silencio digital.
+    Es seguro con ``-map 0:a?`` ante entradas sin audio: ffmpeg lo ignora sin
+    error. Vale para ``libx264`` y ``h264_nvenc`` (solo toca el audio).
+
+    Returns:
+        Los argumentos de ffmpeg para silenciar el audio.
+    """
+    return ("-af", "volume=0")
+
+
 def audio_injection_arguments(
     *,
     mix_ratio: float,

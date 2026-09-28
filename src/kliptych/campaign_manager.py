@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from kliptych.campaign_types import CampaignStatus
 from kliptych.intelligence import Archetype
+from kliptych.subtitle_text import PieceSubtitleSources, piece_subtitle_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -371,6 +372,9 @@ class CampaignManager:
             caption=caption,
             hashtags=hashtags,
             platform=platform,
+            subtitle_sources=(
+                _subtitle_sources(pipeline_result) if pipeline_result is not None else None
+            ),
         )
         delivery_report = export_delivery(
             contract=contract,
@@ -510,6 +514,28 @@ def _piece_id(
     return raw[:_MAX_PIECE_ID_LENGTH] if len(raw) > _MAX_PIECE_ID_LENGTH else raw
 
 
+def _subtitle_sources(result: PipelineResult) -> PieceSubtitleSources:
+    """Deriva las fuentes de subtítulos de un resultado del motor de video.
+
+    El texto por pieza se recorta al segmento correspondiente; en ``--resume``
+    la transcripción en memoria puede faltar y el texto se hidrata desde
+    ``transcript.json`` o el ``.ass`` persistidos junto a la fuente.
+
+    Args:
+        result: Resultado del pipeline long_video con transcripción,
+            selección, subtítulos y fuente.
+
+    Returns:
+        Las fuentes alineadas por índice con los videos finales.
+    """
+    return PieceSubtitleSources(
+        transcript=result.transcript,
+        segments=tuple(result.selection.segments),
+        subtitles_path=result.subtitles,
+        work_dir=result.source.parent,
+    )
+
+
 def _build_pieces(
     *,
     campaign: Campaign,
@@ -519,6 +545,7 @@ def _build_pieces(
     caption: str | None,
     hashtags: Sequence[str],
     platform: Platform | None,
+    subtitle_sources: PieceSubtitleSources | None = None,
 ) -> list[Piece]:
     from kliptych.gate.models import Piece
 
@@ -536,6 +563,7 @@ def _build_pieces(
     pieces: list[Piece] = []
     for vid_idx, video in enumerate(videos):
         index_for_id = vid_idx if multiple_videos else None
+        subtitle_text = piece_subtitle_text(subtitle_sources, index=vid_idx, total=len(videos))
         for plat in platforms:
             plat_rules = contract.platforms[plat]
             piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
@@ -551,7 +579,7 @@ def _build_pieces(
                     platform=plat,
                     caption=piece_caption,
                     hashtags=piece_tags,
-                    subtitle_text=None,
+                    subtitle_text=subtitle_text,
                     artifact_path=video,
                 )
             )

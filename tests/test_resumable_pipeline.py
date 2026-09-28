@@ -9,7 +9,7 @@ puros se eliminen deterministamente.
 import os
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast, override
@@ -21,7 +21,7 @@ from kliptych.__main__ import main
 from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
-from kliptych.contract import Contract, Segment
+from kliptych.contract import AudioPolicy, Contract, Segment
 from kliptych.encoding import RenderConfig
 from kliptych.gate import Gate
 from kliptych.gc import clean_temporary_directories
@@ -149,6 +149,7 @@ class _CallCounter:
     select_calls: int = 0
     reframe_calls: int = 0
     subtitles_calls: int = 0
+    burn_mutes: list[bool] = field(default_factory=list)
 
     download_error: Exception | None = None
     transcribe_error: Exception | None = None
@@ -265,8 +266,11 @@ class _TrackedSubtitleRenderer:
         _ = destination.write_text("Dialogue: 0,0:00:00.00,0:00:01.00", encoding="utf-8")
         return destination
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
         _ = (self, video, subtitles)
+        self._counter.burn_mutes.append(mute_audio)
         _ = destination.write_bytes(b"final_video_bytes")
         return destination
 
@@ -1005,6 +1009,44 @@ def test_resume_invalidates_cache_on_fingerprint_mismatch(
     mgr2 = PipelineStateManager.load(config.output_dir)
     assert mgr2.checkpoint.input_fingerprint != initial_fp
     assert counter.download_calls == 2
+
+
+def _muted_contract() -> Contract:
+    base = _contract()
+    rules = base.rules.model_copy(
+        update={"manual_review": [*base.rules.manual_review, "audio.policy"]}
+    )
+    return base.model_copy(
+        update={"audio_policy": AudioPolicy.INTERNAL_OFFICIAL_SOUND, "rules": rules}
+    )
+
+
+def test_resume_regenerates_muted_final_after_policy_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # 1. Primera ejecución limpia con audio audible.
+    result1 = _run(config, deps, resume=False)
+    assert isinstance(result1, PipelineResult)
+    assert counter.burn_mutes == [False]
+
+    mgr1 = PipelineStateManager.load(config.output_dir)
+    initial_fp = mgr1.checkpoint.input_fingerprint
+    assert initial_fp is not None
+    assert mgr1.is_done(PipelineStage.COMPLETED)
+
+    # 2. La campaña cambia su política a sonido oficial interno.
+    muted_config = replace(config, contract=_muted_contract())
+
+    # 3. Reanudar invalida el checkpoint previo y regenera el final silenciado.
+    result2 = _run(muted_config, deps, resume=True)
+    assert isinstance(result2, PipelineResult)
+    mgr2 = PipelineStateManager.load(config.output_dir)
+    assert mgr2.checkpoint.input_fingerprint != initial_fp
+    assert counter.download_calls == 2
+    assert counter.burn_mutes == [False, True]
 
 
 def test_resume_invalidates_cache_when_audio_file_content_changes(

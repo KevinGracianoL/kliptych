@@ -7,12 +7,12 @@ prohibida en el resto.
 
 import math
 from collections.abc import Sequence
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
 from kliptych.contract.base import ContractBase
-from kliptych.contract.enums import AttributionType, AudioRule, Format, Mode, Platform
+from kliptych.contract.enums import AttributionType, AudioPolicy, AudioRule, Format, Mode, Platform
 from kliptych.hashing import sha256_canonical_json
 from kliptych.naming import is_safe_segment
 
@@ -85,6 +85,14 @@ class Languages(ContractBase):
     subtitles: str | None = None
     caption: str = Field(min_length=1)
     voice: str | None = None
+    language: str | None = Field(
+        default=None,
+        pattern=r"^[a-z]{2,3}(-[a-z]{2})?$",
+        description=(
+            "Locale explícito de transcripción (p. ej. 'es', 'en', 'pt-br'); "
+            "None conserva la autodetección histórica de faster-whisper"
+        ),
+    )
 
 
 class OfficialAudio(ContractBase):
@@ -224,6 +232,7 @@ class GlobalRestrictions(ContractBase):
     has_required_assets: bool = False
     spelling_locks: tuple[str, ...] = ()
     prohibitions: tuple[str, ...] = ()
+    audio_policy: AudioPolicy | None = None
 
 
 class Contract(ContractBase):
@@ -236,6 +245,13 @@ class Contract(ContractBase):
     platforms: dict[Platform, PlatformRules] = Field(min_length=1)
     languages: Languages
     official_audio: OfficialAudio | None = None
+    audio_policy: AudioPolicy | None = Field(
+        default=None,
+        description=(
+            "Política de audio de la campaña; 'internal_official_sound' activa "
+            "la regla 'audio.policy' (revisión manual obligatoria)"
+        ),
+    )
     watermark: Watermark
     spelling_locks: list[str] = Field(default_factory=list)
     prohibitions: list[str] = Field(default_factory=list)
@@ -272,6 +288,7 @@ class Contract(ContractBase):
             has_required_assets=bool(self.assets.required),
             spelling_locks=tuple(self.spelling_locks),
             prohibitions=tuple(self.prohibitions),
+            audio_policy=self.audio_policy,
         )
         aliases: dict[str, tuple[str, ...]] = {
             "audio.official_track": (
@@ -318,11 +335,51 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 }
 
 
+def prompt_languages(contract: Contract) -> dict[str, object]:
+    """Idiomas del contrato para prompts de LLM, sin el locale de transcripción.
+
+    ``languages.language`` es un ajuste del motor de transcripción, no contexto
+    de redacción ni de selección (el prompt de segmentos ya lleva el idioma
+    detectado en la transcripción): excluirlo mantiene estables las claves de
+    replay de captions grabados y los prompts ya fijados.
+
+    Args:
+        contract: Contrato validado.
+
+    Returns:
+        El volcado de idiomas sin la clave ``language``.
+    """
+    dump = contract.languages.model_dump(mode="json")
+    if "language" in dump:
+        del dump["language"]
+    return dump
+
+
+def contract_mutes_audio(contract: Contract) -> bool:
+    """Indica si el contrato exige silenciar el render final de cada pieza.
+
+    Solo ``audio_policy=internal_official_sound`` silencia: el sonido oficial
+    se añade en la publicación y el MP4 debe llevar la pista presente pero en
+    silencio digital. Las demás políticas (o su ausencia) conservan el audio.
+
+    Args:
+        contract: Contrato validado de la campaña.
+
+    Returns:
+        True si el render final debe aplicar el filtro de silenciado.
+    """
+    return contract.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND
+
+
 def contract_digest(contract: Contract) -> str:
     """Calcula el hash canónico del contrato lógico.
 
     Excluye metadatos volátiles de resolución (``resolved_at`` de los assets):
-    el mismo contrato resuelto dos veces produce el mismo digest.
+    el mismo contrato resuelto dos veces produce el mismo digest. Los
+    opcionales añadidos tras v1.1 (``languages.language``, ``audio_policy``)
+    se excluyen cuando no se declaran, para no mover el hash de contratos ya
+    grabados; al declararlos sí entran al digest e invalidan la caché de
+    ``--resume``.
 
     Args:
         contract: Contrato validado.
@@ -330,9 +387,28 @@ def contract_digest(contract: Contract) -> str:
     Returns:
         El digest sha256 en hexadecimal.
     """
-    return sha256_canonical_json(
-        contract.model_dump(mode="json", exclude=_VOLATILE_RESOLUTION_FIELDS)
-    )
+    dump: dict[str, object] = contract.model_dump(mode="json", exclude=_VOLATILE_RESOLUTION_FIELDS)
+    _prune_unset_options(contract, dump)
+    return sha256_canonical_json(dump)
+
+
+def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
+    """Elimina del dump los opcionales no declarados.
+
+    El modelo dice qué se declaró; el dump solo se poda en lo mecánico para
+    no mover el hash de contratos ya grabados.
+
+    Args:
+        contract: Contrato validado que indica los opcionales declarados.
+        dump: Volcado JSON del contrato cuyo digest se va a calcular; se
+            modifica en sitio.
+    """
+    if contract.languages.language is None:
+        languages = cast("dict[str, object]", dump["languages"])
+        if "language" in languages:
+            del languages["language"]
+    if contract.audio_policy is None:
+        _ = dump.pop("audio_policy", None)
 
 
 def _platform_restriction_rules(
@@ -387,6 +463,8 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
         active.append(watermark_rule)
     if global_restrictions.spelling_locks:
         active.append("subtitles.spelling_lock")
+    if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
+        active.append("audio.policy")
     return active
 
 

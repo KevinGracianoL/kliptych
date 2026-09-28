@@ -152,20 +152,34 @@ class _StubAssembler(PieceAssembler):
 
     def __init__(self) -> None:
         self.watermarks: list[Path | None] = []
+        self.mutes: list[bool] = []
 
     @override
-    def assemble(self, *, clip: Path, destination: Path, watermark: Path | None) -> Path:
+    def assemble(
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
+    ) -> Path:
         _ = clip
         self.watermarks.append(watermark)
+        self.mutes.append(mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         return destination
 
     @override
     def render_arguments(
-        self, *, clip: Path, destination: Path, watermark: Path | None
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None,
+        mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = watermark
+        _ = (watermark, mute_audio)
         return ("ffmpeg", str(clip), str(destination))
 
 
@@ -199,6 +213,8 @@ def _unit_request(
     registry: AssetRegistry | None = None,
     run_id: str | None = None,
     brief_path: Path | None = None,
+    approve_manual_review: bool = False,
+    approved_by: str | None = None,
 ) -> RunRequest:
     content = brief if brief.startswith("cita del brief") else f"cita del brief\n{brief}"
     return RunRequest(
@@ -213,6 +229,8 @@ def _unit_request(
         gate=gate,
         registry=registry,
         brief_path=brief_path,
+        approve_manual_review=approve_manual_review,
+        approved_by=approved_by,
     )
 
 
@@ -291,6 +309,54 @@ def test_pipeline_blocks_artifact_without_audio(tmp_path: Path) -> None:
     result = _run("given-clips", tmp_path)
     assert result.outcome is RunOutcome.BLOCKED
     _assert_rejected_check(result, "audio.present")
+
+
+def test_given_clips_mutes_audio_for_internal_official_sound(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        audio_policy=candidate("internal_official_sound"),
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    assembler = _StubAssembler()
+    request = _unit_request(
+        tmp_path,
+        brief="brief con sonido oficial interno",
+        assembler=assembler,
+        gate=Gate(FakeProbe(info=make_media())),
+        run_id="run-internal-sound",
+    )
+    model = _StaticModel(draft, _caption())
+    blocked = run_given_clips(model=model, settings=Settings.from_root(tmp_path), request=request)
+    assert assembler.mutes == [True]
+    assert blocked.delivery is not None
+    assert blocked.delivery.status is ExportStatus.BLOCKED
+    manifest = _json(Path(blocked.manifest_path))
+    gates = cast("list[dict[str, object]]", manifest["gates"])
+    assert gates[0]["status"] == "pending_review"
+    checks = cast("list[dict[str, object]]", gates[0]["checks"])
+    policy = [check for check in checks if check["id"] == "audio.policy"]
+    assert len(policy) == 1
+    assert policy[0]["status"] == "manual_review"
+
+    approved_request = _unit_request(
+        tmp_path,
+        brief="brief con sonido oficial interno",
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+        run_id="run-internal-sound-approved",
+        approve_manual_review=True,
+        approved_by="operador-01",
+    )
+    approved = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=approved_request,
+    )
+    assert approved.outcome is RunOutcome.EXPORTED
+    assert approved.delivery is not None
+    assert approved.delivery.status is ExportStatus.EXPORTED
+    assert approved.delivery.manually_approved_rules == ("audio.policy",)
+    assert approved.delivery.approved_by == "operador-01"
 
 
 def test_pipeline_requires_video_assets(tmp_path: Path) -> None:

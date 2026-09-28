@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kliptych.contract import AssetRef, Contract, ContractDraft, Platform
+from kliptych.contract import AssetRef, AudioPolicy, Contract, ContractDraft, Platform
 from kliptych.gate import MediaInfo, Piece, ProbeError
 
 ALL_HARD_RULES = (
@@ -112,6 +112,8 @@ def make_contract(
     watermark_required: bool = False,
     watermark_visible_full_video: bool = False,
     audio_rule: str = "own_clip",
+    language: str | None = None,
+    audio_policy: AudioPolicy | None = None,
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
@@ -120,6 +122,9 @@ def make_contract(
     if audio_rule_id is not None and audio_rule_id not in classified:
         manual.append(audio_rule_id)
         classified.add(audio_rule_id)
+    if audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND and "audio.policy" not in classified:
+        manual.append("audio.policy")
+        classified.add("audio.policy")
     for rule_id in _active_rule_ids(
         min_s=min_s,
         max_s=max_s,
@@ -135,7 +140,10 @@ def make_contract(
         watermark_visible_full_video=watermark_visible_full_video,
     ):
         if rule_id not in classified:
-            plan.append(rule_id)
+            if rule_id == "audio.policy":
+                manual.append(rule_id)
+            else:
+                plan.append(rule_id)
             classified.add(rule_id)
     return Contract.model_validate(
         {
@@ -158,7 +166,13 @@ def make_contract(
                     "link_rules": {"link_in_bio": False},
                 }
             },
-            "languages": {"source": "es", "subtitles": None, "caption": "es", "voice": None},
+            "languages": {
+                "source": "es",
+                "subtitles": None,
+                "caption": "es",
+                "voice": None,
+                "language": language,
+            },
             "official_audio": None,
             "watermark": {
                 "required": watermark_required,
@@ -167,6 +181,7 @@ def make_contract(
             },
             "spelling_locks": list(spelling_locks),
             "prohibitions": list(prohibitions),
+            "audio_policy": audio_policy,
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),

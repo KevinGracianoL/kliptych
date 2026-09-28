@@ -303,8 +303,10 @@ class _FakeSubtitleRenderer:
         _ = destination.write_text("ass", encoding="utf-8")
         return destination
 
-    def burn(self, *, video: Path, subtitles: Path, destination: Path) -> Path:
-        _ = (video, subtitles)
+    def burn(
+        self, *, video: Path, subtitles: Path, destination: Path, mute_audio: bool = False
+    ) -> Path:
+        _ = (video, subtitles, mute_audio)
         self._events.append("burn")
         if self._burn_error is not None:
             raise self._burn_error
