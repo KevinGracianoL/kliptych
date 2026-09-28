@@ -19,8 +19,13 @@ Catálogo de reglas que el contrato puede declarar:
   pista se rechaza sin medir; con exactamente 1 pista se mide con
   ``-map 0:a:0``.
 - ``caption.first_line``: el caption abre con la primera línea exigida.
-- ``caption.forbidden``: no aparecen términos prohibidos en el caption
-  (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
+- ``caption.forbidden``: no aparecen términos prohibidos en lo publicado
+  por la cuenta (caption y hashtags, unión de ``caption_rules.forbidden``
+  y ``prohibitions`` de la campaña) ni en lo dicho por el streamer
+  (``subtitle_text`` de Whisper). La comparación normaliza (NFKD sin
+  diacríticos + casefold) y exige frontera de palabra sobre la frase
+  escapada (``re.escape``). La autoría decide el veredicto: coincidencia
+  en lo publicado → ``fail``; solo en lo dicho → ``manual_review``.
 - ``caption.required_hashtag``: están los hashtags obligatorios, con frontera
   de token y comparación insensible a mayúsculas.
 - ``caption.required_mention``: están las menciones obligatorias, con frontera
@@ -42,6 +47,7 @@ Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 import re
 import shutil
 import subprocess
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 
@@ -448,25 +454,53 @@ def check_required_hashtags(context: GateContext) -> CheckOutcome:
 
 
 def check_forbidden_terms(context: GateContext) -> CheckOutcome:
-    """Verifica que no aparezcan términos prohibidos en caption ni hashtags.
+    """Verifica que no aparezcan términos prohibidos, con autoría separada.
+
+    Lo publicado por la cuenta (caption y hashtags) falla el gate; lo
+    dicho por el streamer (``subtitle_text`` de Whisper) exige revisión
+    humana: el texto del directo no lo redacta la campaña y un falso
+    positivo no debe rechazar la pieza en silencio.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si no aparece ningún término de ``caption_rules.forbidden`` ni
-        de las ``prohibitions`` de la campaña en el caption ni en los
-        hashtags; FAIL con los encontrados.
+        FAIL si algún término de ``caption_rules.forbidden`` o de las
+        ``prohibitions`` aparece en caption o hashtags; MANUAL_REVIEW si
+        solo aparece en ``subtitle_text``; PASS en caso contrario.
     """
-    haystack = "\n".join((context.piece.caption, *context.piece.hashtags)).lower()
     forbidden = list(
         dict.fromkeys([*context.rules.caption_rules.forbidden, *context.contract.prohibitions])
     )
-    found = [term for term in forbidden if term.lower() in haystack]
-    evidence: dict[str, object] = {"forbidden": forbidden, "found": found}
+    published = "\n".join((context.piece.caption, *context.piece.hashtags))
+    spoken = context.piece.subtitle_text or ""
+    found_published = [term for term in forbidden if _contains_forbidden_term(published, term)]
+    found_spoken = [
+        term
+        for term in forbidden
+        if term not in found_published and _contains_forbidden_term(spoken, term)
+    ]
+    if found_published:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "forbidden": forbidden,
+                "found": found_published,
+                "authorship": "published",
+            },
+        )
+    if found_spoken:
+        return CheckOutcome(
+            status=CheckStatus.MANUAL_REVIEW,
+            evidence={
+                "forbidden": forbidden,
+                "found": found_spoken,
+                "authorship": "spoken",
+            },
+        )
     return CheckOutcome(
-        status=CheckStatus.FAIL if found else CheckStatus.PASS,
-        evidence=evidence,
+        status=CheckStatus.PASS,
+        evidence={"forbidden": forbidden, "found": [], "authorship": "none"},
     )
 
 
@@ -601,6 +635,47 @@ def _duration_outcome(context: GateContext, bound: int | None, *, minimum: bool)
 def _contains_mention(caption: str, mention: str) -> bool:
     pattern = rf"(?<![\w@]){re.escape(mention)}(?!\w)"
     return re.search(pattern, caption, flags=re.IGNORECASE) is not None
+
+
+def _contains_forbidden_term(haystack: str, term: str) -> bool:
+    """Indica si una frase prohibida aparece con frontera de palabra.
+
+    Ambos lados se normalizan (NFKD sin diacríticos + casefold) para que
+    "¡ACTÍVA LA RACHA!" case con "¡activa la racha!"; la frase se escapa
+    con ``re.escape`` para que sus caracteres especiales ($, paréntesis)
+    casen literales, y se exige frontera no-alfanumérica para que "sorteo"
+    no case con "sorteos" ni "win $10" con "win $100".
+
+    Args:
+        haystack: Texto donde buscar (ya incluye caption/hashtags o
+            subtítulos, según la autoría evaluada).
+        term: Frase prohibida tal como la declara el contrato.
+
+    Returns:
+        True si la frase normalizada aparece con fronteras de palabra.
+    """
+    needle = _normalize_forbidden(term)
+    if not needle.strip():
+        return False
+    pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
+    return re.search(pattern, _normalize_forbidden(haystack)) is not None
+
+
+def _normalize_forbidden(text: str) -> str:
+    """Normaliza un texto para comparar frases prohibidas.
+
+    Descompone con NFKD, elimina diacríticos y pliega a minúsculas: así
+    "SORTEO", "sorteo" y "sórteo" casan con la misma frase del contrato
+    sin falsos negativos por mayúsculas o tildes.
+
+    Args:
+        text: Texto crudo (frase del contrato o texto de la pieza).
+
+    Returns:
+        El texto normalizado para búsqueda de frases.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char)).casefold()
 
 
 def _contains_hashtag(caption: str, tag: str) -> bool:
