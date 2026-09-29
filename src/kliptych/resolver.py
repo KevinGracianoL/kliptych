@@ -61,6 +61,7 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    UnmappedRule,
     Watermark,
     WatermarkPosition,
     active_restriction_rules,
@@ -277,6 +278,8 @@ def _build_contract(
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
     official_audio = _resolve_official_audio(draft, platforms, issues)
+    hook_keyword = _value(draft.hook_keyword)
+    unmapped = _resolve_unmapped(draft, issues)
     segments = _resolve_segments(draft, mode, issues)
     rules = _resolve_rules(
         draft,
@@ -290,9 +293,11 @@ def _build_contract(
                 spelling_locks=tuple(spelling_locks),
                 prohibitions=tuple(prohibitions),
                 audio_policy=_value(draft.audio_policy),
+                hook_keyword=hook_keyword,
             ),
             brief_text=brief_text,
         ),
+        unmapped=unmapped,
         issues=issues,
     )
     geo_target = _resolve_geo_target(draft, issues)
@@ -311,6 +316,8 @@ def _build_contract(
         watermark=watermark,
         spelling_locks=spelling_locks,
         prohibitions=prohibitions,
+        hook_keyword=hook_keyword,
+        unmapped=unmapped,
         rules=rules,
         assets=assets,
         segments=segments,
@@ -320,6 +327,27 @@ def _build_contract(
             value=bool(_value(draft.analytics_proof_required))
         ),
     )
+
+
+def _resolve_unmapped(
+    draft: ContractDraft,
+    issues: list[ResolutionIssue],
+) -> tuple[UnmappedRule, ...]:
+    resolved: list[UnmappedRule] = []
+    for index, item in enumerate(draft.unmapped):
+        rule = _value(item.rule)
+        quote = _value(item.quote)
+        if rule and quote:
+            resolved.append(UnmappedRule(rule=rule, quote=quote))
+        elif rule or quote:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field=f"unmapped[{index}]",
+                    detail="unmapped exige rule y quote",
+                )
+            )
+    return tuple(resolved)
 
 
 def _value[T](candidate: FieldCandidate[T] | None) -> T | None:
@@ -377,6 +405,7 @@ def _collect_conflicts(draft: ContractDraft) -> list[ResolutionIssue]:
     _collect_platform_conflicts(draft, issues)
     _collect_global_conflicts(draft, issues)
     _collect_asset_conflicts(draft, issues)
+    _collect_unmapped_conflicts(draft, issues)
     return issues
 
 
@@ -388,10 +417,21 @@ def _collect_top_level_conflicts(
         ("spelling_locks", draft.spelling_locks),
         ("prohibitions", draft.prohibitions),
         ("audio_policy", draft.audio_policy),
+        ("hook_keyword", draft.hook_keyword),
+        ("hook_window_seconds", draft.hook_window_seconds),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
         _note_conflict(draft_candidate, field, issues)
+
+
+def _collect_unmapped_conflicts(
+    draft: ContractDraft,
+    issues: list[ResolutionIssue],
+) -> None:
+    for index, item in enumerate(draft.unmapped):
+        _note_conflict(item.rule, f"unmapped[{index}].rule", issues)
+        _note_conflict(item.quote, f"unmapped[{index}].quote", issues)
 
 
 def _collect_platform_conflicts(
@@ -828,6 +868,7 @@ def _resolve_rules(
     draft: ContractDraft,
     *,
     context: _RuleContext,
+    unmapped: tuple[UnmappedRule, ...] = (),
     issues: list[ResolutionIssue],
 ) -> RuleSet:
     draft_rules = draft.rules
@@ -877,6 +918,17 @@ def _resolve_rules(
         manual_review=manual_review,
         issues=issues,
     )
+    for entry in unmapped:
+        if entry.rule not in classified:
+            classified.add(entry.rule)
+            manual_review.append(entry.rule)
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.RULE_DEFAULTED,
+                    field=f"rules.{entry.rule}",
+                    detail="requisito sin validador clasificado como manual_review",
+                )
+            )
     return RuleSet(hard=hard, recommended=recommended, manual_review=manual_review)
 
 

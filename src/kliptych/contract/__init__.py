@@ -15,6 +15,7 @@ from kliptych.contract.draft import (
     RuleSetDraft,
     SegmentDraft,
     SegmentsDraft,
+    UnmappedRuleDraft,
     WatermarkDraft,
 )
 from kliptych.contract.enums import (
@@ -100,6 +101,7 @@ __all__ = [
     "SegmentsDraft",
     "SourceEvidence",
     "UnmappedRule",
+    "UnmappedRuleDraft",
     "Watermark",
     "WatermarkConfig",
     "WatermarkDraft",

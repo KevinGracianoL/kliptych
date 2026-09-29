@@ -7,9 +7,12 @@ del segmento, jamás la transcripción completa) e hidratación desde artefactos
 persistidos en modo ``--resume``.
 """
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn, override
+from typing import NoReturn, cast, override
+
+import pytest
 
 from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager
@@ -18,7 +21,14 @@ from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, Segment, Watermark
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportStatus
-from kliptych.gate import CheckStatus, Gate, GateResult, Piece
+from kliptych.gate import (
+    CheckStatus,
+    Gate,
+    GateResult,
+    GateStatus,
+    Piece,
+    SubtitleSegment,
+)
 from kliptych.git_proposals import ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification
 from kliptych.orchestrator import PipelineResult, SlideshowResult
@@ -32,6 +42,7 @@ from kliptych.runtime import (
 )
 from kliptych.segment import SegmentSelection
 from kliptych.subtitle_text import (
+    hydrate_piece_subtitle_segments,
     hydrate_piece_subtitle_text,
     segment_subtitle_text,
     subtitle_text_from_ass,
@@ -165,6 +176,16 @@ def test_hydrate_from_ass_when_no_transcript_anywhere(tmp_path: Path) -> None:
         work_dir=tmp_path,
     )
     assert text == "hola maracax"
+    segments = hydrate_piece_subtitle_segments(
+        transcript=None,
+        segment=Segment(start_s=0.0, end_s=5.0),
+        subtitles_path=ass,
+        work_dir=tmp_path,
+    )
+    assert len(segments) == 1
+    assert segments[0].text == "hola maracax"
+    assert segments[0].start_s == pytest.approx(0.0)
+    assert segments[0].end_s == pytest.approx(1.0)
 
 
 def test_hydrate_without_sources_is_none(tmp_path: Path) -> None:
@@ -497,3 +518,96 @@ def test_campaign_resume_hydrates_subtitles_from_saved_transcript(tmp_path: Path
     matched = [check for check in rejected.gate.checks if check.id == "subtitles.spelling_lock"]
     assert matched
     assert matched[0].status is CheckStatus.FAIL
+
+
+def test_h3_campaign_passes_subtitle_segments_and_evaluates_hook(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _ = (work_dir / "source.mp4").write_bytes(b"source")
+    video = _FakeVideoOrchestrator(_pipeline_result(work_dir, transcript=_transcript()))
+    gate = _RecordingGate(FakeProbe(info=make_media(duration_s=10.0)))
+    manager = _manager(video, gate, tmp_path / "delivery", AssetRegistry(tmp_path))
+
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(
+            required_mentions=["@marca"],
+            required_hashtags=["#marca"],
+            audio_rule="any",
+            hook_keyword="hola",
+            hard=["artifact.integrity", "hook.keyword"],
+        ),
+    )
+    _ = manager.process(campaign, mode="long_video", url=_VIDEO_URL)
+
+    assert gate.pieces
+    piece = gate.pieces[0]
+    assert len(piece.subtitle_segments) >= 2
+    assert piece.subtitle_segments[0].text == "hola"
+    assert piece.subtitle_segments[0].start_s == pytest.approx(0.0)
+
+
+def test_h3_campaign_resume_hydrates_subtitle_segments(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _ = (work_dir / "source.mp4").write_bytes(b"source")
+    _ = (work_dir / "transcript.json").write_text(_transcript().model_dump_json(), encoding="utf-8")
+    video = _FakeVideoOrchestrator(_pipeline_result(work_dir, transcript=None))
+    gate = _RecordingGate(FakeProbe(info=make_media(duration_s=10.0)))
+    manager = _manager(video, gate, tmp_path / "delivery", AssetRegistry(tmp_path))
+
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(
+            required_mentions=["@marca"],
+            required_hashtags=["#marca"],
+            audio_rule="any",
+            hook_keyword="hola",
+            hard=["artifact.integrity", "hook.keyword"],
+        ),
+    )
+    _ = manager.process(campaign, mode="long_video", url=_VIDEO_URL, resume=True)
+
+    assert gate.pieces
+    piece = gate.pieces[0]
+    assert len(piece.subtitle_segments) >= 2
+    assert piece.subtitle_segments[0].text == "hola"
+    assert piece.subtitle_segments[0].start_s == pytest.approx(0.0)
+
+
+def test_h3_pipeline_passes_subtitle_segments_and_evaluates_hook(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        hook_keyword=candidate("mira"),
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    request = RunRequest(
+        brief="cita del brief\nbrief con hook",
+        destination=tmp_path / "delivery",
+        environment=EnvironmentReport(),
+        model_version="static",
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+        subtitle_segments={"clip-01": (SubtitleSegment(text="mira esto", start_s=0.5, end_s=1.5),)},
+    )
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=request,
+    )
+    assert result.delivery is not None
+    assert result.outcome is RunOutcome.EXPORTED
+    exported = result.delivery.exported[0]
+    assert exported.gate_status is GateStatus.PASSED
+    gate_data = cast(
+        "dict[str, object]",
+        json.loads((tmp_path / "delivery" / exported.gate_path).read_text(encoding="utf-8")),
+    )
+    checks = cast("list[dict[str, object]]", gate_data["checks"])
+    matched = [c for c in checks if c["id"] == "hook.keyword"]
+    assert matched
+    assert matched[0]["status"] == "pass"

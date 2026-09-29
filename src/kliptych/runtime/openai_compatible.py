@@ -50,7 +50,11 @@ _EXTRACT_SYSTEM_PROMPT = (
     '(posición: "center_bottom", "center_top", "center", "top_right", '
     '"top_left", "bottom_right" o "bottom_left"; tamaño relativo '
     '"scale_ratio", ancho mínimo "min_width_ratio" y "opacity"); sin cita '
-    'textual usa "missing".'
+    'textual usa "missing". Extrae "hook_keyword" con su evidencia (palabra o frase '
+    'clave exigida en los primeros segundos del video) y "hook_window_seconds" '
+    '(ventana en segundos, por defecto 3.0); sin cita textual usa "missing". '
+    'Extrae "unmapped": lista de requisitos del brief sin validador mecánico '
+    'asociado, cada uno con "rule" (nombre del requisito) y "quote" (cita textual).'
 )
 
 _CAPTION_SYSTEM_PROMPT = (

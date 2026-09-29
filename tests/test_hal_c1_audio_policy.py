@@ -32,6 +32,12 @@ def test_extract_prompt_instructs_audio_policy_with_evidence() -> None:
     assert "evidence" in _EXTRACT_SYSTEM_PROMPT
 
 
+def test_extract_prompt_instructs_hook_keyword_and_unmapped_with_evidence() -> None:
+    assert "hook_keyword" in _EXTRACT_SYSTEM_PROMPT
+    assert "hook_window_seconds" in _EXTRACT_SYSTEM_PROMPT
+    assert "unmapped" in _EXTRACT_SYSTEM_PROMPT
+
+
 def _official_required_draft(**overrides: object) -> ContractDraft:
     base: dict[str, object] = {
         "platforms": {

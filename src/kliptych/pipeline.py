@@ -28,7 +28,7 @@ from kliptych.contract import (
 )
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
-from kliptych.gate import Gate, GateResult, Piece
+from kliptych.gate import Gate, GateResult, Piece, SubtitleSegment
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.hashing import brief_key, sha256_file
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
@@ -41,6 +41,10 @@ from kliptych.resolver import (
     resolve_contract,
 )
 from kliptych.runtime import CampaignModel, PieceContext
+from kliptych.subtitle_text import (
+    hydrate_piece_subtitle_segments,
+    hydrate_piece_subtitle_text,
+)
 
 _VIDEO_KIND = "video"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -123,6 +127,7 @@ class RunRequest:
     approved_by: str | None = None
     contract_draft: ContractDraft | None = None
     subtitle_texts: Mapping[str, str] | None = None
+    subtitle_segments: Mapping[str, Sequence[SubtitleSegment]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +328,7 @@ def _assemble_pieces(
     watermark = _watermark_path(contract, context.registry)
     watermark_config = contract.watermark if watermark is not None else None
     subtitle_texts = context.request.subtitle_texts or {}
+    subtitle_segments = context.request.subtitle_segments or {}
     mute_audio = contract_mutes_audio(contract)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
@@ -341,12 +347,27 @@ def _assemble_pieces(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
             )
+            sub_segments = tuple(subtitle_segments.get(asset.asset_id, ()))
+            if not sub_segments:
+                sub_segments = hydrate_piece_subtitle_segments(
+                    transcript=None,
+                    segment=None,
+                    work_dir=context.run_dir,
+                )
+            sub_text = subtitle_texts.get(asset.asset_id)
+            if sub_text is None:
+                sub_text = hydrate_piece_subtitle_text(
+                    transcript=None,
+                    segment=None,
+                    work_dir=context.run_dir,
+                )
             piece = Piece(
                 piece_id=asset.asset_id,
                 platform=platform,
                 caption=caption.caption,
                 hashtags=caption.hashtags,
-                subtitle_text=subtitle_texts.get(asset.asset_id),
+                subtitle_text=sub_text,
+                subtitle_segments=sub_segments,
                 artifact_path=artifact,
             )
             pieces.append(piece)
