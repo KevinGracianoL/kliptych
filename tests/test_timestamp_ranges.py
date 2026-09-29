@@ -178,8 +178,8 @@ def test_resolver_accepts_int_json_in_draft(tmp_path: Path) -> None:
     draft = make_draft(
         timestamp_ranges=[
             TimestampRangeDraft(
-                start_sec={"value": 10},
-                end_sec={"value": 25},
+                start_sec=candidate(10, "corte 10s a 25s"),
+                end_sec=candidate(25, "corte 10s a 25s"),
             )
         ]
     )
@@ -247,6 +247,78 @@ def test_resolver_citation_not_in_brief_forces_issue(tmp_path: Path) -> None:
         ]
     )
     brief = "cita del brief. contenido real sin esa frase."
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_raw_scalar_bounds(tmp_path: Path) -> None:
+    brief = "cita del brief unrelated text"
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec=5,
+                end_sec=9,
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_no_evidence_confidence_only(tmp_path: Path) -> None:
+    brief = "cita del brief unrelated text"
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 5, "confidence": "explicit"},
+                end_sec={"value": 9, "confidence": "explicit"},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_missing_confidence_evidence_only(tmp_path: Path) -> None:
+    brief = "cita del brief unrelated text"
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 5, "evidence": {"quote": "cita del brief"}},
+                end_sec={"value": 9, "evidence": {"quote": "cita del brief"}},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_unrelated_quote_without_numeric_match(tmp_path: Path) -> None:
+    brief = "cita del brief unrelated text"
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={
+                    "value": 5,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "cita del brief"},
+                },
+                end_sec={
+                    "value": 9,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "cita del brief"},
+                },
+            )
+        ]
+    )
     result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
     assert result is not None
     assert result.status == ResolutionStatus.MANUAL_REVIEW

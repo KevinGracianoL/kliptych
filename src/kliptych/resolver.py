@@ -457,35 +457,66 @@ def _extract_candidate_confidence(bound: object) -> object:
     return None
 
 
-def _check_candidate_provenance(
+def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -> bool:
+    conf = _extract_candidate_confidence(bound)
+    if conf is None or (isinstance(conf, str) and not conf.strip()):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal sin confianza explícita",
+            )
+        )
+        return False
+
+    conf_str = str(conf).lower()
+    if "conflict" in conf_str:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.CONFLICT,
+                field="timestamp_ranges",
+                detail="rango temporal en conflicto",
+            )
+        )
+        return False
+    if "missing" in conf_str:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal con confianza 'missing'",
+            )
+        )
+        return False
+    if conf_str not in {"explicit", "inferred"}:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=f"rango temporal con confianza inválida: {conf!r}",
+            )
+        )
+        return False
+    return True
+
+
+def _check_evidence_provenance(
     bound: object,
     brief_text: str | None,
     issues: list[ResolutionIssue],
 ) -> bool:
-    conf = _extract_candidate_confidence(bound)
-    if conf is not None:
-        conf_str = str(conf).lower()
-        if "conflict" in conf_str:
-            issues.append(
-                ResolutionIssue(
-                    code=IssueCode.CONFLICT,
-                    field="timestamp_ranges",
-                    detail="rango temporal en conflicto",
-                )
-            )
-            return False
-        if "missing" in conf_str:
-            issues.append(
-                ResolutionIssue(
-                    code=IssueCode.MISSING_REQUIRED,
-                    field="timestamp_ranges",
-                    detail="rango temporal con confianza 'missing'",
-                )
-            )
-            return False
-
     quote = _extract_candidate_quote(bound)
-    if quote is not None and brief_text is not None and quote not in brief_text:
+    if quote is None or not quote.strip():
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal sin evidencia textual obligatoria",
+            )
+        )
+        return False
+
+    if brief_text is not None and quote not in brief_text:
         issues.append(
             ResolutionIssue(
                 code=IssueCode.INVALID_CONTRACT,
@@ -494,7 +525,59 @@ def _check_candidate_provenance(
             )
         )
         return False
+    return True
 
+
+def _check_candidate_provenance(
+    bound: object,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> bool:
+    conf_ok = _check_confidence_provenance(bound, issues)
+    ev_ok = _check_evidence_provenance(bound, brief_text, issues)
+    return conf_ok and ev_ok
+
+
+_QUOTE_TIME_RE = re.compile(rf"\b(?:{_TIME_PATTERN}|{_SEC_PATTERN})\b")
+
+
+def _extract_parsed_times(text: str) -> set[float]:
+    times: set[float] = set()
+    for match in _QUOTE_TIME_RE.finditer(text):
+        token = match.group(0).strip()
+        parsed = parse_timestamp_seconds(token)
+        if parsed is not None:
+            times.add(parsed)
+    return times
+
+
+def _check_numeric_correspondence(
+    start_bound: object,
+    end_bound: object,
+    s: float,
+    e: float,
+    issues: list[ResolutionIssue],
+) -> bool:
+    start_quote = _extract_candidate_quote(start_bound)
+    end_quote = _extract_candidate_quote(end_bound)
+    start_times: set[float] = _extract_parsed_times(start_quote) if start_quote else set()
+    end_times: set[float] = _extract_parsed_times(end_quote) if end_quote else set()
+    combined_times: set[float] = start_times | end_times
+
+    has_s = any(math.isclose(t, s, abs_tol=1e-3) for t in combined_times)
+    has_e = any(math.isclose(t, e, abs_tol=1e-3) for t in combined_times)
+    if not (has_s and has_e):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=(
+                    f"marcas temporales start={s} end={e} no se corresponden con la cita: "
+                    f"start_quote={start_quote!r}, end_quote={end_quote!r}"
+                ),
+            )
+        )
+        return False
     return True
 
 
@@ -537,6 +620,8 @@ def _resolve_timestamp_ranges(
         s = parse_timestamp_seconds(start_raw)
         e = parse_timestamp_seconds(end_raw)
         if s is not None and e is not None and 0.0 <= s < e:
+            if not _check_numeric_correspondence(start_bound, end_bound, s, e, issues):
+                continue
             ranges.append(TimestampRange(start_sec=s, end_sec=e))
         else:
             issues.append(
