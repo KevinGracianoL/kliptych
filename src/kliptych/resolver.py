@@ -67,6 +67,8 @@ from kliptych.contract import (
     active_restriction_rules,
 )
 from kliptych.contract.base import ContractBase
+from kliptych.gate.brand_safety import BRAND_SAFETY_MENTIONS
+from kliptych.gate.text import normalize_text
 
 
 class ResolutionStatus(StrEnum):
@@ -277,6 +279,13 @@ def _build_contract(
     assets = _resolve_assets(draft, registry, issues)
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
+    if (
+        _brief_indicates_brand_safety(brief_text, prohibitions)
+        or _value(draft.brand_safety) is True
+    ):
+        prohibitions_text = normalize_text(" ".join(prohibitions))
+        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
+            prohibitions = [*prohibitions, "brand safety"]
     official_audio = _resolve_official_audio(draft, platforms, issues)
     hook_keyword = _value(draft.hook_keyword)
     unmapped = _resolve_unmapped(draft, issues)
@@ -419,6 +428,7 @@ def _collect_top_level_conflicts(
         ("audio_policy", draft.audio_policy),
         ("hook_keyword", draft.hook_keyword),
         ("hook_window_seconds", draft.hook_window_seconds),
+        ("brand_safety", draft.brand_safety),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
@@ -918,6 +928,19 @@ def _resolve_rules(
         manual_review=manual_review,
         issues=issues,
     )
+    if (
+        _brief_indicates_brand_safety(context.brief_text, context.global_restrictions.prohibitions)
+        or _value(draft.brand_safety) is True
+    ) and "brand.safety" not in classified:
+        classified.add("brand.safety")
+        hard.append("brand.safety")
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.RULE_DEFAULTED,
+                field="rules.brand.safety",
+                detail="el brief indica brand safety; se clasifica como hard (fail-closed)",
+            )
+        )
     for entry in unmapped:
         if entry.rule not in classified:
             classified.add(entry.rule)
@@ -1029,6 +1052,19 @@ def _brief_mentions_official_sound(brief_text: str | None) -> bool:
         return False
     normalized = _normalize_mention_text(brief_text)
     return any(mention in normalized for mention in _OFFICIAL_SOUND_MENTIONS)
+
+
+def _brief_indicates_brand_safety(
+    brief_text: str | None,
+    prohibitions: Sequence[str],
+) -> bool:
+    combined: list[str] = list(prohibitions)
+    if brief_text:
+        combined.append(brief_text)
+    if not combined:
+        return False
+    haystack = normalize_text(" ".join(combined))
+    return any(normalize_text(mention) in haystack for mention in BRAND_SAFETY_MENTIONS)
 
 
 def _force_policy_review_when_brief_mentions_official_sound(

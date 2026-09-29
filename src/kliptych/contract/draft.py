@@ -158,6 +158,7 @@ class ContractDraft(ContractBase):
     prohibitions: FieldCandidate[list[str]] | None = None
     hook_keyword: FieldCandidate[str] | None = None
     hook_window_seconds: FieldCandidate[float] | None = None
+    brand_safety: FieldCandidate[bool] | None = None
     unmapped: list[UnmappedRuleDraft] = Field(default_factory=list)
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None

@@ -42,6 +42,10 @@ class Gate:
             DEFAULT_VALIDATORS if validators is None else validators
         )
 
+    def register_validator(self, rule_id: str, validator: Validator) -> None:
+        """Registra o reemplaza un validador en el catálogo del gate."""
+        self._validators[rule_id] = validator
+
     def evaluate_piece(
         self,
         piece: Piece,

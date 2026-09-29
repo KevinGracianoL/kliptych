@@ -29,6 +29,11 @@ from kliptych.contract import (
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
 from kliptych.gate import Gate, GateResult, Piece, SubtitleSegment
+from kliptych.gate.brand_safety import (
+    ChatJsonModel,
+    make_brand_safety_validator,
+    make_model_assessor,
+)
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.hashing import brief_key, sha256_file
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
@@ -178,6 +183,12 @@ def run_given_clips(
     except ProvenanceError as error:
         msg = f"error de procedencia en el contrato: {error}"
         raise PipelineError(msg) from error
+    gate = Gate(FFprobeProbe()) if request.gate is None else request.gate
+    if isinstance(model, ChatJsonModel) and hasattr(gate, "register_validator"):
+        gate.register_validator(
+            "brand.safety",
+            make_brand_safety_validator(make_model_assessor(model)),
+        )
     context = _RunContext(
         request=request,
         identifier=identifier,
@@ -186,7 +197,7 @@ def run_given_clips(
         settings=settings,
         registry=registry,
         model=model,
-        engine=Gate(FFprobeProbe()) if request.gate is None else request.gate,
+        engine=gate,
         builder=FFmpegAssembler() if request.assembler is None else request.assembler,
     )
     if resolution.status is not ResolutionStatus.RESOLVED or resolution.contract is None:

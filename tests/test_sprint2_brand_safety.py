@@ -8,11 +8,16 @@ revisión humana: jamás un ``pass`` silencioso.
 """
 
 from pathlib import Path
+from typing import override
 
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Contract, Platform
+from kliptych.campaign_manager import CampaignManager
+from kliptych.campaign_types import Campaign, CampaignStatus
+from kliptych.config import Settings
+from kliptych.contract import Contract, ContractDraft, Platform
+from kliptych.environment import EnvironmentReport
 from kliptych.gate import (
     DEFAULT_VALIDATORS,
     CheckStatus,
@@ -29,7 +34,27 @@ from kliptych.gate.brand_safety import (
     parse_brand_safety_response,
 )
 from kliptych.gate.checks import GateContext
-from tests.support import FakeProbe, make_contract, make_media, make_piece
+from kliptych.git_proposals import ProposalEngine, PullRequest
+from kliptych.intelligence import Archetype, ArchetypeClassification
+from kliptych.orchestrator import PipelineResult, SlideshowResult
+from kliptych.pipeline import RunOutcome, RunRequest, run_given_clips
+from kliptych.runtime import (
+    CAPTION_PROMPT_VERSION,
+    PROMPT_VERSION,
+    CampaignModel,
+    Caption,
+    PieceContext,
+)
+from kliptych.segment import SegmentSelection
+from tests.support import (
+    FakeProbe,
+    candidate,
+    make_asset_draft,
+    make_contract,
+    make_draft,
+    make_media,
+    make_piece,
+)
 
 
 def _artifact(tmp_path: Path) -> Path:
@@ -206,3 +231,202 @@ def test_parse_brand_safety_response_accepts_minimal() -> None:
 def test_parse_brand_safety_response_rejects_malformed(payload: object) -> None:
     with pytest.raises(BrandSafetyError):
         _ = parse_brand_safety_response(payload)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "sin groserias",
+        "sin groserías",
+        "contenido apto para marcas",
+        "apto para todo publico",
+        "apto para todo público",
+        "family friendly",
+        "nada de lenguaje ofensivo",
+        "sin lenguaje ofensivo",
+        "sin insultos",
+        "no profanity",
+    ],
+)
+def test_h5_expanded_brand_safety_phrases_activate_rule(tmp_path: Path, phrase: str) -> None:
+    def _risky(text: str) -> BrandSafetyAssessment:
+        _ = text
+        return BrandSafetyAssessment(risk=True, categories=("profanity",), reason="inapropiado")
+
+    status, check = _run_gate(tmp_path, prohibitions=(phrase,), assess=_risky)
+    assert check is CheckStatus.MANUAL_REVIEW
+    assert status is GateStatus.PENDING_REVIEW
+
+
+class _ChatCampaignModel(CampaignModel):
+    """Modelo de prueba para pipeline con chat_json."""
+
+    model_version: str = "chat-test"
+
+    def __init__(self, draft: ContractDraft, caption: Caption, chat_payload: object) -> None:
+        self._draft: ContractDraft = draft
+        self._caption: Caption = caption
+        self._chat_payload: object = chat_payload
+        self.chat_calls: list[str] = []
+
+    @override
+    def extract_contract(self, brief: str) -> ContractDraft:
+        _ = brief
+        return self._draft
+
+    @override
+    def write_caption(self, contract: Contract, piece: PieceContext) -> Caption:
+        _ = (contract, piece)
+        return self._caption
+
+    def chat_json(self, *, system_prompt: str, user_content: str) -> object:
+        _ = system_prompt
+        self.chat_calls.append(user_content)
+        return self._chat_payload
+
+
+class _StubAssembler:
+    """Ensamblador falso para tests sin ffmpeg."""
+
+    def assemble(
+        self,
+        *,
+        clip: Path,
+        destination: Path,
+        watermark: Path | None = None,
+        watermark_config: object = None,
+        width: int = 1080,
+        height: int = 1920,
+        mute_audio: bool = False,
+    ) -> Path:
+        _ = (self, clip, watermark, watermark_config, width, height, mute_audio)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = destination.write_bytes(b"assembled")
+        return destination
+
+    def render_arguments(self, **kwargs: object) -> tuple[str, ...]:
+        _ = (self, kwargs)
+        return ("ffmpeg", "assembled")
+
+
+def test_h4_pipeline_injects_brand_safety_assessor_from_model(tmp_path: Path) -> None:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        prohibitions=candidate(["sin groserias"]),
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    model = _ChatCampaignModel(
+        draft,
+        Caption(caption="mira @marca #marca", hashtags=("#marca",)),
+        {"risk": False, "categories": [], "reason": None},
+    )
+    request = RunRequest(
+        brief="cita del brief\nbrief sin groserias",
+        destination=tmp_path / "delivery",
+        environment=EnvironmentReport(),
+        model_version="chat-test",
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        assembler=_StubAssembler(),
+        gate=Gate(FakeProbe(info=make_media())),
+    )
+    result = run_given_clips(
+        model=model,
+        settings=Settings.from_root(tmp_path),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.EXPORTED
+    assert len(model.chat_calls) >= 1
+    assert result.delivery is not None
+    assert result.delivery.exported[0].gate_status is GateStatus.PASSED
+
+
+class _StubClassifier:
+    def classify(self, brief: str, contract: Contract) -> ArchetypeClassification:
+        _ = (self, brief, contract)
+        return ArchetypeClassification(archetype=Archetype.KNOWN, rationale="t", variations=())
+
+
+class _StubProvider:
+    def create_branch(self, *, base: str, name: str) -> str:
+        _ = (self, base, name)
+        msg = "no git"
+        raise AssertionError(msg)
+
+    def read_file(self, *, branch: str, path: str) -> str | None:
+        _ = (self, branch, path)
+        return None
+
+    def write_file(self, *, branch: str, path: str, content: str, message: str) -> str:
+        _ = (self, branch, path, content, message)
+        msg = "no git"
+        raise AssertionError(msg)
+
+    def open_pull_request(self, **kwargs: object) -> PullRequest:
+        _ = (self, kwargs)
+        msg = "no PR"
+        raise AssertionError(msg)
+
+
+class _StubVideoOrchestrator:
+    def __init__(self, final: Path) -> None:
+        self._final: Path = final
+
+    def run_long_video(self, url: str, **kwargs: object) -> PipelineResult:
+        _ = (url, kwargs)
+        return PipelineResult(
+            source=self._final,
+            transcript=None,
+            moments=(),
+            selection=SegmentSelection(segments=(), rationale="t"),
+            reframe=None,
+            subtitles=None,
+            final_video=self._final,
+            cleaning=(),
+        )
+
+    def run_slideshow(self, images: object, **kwargs: object) -> SlideshowResult:
+        _ = (self, images, kwargs)
+        msg = "no slideshow"
+        raise AssertionError(msg)
+
+
+def test_h4_campaign_manager_injects_brand_safety_assessor_from_model(tmp_path: Path) -> None:
+    final = tmp_path / "final.mp4"
+    _ = final.write_bytes(b"final")
+    chat_calls: list[str] = []
+
+    class _ChatBackend:
+        def chat_json(self, *, system_prompt: str, user_content: str) -> object:
+            _ = (self, system_prompt)
+            chat_calls.append(user_content)
+            return {"risk": True, "categories": ["profanity"], "reason": "inapropiado"}
+
+    manager = CampaignManager(
+        classifier=_StubClassifier(),
+        proposal_engine=ProposalEngine(provider=_StubProvider()),
+        video_orchestrator=_StubVideoOrchestrator(final),
+        gate=Gate(FakeProbe(info=make_media())),
+        assets=AssetRegistry(tmp_path),
+        destination=tmp_path / "delivery",
+        model=_ChatBackend(),
+    )
+    campaign = Campaign(
+        campaign_id="camp-01",
+        brief="brief crudo",
+        contract=make_contract(
+            required_mentions=["@marca"],
+            required_hashtags=["#marca"],
+            audio_rule="any",
+            prohibitions=["sin groserias"],
+            hard=["artifact.integrity", "brand.safety"],
+        ),
+    )
+    outcome = manager.process(campaign, mode="long_video", url="https://example.com/video")
+    assert outcome.status is CampaignStatus.BLOCKED
+    assert len(chat_calls) >= 1
+    assert outcome.delivery_report is not None
+    rejected = outcome.delivery_report.rejected[0]
+    matched = [c for c in rejected.gate.checks if c.id == "brand.safety"]
+    assert matched
+    assert matched[0].status is CheckStatus.MANUAL_REVIEW

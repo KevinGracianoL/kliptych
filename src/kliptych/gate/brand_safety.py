@@ -18,12 +18,12 @@ por tanto exige revisión humana cuando la regla está activa.
 from __future__ import annotations
 
 import json
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.text import normalize_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -33,13 +33,22 @@ if TYPE_CHECKING:
 
 _RULE = "brand.safety"
 
-_BRAND_SAFETY_MENTIONS: tuple[str, ...] = (
+BRAND_SAFETY_MENTIONS: tuple[str, ...] = (
     "controvers",
     "polemic",
     "brand safety",
     "seguridad de marca",
     "toxic",
+    "sin groserias",
+    "contenido apto para marcas",
+    "apto para todo publico",
+    "family friendly",
+    "nada de lenguaje ofensivo",
+    "sin lenguaje ofensivo",
+    "sin insultos",
+    "no profanity",
 )
+_BRAND_SAFETY_MENTIONS = BRAND_SAFETY_MENTIONS
 
 _BRAND_SAFETY_SYSTEM_PROMPT = (
     "Eres el evaluador de brand safety de Kliptych. Recibes los textos de "
@@ -70,10 +79,16 @@ Assessor = Callable[[str], BrandSafetyAssessment]
 """Evalúa los textos de la pieza y devuelve su veredicto de riesgo."""
 
 
-class _ChatJsonModel(Protocol):
+@runtime_checkable
+class ChatJsonModel(Protocol):
     """Backend chat con respuesta JSON, como el runtime OpenAI-compatible."""
 
-    def chat_json(self, *, system_prompt: str, user_content: str) -> object: ...
+    def chat_json(self, *, system_prompt: str, user_content: str) -> object:
+        """Envía prompt y contenido de usuario esperando un objeto JSON."""
+        ...
+
+
+_ChatJsonModel = ChatJsonModel
 
 
 def check_brand_safety(context: GateContext, *, assess: Assessor | None = None) -> CheckOutcome:
@@ -232,7 +247,7 @@ def _parse_categories(raw: object) -> tuple[str, ...]:
 
 
 def _brand_safety_required(contract: Contract) -> bool:
-    """Indica si el contrato exige brand safety en sus prohibiciones.
+    """Indica si el contrato exige brand safety en sus prohibiciones o reglas.
 
     Args:
         contract: Contrato validado de la campaña.
@@ -241,8 +256,8 @@ def _brand_safety_required(contract: Contract) -> bool:
         True si alguna prohibición menciona controversia, toxicidad o
         brand safety explícitos.
     """
-    haystack = _normalize(" ".join(contract.prohibitions))
-    return any(mention in haystack for mention in _BRAND_SAFETY_MENTIONS)
+    haystack = normalize_text(" ".join(contract.prohibitions))
+    return any(normalize_text(mention) in haystack for mention in _BRAND_SAFETY_MENTIONS)
 
 
 def _safety_text(piece: Piece) -> str:
@@ -258,20 +273,3 @@ def _safety_text(piece: Piece) -> str:
     if piece.subtitle_text:
         parts.append(piece.subtitle_text)
     return "\n".join(parts)
-
-
-def _normalize(text: str) -> str:
-    """Normaliza un texto para buscar menciones de brand safety.
-
-    Descompone con NFKD, elimina diacríticos y pliega a minúsculas: así
-    "CONTROVERSIA", "controversia" y "polémica" casan con las menciones
-    canónicas sin falsos negativos.
-
-    Args:
-        text: Texto crudo del contrato.
-
-    Returns:
-        El texto normalizado para búsqueda de subcadenas.
-    """
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(char for char in decomposed if not unicodedata.combining(char)).casefold()
