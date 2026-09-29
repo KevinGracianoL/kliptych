@@ -439,12 +439,6 @@ def _extract_candidate_quote(bound: object) -> str | None:
                 return quote
         elif isinstance(ev, SourceEvidence):
             return ev.quote
-        citation = d.get("citation")
-        if isinstance(citation, str):
-            return citation
-        quote_val = d.get("quote")
-        if isinstance(quote_val, str):
-            return quote_val
     return None
 
 
@@ -541,14 +535,18 @@ def _check_candidate_provenance(
 _QUOTE_TIME_RE = re.compile(rf"\b(?:{_TIME_PATTERN}|{_SEC_PATTERN})\b")
 
 
-def _extract_parsed_times(text: str) -> set[float]:
-    times: set[float] = set()
+def _extract_ordered_times(text: str) -> list[float]:
+    times: list[float] = []
     for match in _QUOTE_TIME_RE.finditer(text):
         token = match.group(0).strip()
         parsed = parse_timestamp_seconds(token)
         if parsed is not None:
-            times.add(parsed)
+            times.append(parsed)
     return times
+
+
+def _extract_parsed_times(text: str) -> set[float]:
+    return set(_extract_ordered_times(text))
 
 
 def _check_numeric_correspondence(
@@ -562,10 +560,9 @@ def _check_numeric_correspondence(
     end_quote = _extract_candidate_quote(end_bound)
     start_times: set[float] = _extract_parsed_times(start_quote) if start_quote else set()
     end_times: set[float] = _extract_parsed_times(end_quote) if end_quote else set()
-    combined_times: set[float] = start_times | end_times
 
-    has_s = any(math.isclose(t, s, abs_tol=1e-3) for t in combined_times)
-    has_e = any(math.isclose(t, e, abs_tol=1e-3) for t in combined_times)
+    has_s = any(math.isclose(t, s, abs_tol=1e-3) for t in start_times)
+    has_e = any(math.isclose(t, e, abs_tol=1e-3) for t in end_times)
     if not (has_s and has_e):
         issues.append(
             ResolutionIssue(
@@ -578,6 +575,31 @@ def _check_numeric_correspondence(
             )
         )
         return False
+
+    if (
+        start_quote is not None
+        and end_quote is not None
+        and start_quote.strip() == end_quote.strip()
+    ):
+        ordered = _extract_ordered_times(start_quote)
+        in_order = any(
+            math.isclose(ordered[i], s, abs_tol=1e-3) and math.isclose(ordered[j], e, abs_tol=1e-3)
+            for i in range(len(ordered))
+            for j in range(i + 1, len(ordered))
+        )
+        if not in_order:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=(
+                        f"marcas temporales start={s} end={e} desordenadas en la cita compartida: "
+                        f"{start_quote!r}"
+                    ),
+                )
+            )
+            return False
+
     return True
 
 

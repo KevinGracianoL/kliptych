@@ -323,3 +323,83 @@ def test_resolver_rejects_unrelated_quote_without_numeric_match(tmp_path: Path) 
     assert result is not None
     assert result.status == ResolutionStatus.MANUAL_REVIEW
     assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_top_level_citation_probe(tmp_path: Path) -> None:
+    brief = "cita del brief. comienzo 5 y fin 9 para el corte."
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 5, "confidence": "explicit", "citation": "comienzo 5"},
+                end_sec={"value": 9, "confidence": "explicit", "citation": "fin 9"},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_top_level_quote_probe(tmp_path: Path) -> None:
+    brief = "cita del brief. comienzo 5 y fin 9 para el corte."
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 5, "confidence": "explicit", "quote": "comienzo 5"},
+                end_sec={"value": 9, "confidence": "explicit", "quote": "fin 9"},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_cross_quoted_bounds_probe(tmp_path: Path) -> None:
+    brief = "cita del brief. fin 9 luego comienzo 5."
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={
+                    "value": 5,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "fin 9"},
+                },
+                end_sec={
+                    "value": 9,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "comienzo 5"},
+                },
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_rejects_shared_quote_inverted_order_probe(tmp_path: Path) -> None:
+    brief = "cita del brief. fin 9 luego comienzo 5."
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={
+                    "value": 5,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "fin 9 luego comienzo 5"},
+                },
+                end_sec={
+                    "value": 9,
+                    "confidence": "explicit",
+                    "evidence": {"quote": "fin 9 luego comienzo 5"},
+                },
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
