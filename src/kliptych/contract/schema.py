@@ -180,6 +180,31 @@ class Segment(ContractBase):
         return self
 
 
+class TimestampRange(ContractBase):
+    """Rango de marcas temporales mandatorio extraído del brief o solicitado."""
+
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(gt=0)
+
+    @field_validator("start_sec", "end_sec")
+    @classmethod
+    def _bounds_are_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            msg = f"las cotas del rango temporal deben ser finitas, no {value}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if not (0.0 <= self.start_sec < self.end_sec):
+            msg = (
+                f"se exige 0 <= start_sec < end_sec, pero "
+                f"start_sec={self.start_sec}, end_sec={self.end_sec}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class RuleSet(ContractBase):
     """Clasificación de cada regla como hard, recommended o manual_review."""
 
@@ -328,6 +353,7 @@ class Contract(ContractBase):
     brand_safety_required: bool = False
     brand_safety_citation: str | None = None
     unmapped: tuple[UnmappedRule, ...] = ()
+    timestamp_ranges: tuple[TimestampRange, ...] = ()
     rules: RuleSet
     assets: AssetBundle
     segments: tuple[Segment, ...] = ()
@@ -549,6 +575,8 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         _ = dump.pop("brand_safety_required", None)
     if contract.brand_safety_citation is None:
         _ = dump.pop("brand_safety_citation", None)
+    if not contract.timestamp_ranges:
+        _ = dump.pop("timestamp_ranges", None)
     _prune_default_watermark_options(dump)
 
 

@@ -22,6 +22,8 @@ Política de resolución:
   se puede resolver se descarta y se reporta (no bloquea).
 """
 
+import math
+import re
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -61,6 +63,7 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    TimestampRange,
     UnmappedRule,
     Watermark,
     WatermarkPosition,
@@ -292,6 +295,139 @@ def _resolve_brand_safety(
     return brand_safety_required, brand_safety_citation, prohibitions
 
 
+_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_HOUR = 3600.0
+_TIME_PARTS_SINGLE = 1
+_TIME_PARTS_MM_SS = 2
+_TIME_PARTS_HH_MM_SS = 3
+
+
+def parse_timestamp_seconds(value: float | str) -> float | None:
+    """Convierte un valor de tiempo a float seconds.
+
+    Args:
+        value: Valor numérico o texto en formato segundos, 'MM:SS' o 'HH:MM:SS'.
+
+    Returns:
+        Segundos como float finito, o None si el valor es inválido.
+    """
+    if isinstance(value, (int, float)):
+        val = float(value)
+        return val if math.isfinite(val) else None
+    cleaned = value.strip().rstrip("sS").strip()
+    if not cleaned:
+        return None
+    parts = cleaned.split(":")
+    try:
+        numbers = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(numbers) == _TIME_PARTS_SINGLE:
+        val = numbers[0]
+    elif len(numbers) == _TIME_PARTS_MM_SS:
+        val = numbers[0] * _SECONDS_PER_MINUTE + numbers[1]
+    elif len(numbers) == _TIME_PARTS_HH_MM_SS:
+        val = numbers[0] * _SECONDS_PER_HOUR + numbers[1] * _SECONDS_PER_MINUTE + numbers[2]
+    else:
+        return None
+    return val if math.isfinite(val) else None
+
+
+_TIME_PATTERN = r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?"
+_TIME_SEP = r"(?:-|[\u2013\u2014]|\ba\b|\bal\b|\bto\b|\bhasta\b)"
+_TIME_RANGE_RE = re.compile(
+    rf"(?P<start>{_TIME_PATTERN})\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN})",
+    re.IGNORECASE,
+)
+_SEC_RANGE_RE = re.compile(
+    rf"(?P<start>\d+(?:\.\d+)?)\s*s\s*{_TIME_SEP}\s*(?P<end>\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
+_LABEL_RANGE_RE = re.compile(
+    rf"(?:timestamps?|marcas?|cortes?|fragmentos?|segmentos?)\s*[:=]\s*(?P<start>{_TIME_PATTERN}|\d+(?:\.\d+)?)\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN}|\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_timestamp_ranges_from_text(brief_text: str) -> list[TimestampRange]:
+    ranges: list[TimestampRange] = []
+    seen: set[tuple[float, float]] = set()
+
+    for pattern in (_LABEL_RANGE_RE, _TIME_RANGE_RE, _SEC_RANGE_RE):
+        for match in pattern.finditer(brief_text):
+            start = parse_timestamp_seconds(match.group("start"))
+            end = parse_timestamp_seconds(match.group("end"))
+            if start is not None and end is not None and 0.0 <= start < end:
+                key = (start, end)
+                if key not in seen:
+                    seen.add(key)
+                    ranges.append(TimestampRange(start_sec=start, end_sec=end))
+    return ranges
+
+
+def _extract_candidate_value(
+    candidate: FieldCandidate[float | str] | dict[str, object] | float | str | None,
+) -> float | str | None:
+    if isinstance(candidate, FieldCandidate):
+        return candidate.value
+    if isinstance(candidate, dict):
+        val = candidate.get("value")
+        return val if isinstance(val, (float, str)) else None
+    return candidate
+
+
+def _resolve_timestamp_ranges(
+    draft: ContractDraft,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> tuple[TimestampRange, ...]:
+    ranges: list[TimestampRange] = []
+    for item in draft.timestamp_ranges:
+        start_raw = _extract_candidate_value(item.start_sec)
+        end_raw = _extract_candidate_value(item.end_sec)
+        if start_raw is not None and end_raw is not None:
+            s = parse_timestamp_seconds(start_raw)
+            e = parse_timestamp_seconds(end_raw)
+            if s is not None and e is not None and 0.0 <= s < e:
+                ranges.append(TimestampRange(start_sec=s, end_sec=e))
+            else:
+                issues.append(
+                    ResolutionIssue(
+                        code=IssueCode.INVALID_CONTRACT,
+                        field="timestamp_ranges",
+                        detail=f"rango temporal inválido: start={start_raw}, end={end_raw}",
+                    )
+                )
+    if not ranges and brief_text:
+        ranges.extend(_extract_timestamp_ranges_from_text(brief_text))
+    return tuple(ranges)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedSecondary:
+    official_audio: OfficialAudio | None
+    unmapped: tuple[UnmappedRule, ...]
+    segments: tuple[Segment, ...]
+    geo_target: GeoTarget | None
+    timestamp_ranges: tuple[TimestampRange, ...]
+
+
+def _resolve_secondary_fields(
+    draft: ContractDraft,
+    platforms: dict[Platform, PlatformRules],
+    mode: Mode,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> _ResolvedSecondary:
+    return _ResolvedSecondary(
+        official_audio=_resolve_official_audio(draft, platforms, issues),
+        unmapped=_resolve_unmapped(draft, issues),
+        segments=_resolve_segments(draft, mode, issues),
+        geo_target=_resolve_geo_target(draft, issues),
+        timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
+    )
+
+
 def _build_contract(
     draft: ContractDraft,
     registry: AssetRegistry,
@@ -311,10 +447,8 @@ def _build_contract(
     brand_safety_required, brand_safety_citation, prohibitions = _resolve_brand_safety(
         draft, brief_text, prohibitions
     )
-    official_audio = _resolve_official_audio(draft, platforms, issues)
     hook_keyword = _value(draft.hook_keyword)
-    unmapped = _resolve_unmapped(draft, issues)
-    segments = _resolve_segments(draft, mode, issues)
+    secondary = _resolve_secondary_fields(draft, platforms, mode, brief_text, issues)
     rules = _resolve_rules(
         draft,
         context=_RuleContext(
@@ -332,10 +466,9 @@ def _build_contract(
             ),
             brief_text=brief_text,
         ),
-        unmapped=unmapped,
+        unmapped=secondary.unmapped,
         issues=issues,
     )
-    geo_target = _resolve_geo_target(draft, issues)
 
     if _has_blocking(issues) or campaign_id is None or languages is None:
         return None
@@ -346,7 +479,7 @@ def _build_contract(
         mode=mode,
         platforms=platforms,
         languages=languages,
-        official_audio=official_audio,
+        official_audio=secondary.official_audio,
         audio_policy=_value(draft.audio_policy),
         watermark=watermark,
         spelling_locks=spelling_locks,
@@ -354,11 +487,12 @@ def _build_contract(
         hook_keyword=hook_keyword,
         brand_safety_required=brand_safety_required,
         brand_safety_citation=brand_safety_citation,
-        unmapped=unmapped,
+        unmapped=secondary.unmapped,
+        timestamp_ranges=secondary.timestamp_ranges,
         rules=rules,
         assets=assets,
-        segments=segments,
-        geo_target=geo_target,
+        segments=secondary.segments,
+        geo_target=secondary.geo_target,
         min_views_for_payout=MinViewsForPayout(value=_value(draft.min_views_for_payout)),
         analytics_proof_required=AnalyticsProofRequired(
             value=bool(_value(draft.analytics_proof_required))
