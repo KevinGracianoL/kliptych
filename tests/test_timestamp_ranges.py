@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from kliptych.assets import AssetRegistry
 from kliptych.contract import TimestampRange, contract_digest
 from kliptych.contract.draft import TimestampRangeDraft
-from kliptych.resolver import parse_timestamp_seconds, resolve_contract
+from kliptych.resolver import ResolutionStatus, parse_timestamp_seconds, resolve_contract
 from kliptych.runtime import openai_compatible
 from tests.support import candidate, make_contract, make_draft
 
@@ -125,3 +125,50 @@ def test_resolver_resolves_timestamp_ranges_from_brief_text(
     assert len(result.contract.timestamp_ranges) == 1
     assert math.isclose(result.contract.timestamp_ranges[0].start_sec, expected_start)
     assert math.isclose(result.contract.timestamp_ranges[0].end_sec, expected_end)
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    ["1:99", "1:-30", "1.5:00", "1_000", "١٢", "-10", "abc", "", "   ", True, False],
+)
+def test_parse_timestamp_seconds_strict_rejects_invalid(invalid_input: object) -> None:
+    assert parse_timestamp_seconds(cast("float | str", invalid_input)) is None
+
+
+@pytest.mark.parametrize(
+    "brief",
+    [
+        "el clip debe durar 0:15 - 0:60",
+        "horario del live: 20:00 - 22:00",
+        "duración: 00:30 - 01:00",
+        "schedule del stream 18:00 - 20:00",
+        "transmitir a la hora 20:00 - 22:00",
+    ],
+)
+def test_resolver_brief_excludes_duration_and_schedule_contexts(tmp_path: Path, brief: str) -> None:
+    full_brief = f"cita del brief. instrucciones generales. {brief}."
+    draft = make_draft()
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=full_brief)
+    assert result is not None
+    assert result.contract is not None
+    assert len(result.contract.timestamp_ranges) == 0
+
+
+def test_resolver_brief_inverted_labeled_range_forces_manual_review(tmp_path: Path) -> None:
+    brief = "cita del brief. corte: 02:45 - 01:30 del video"
+    draft = make_draft()
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_brief_preserves_order_of_appearance(tmp_path: Path) -> None:
+    brief = "cita del brief. primer corte: 05:00 - 06:00. segundo timestamp: 01:00 - 02:00."
+    draft = make_draft()
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.contract is not None
+    assert len(result.contract.timestamp_ranges) == 2
+    assert math.isclose(result.contract.timestamp_ranges[0].start_sec, 300.0)
+    assert math.isclose(result.contract.timestamp_ranges[1].start_sec, 60.0)

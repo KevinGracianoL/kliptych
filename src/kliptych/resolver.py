@@ -26,6 +26,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
@@ -297,71 +298,111 @@ def _resolve_brand_safety(
 
 _SECONDS_PER_MINUTE = 60.0
 _SECONDS_PER_HOUR = 3600.0
-_TIME_PARTS_SINGLE = 1
 _TIME_PARTS_MM_SS = 2
 _TIME_PARTS_HH_MM_SS = 3
 
+_CLOCK_RE = re.compile(r"^[0-9]+(:[0-5][0-9]){1,2}(\.[0-9]+)?$")
+_NUMERIC_SEC_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def _parse_clock_seconds(parts: list[str]) -> float | None:
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == _TIME_PARTS_MM_SS:
+        return nums[0] * _SECONDS_PER_MINUTE + nums[1]
+    if len(nums) == _TIME_PARTS_HH_MM_SS:
+        return nums[0] * _SECONDS_PER_HOUR + nums[1] * _SECONDS_PER_MINUTE + nums[2]
+    return None
+
 
 def parse_timestamp_seconds(value: float | str) -> float | None:
-    """Convierte un valor de tiempo a float seconds.
+    """Convierte un valor de tiempo a float seconds con validación estricta ASCII.
 
     Args:
         value: Valor numérico o texto en formato segundos, 'MM:SS' o 'HH:MM:SS'.
 
     Returns:
-        Segundos como float finito, o None si el valor es inválido.
+        Segundos como float finito no negativo, o None si el valor es inválido.
     """
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         val = float(value)
-        return val if math.isfinite(val) else None
+        return val if math.isfinite(val) and val >= 0.0 else None
     cleaned = value.strip().rstrip("sS").strip()
     if not cleaned:
         return None
-    parts = cleaned.split(":")
-    try:
-        numbers = [float(p) for p in parts]
-    except ValueError:
-        return None
-    if len(numbers) == _TIME_PARTS_SINGLE:
-        val = numbers[0]
-    elif len(numbers) == _TIME_PARTS_MM_SS:
-        val = numbers[0] * _SECONDS_PER_MINUTE + numbers[1]
-    elif len(numbers) == _TIME_PARTS_HH_MM_SS:
-        val = numbers[0] * _SECONDS_PER_HOUR + numbers[1] * _SECONDS_PER_MINUTE + numbers[2]
-    else:
-        return None
-    return val if math.isfinite(val) else None
+    val: float | None = None
+    if _NUMERIC_SEC_RE.match(cleaned):
+        with suppress(ValueError):
+            val = float(cleaned)
+    elif _CLOCK_RE.match(cleaned):
+        val = _parse_clock_seconds(cleaned.split(":"))
+    return val if val is not None and math.isfinite(val) and val >= 0.0 else None
 
 
-_TIME_PATTERN = r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?"
+_TIME_PATTERN = r"(?:[0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}(?:\.[0-9]+)?"
+_SEC_PATTERN = r"[0-9]+(?:\.[0-9]+)?\s*s?"
 _TIME_SEP = r"(?:-|[\u2013\u2014]|\ba\b|\bal\b|\bto\b|\bhasta\b)"
-_TIME_RANGE_RE = re.compile(
-    rf"(?P<start>{_TIME_PATTERN})\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN})",
+_RANGE_RE = re.compile(
+    rf"(?P<start>{_TIME_PATTERN}|{_SEC_PATTERN})\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN}|{_SEC_PATTERN})",
     re.IGNORECASE,
 )
-_SEC_RANGE_RE = re.compile(
-    rf"(?P<start>\d+(?:\.\d+)?)\s*s\s*{_TIME_SEP}\s*(?P<end>\d+(?:\.\d+)?)\s*s",
+_CUTOFF_LABEL_RE = re.compile(
+    r"\b(?:timestamps?|cortes?|cortar\s+de(?:l)?|corte\s+de(?:l)?|minutos?|segmentos?|fragmentos?|marcas?|clip\s+from)\b",
     re.IGNORECASE,
 )
-_LABEL_RANGE_RE = re.compile(
-    rf"(?:timestamps?|marcas?|cortes?|fragmentos?|segmentos?)\s*[:=]\s*(?P<start>{_TIME_PATTERN}|\d+(?:\.\d+)?)\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN}|\d+(?:\.\d+)?)",
+_EXCLUDED_CONTEXT_RE = re.compile(
+    r"\b(?:durar|duracion|duración|duration|horario|schedule|horas?)\b",
     re.IGNORECASE,
 )
+_CLAUSE_SPLIT_RE = re.compile(r"[\r\n;]+|(?<=\S)\.\s+")
 
 
-def _extract_timestamp_ranges_from_text(brief_text: str) -> list[TimestampRange]:
+def _is_valid_cutoff_clause(clause: str) -> bool:
+    cleaned = clause.strip()
+    if not cleaned or _EXCLUDED_CONTEXT_RE.search(cleaned):
+        return False
+    return bool(_CUTOFF_LABEL_RE.search(cleaned))
+
+
+def _extract_clause_ranges(
+    clause: str,
+    seen: set[tuple[float, float]],
+    ranges: list[TimestampRange],
+    issues: list[ResolutionIssue] | None,
+) -> None:
+    for match in _RANGE_RE.finditer(clause):
+        start = parse_timestamp_seconds(match.group("start"))
+        end = parse_timestamp_seconds(match.group("end"))
+        if start is None or end is None:
+            continue
+        if start >= end:
+            if issues is not None:
+                issues.append(
+                    ResolutionIssue(
+                        code=IssueCode.INVALID_CONTRACT,
+                        field="timestamp_ranges",
+                        detail=f"rango temporal invertido en el brief: start={start} >= end={end}",
+                    )
+                )
+        elif (start, end) not in seen:
+            seen.add((start, end))
+            ranges.append(TimestampRange(start_sec=start, end_sec=end))
+
+
+def _extract_timestamp_ranges_from_text(
+    brief_text: str, issues: list[ResolutionIssue] | None = None
+) -> list[TimestampRange]:
     ranges: list[TimestampRange] = []
     seen: set[tuple[float, float]] = set()
 
-    for pattern in (_LABEL_RANGE_RE, _TIME_RANGE_RE, _SEC_RANGE_RE):
-        for match in pattern.finditer(brief_text):
-            start = parse_timestamp_seconds(match.group("start"))
-            end = parse_timestamp_seconds(match.group("end"))
-            if start is not None and end is not None and 0.0 <= start < end:
-                key = (start, end)
-                if key not in seen:
-                    seen.add(key)
-                    ranges.append(TimestampRange(start_sec=start, end_sec=end))
+    for line in brief_text.splitlines():
+        for clause in _CLAUSE_SPLIT_RE.split(line):
+            if _is_valid_cutoff_clause(clause):
+                _extract_clause_ranges(clause.strip(), seen, ranges, issues)
     return ranges
 
 
@@ -399,7 +440,7 @@ def _resolve_timestamp_ranges(
                     )
                 )
     if not ranges and brief_text:
-        ranges.extend(_extract_timestamp_ranges_from_text(brief_text))
+        ranges.extend(_extract_timestamp_ranges_from_text(brief_text, issues=issues))
     return tuple(ranges)
 
 
