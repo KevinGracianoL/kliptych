@@ -166,13 +166,22 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
-"src/kliptych/gate/watermark.py" = [
-    # ffmpeg se invoca con lista de argumentos y shell=False para extraer los
-    # frames muestreados; el binario se resuelve del PATH, nunca de texto del
-    # LLM. cv2 es dependencia declarada del proyecto pero se importa de forma
-    # diferida para que el gate no la cargue sin reglas de watermark activas.
+"src/kliptych/gate/hook.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para medir el
+    # volumen de los primeros 3 s (volumedetect); el binario se resuelve del
+    # PATH, nunca de texto del LLM.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
+]
+"src/kliptych/gate/brand_safety.py" = [
+    # Frontera fail-closed: cualquier fallo del evaluador LLM (excepción,
+    # timeout, respuesta inválida) se traduce a manual_review, nunca a pass;
+    # por eso se captura Exception y se devuelve un error preciso.
+    "blind-except",
+]
+"src/kliptych/gate/watermark.py" = [
+    # cv2 es dependencia declarada del proyecto pero se importa de forma
+    # diferida para que el gate no la cargue sin reglas de watermark activas.
     "import-outside-top-level",
 ]
 "src/kliptych/gate/models.py" = [
@@ -331,6 +340,24 @@ ignore = [
 "tests/test_watermark_gate.py" = [
     # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
     # generar fixtures sintéticos y renderizar el watermark bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
+"tests/test_sprint2_watermark.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar
+    # el fondo texturizado vertical y el clip de 20 s bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+    # Los dobles de VideoCapture replican su API camelCase (isOpened/set/read)
+    # para cubrir las ramas fail-closed sin video real.
+    "invalid-function-name",
+    "no-self-use",
+]
+"tests/test_sprint2_hook.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético con audio.
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
     "start-process-with-partial-path",

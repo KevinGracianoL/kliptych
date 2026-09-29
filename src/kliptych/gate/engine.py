@@ -42,6 +42,10 @@ class Gate:
             DEFAULT_VALIDATORS if validators is None else validators
         )
 
+    def register_validator(self, rule_id: str, validator: Validator) -> None:
+        """Registra o reemplaza un validador en el catálogo del gate."""
+        self._validators[rule_id] = validator
+
     def evaluate_piece(
         self,
         piece: Piece,
@@ -101,6 +105,28 @@ class Gate:
             outcomes.extend(
                 (strength, self._run_rule(rule_id, strength, context)) for rule_id in rule_ids
             )
+        if contract.unmapped:
+            colliding = [
+                entry.rule for entry in contract.unmapped if entry.rule in self._validators
+            ]
+            check_status = CheckStatus.FAIL if colliding else CheckStatus.MANUAL_REVIEW
+            evidence: dict[str, object] = {
+                "unmapped": [{"rule": u.rule, "quote": u.quote} for u in contract.unmapped],
+                "rules": [u.rule for u in contract.unmapped],
+                "citations": [u.quote for u in contract.unmapped],
+            }
+            if colliding:
+                evidence["colliding_rules"] = colliding
+            outcomes.append(
+                (
+                    RuleStrength.HARD if colliding else RuleStrength.MANUAL_REVIEW,
+                    CheckResult(
+                        id="rules.unmapped",
+                        status=check_status,
+                        evidence=evidence,
+                    ),
+                )
+            )
         return GateResult(
             status=_derive_status(outcomes),
             checks=tuple(check for _, check in outcomes),
@@ -111,13 +137,20 @@ class Gate:
     def _run_rule(self, rule_id: str, strength: RuleStrength, context: GateContext) -> CheckResult:
         validator = self._validators.get(rule_id)
         if validator is None:
+            citations = [
+                unmapped.quote for unmapped in context.contract.unmapped if unmapped.rule == rule_id
+            ]
             status = (
                 CheckStatus.MANUAL_REVIEW
-                if strength is RuleStrength.MANUAL_REVIEW
+                if strength is RuleStrength.MANUAL_REVIEW or bool(citations)
                 else CheckStatus.UNSUPPORTED
             )
-            reason = "no hay validador mecánico registrado para esta regla"
-            return CheckResult(id=rule_id, status=status, evidence={"reason": reason})
+            evidence: dict[str, object] = {
+                "reason": "no hay validador mecánico registrado para esta regla"
+            }
+            if citations:
+                evidence["citations"] = citations
+            return CheckResult(id=rule_id, status=status, evidence=evidence)
         outcome = validator(context)
         return CheckResult(id=rule_id, status=outcome.status, evidence=outcome.evidence)
 

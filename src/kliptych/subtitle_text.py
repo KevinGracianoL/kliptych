@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kliptych.gate.models import SubtitleSegment
 from kliptych.transcribe import Transcript
 
 if TYPE_CHECKING:
@@ -174,6 +175,158 @@ def piece_subtitle_text(
     segment = sources.segments[index] if 0 <= index < len(sources.segments) else None
     suffix = f"_{index:02d}" if total > 1 else ""
     return hydrate_piece_subtitle_text(
+        transcript=sources.transcript,
+        segment=segment,
+        subtitles_path=sources.subtitles_path,
+        work_dir=sources.work_dir,
+        suffix=suffix,
+    )
+
+
+_TIME_PARTS_HMS = 3
+_TIME_PARTS_MS = 2
+
+
+def _parse_ass_time(time_str: str) -> float | None:
+    parts = time_str.strip().split(":")
+    try:
+        if len(parts) == _TIME_PARTS_HMS:
+            return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+        if len(parts) == _TIME_PARTS_MS:
+            return float(parts[0]) * 60.0 + float(parts[1])
+        return float(time_str)
+    except ValueError:
+        return None
+
+
+def segment_subtitle_segments(
+    transcript: Transcript, segment: Segment | None = None
+) -> tuple[SubtitleSegment, ...]:
+    """Deriva los segmentos de subtítulos con tiempos relativos a la pieza.
+
+    Args:
+        transcript: Transcripción completa.
+        segment: Rango temporal del segmento dentro de la fuente, o None si la
+            pieza abarca todo el audio.
+
+    Returns:
+        Segmentos con marcas de tiempo relativas al inicio de la pieza (0.0s).
+    """
+    segments: list[SubtitleSegment] = []
+    if segment is not None:
+        duration_s = segment.end_s - segment.start_s
+        for word in transcript.words:
+            if word.end_s <= segment.start_s or word.start_s >= segment.end_s:
+                continue
+            start_s = max(0.0, word.start_s - segment.start_s)
+            end_s = min(duration_s, word.end_s - segment.start_s)
+            if end_s <= start_s:
+                continue
+            clean = word.text.strip()
+            if clean:
+                segments.append(SubtitleSegment(text=clean, start_s=start_s, end_s=end_s))
+    else:
+        for word in transcript.words:
+            if word.end_s <= word.start_s:
+                continue
+            clean = word.text.strip()
+            if clean:
+                segments.append(SubtitleSegment(text=clean, start_s=word.start_s, end_s=word.end_s))
+    return tuple(segments)
+
+
+def subtitle_segments_from_ass(path: Path) -> tuple[SubtitleSegment, ...]:
+    r"""Extrae los segmentos de diálogo con marcas de tiempo de un archivo ``.ass``.
+
+    Args:
+        path: Ruta del archivo ``.ass``.
+
+    Returns:
+        Tupla de SubtitleSegment con tiempos relativos y texto limpio.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    segments: list[SubtitleSegment] = []
+    for line in content.splitlines():
+        if not line.startswith(_DIALOGUE_PREFIX):
+            continue
+        fields = line[len(_DIALOGUE_PREFIX) :].split(",", _DIALOGUE_TEXT_INDEX)
+        if len(fields) != _DIALOGUE_FIELD_COUNT:
+            continue
+        start_s = _parse_ass_time(fields[1])
+        end_s = _parse_ass_time(fields[2])
+        if start_s is None or end_s is None or end_s <= start_s:
+            continue
+        cleaned = _TAG_PATTERN.sub("", fields[_DIALOGUE_TEXT_INDEX]).replace("\\N", " ").strip()
+        if cleaned:
+            segments.append(SubtitleSegment(text=cleaned, start_s=start_s, end_s=end_s))
+    return tuple(segments)
+
+
+def _segments_from_sources(
+    transcript: Transcript | None,
+    segment: Segment | None,
+    work_dir: Path | None,
+) -> tuple[SubtitleSegment, ...]:
+    if transcript is not None:
+        return segment_subtitle_segments(transcript, segment)
+    if work_dir is not None:
+        saved = _load_transcript(work_dir / "transcript.json")
+        if saved is not None:
+            return segment_subtitle_segments(saved, segment)
+    return ()
+
+
+def hydrate_piece_subtitle_segments(
+    *,
+    transcript: Transcript | None,
+    segment: Segment | None,
+    subtitles_path: Path | None = None,
+    work_dir: Path | None = None,
+    suffix: str = "",
+) -> tuple[SubtitleSegment, ...]:
+    """Deriva los ``subtitle_segments`` de una pieza con cadena de respaldo a disco.
+
+    Args:
+        transcript: Transcripción en memoria, o None.
+        segment: Rango temporal de la pieza, o None.
+        subtitles_path: Archivo .ass primario, o None.
+        work_dir: Directorio de trabajo con artefactos persistidos, o None.
+        suffix: Sufijo de lote ("" o "_NN").
+
+    Returns:
+        Tupla de SubtitleSegment de la pieza (vacía si no hay fuentes disponibles).
+    """
+    scoped = _segments_from_sources(transcript, segment, work_dir)
+    if scoped:
+        return scoped
+    for candidate in _ass_candidates(subtitles_path, work_dir, suffix):
+        segments = subtitle_segments_from_ass(candidate)
+        if segments:
+            return segments
+    return _segments_from_sources(transcript, None, work_dir)
+
+
+def piece_subtitle_segments(
+    sources: PieceSubtitleSources | None, *, index: int, total: int
+) -> tuple[SubtitleSegment, ...]:
+    """Deriva los ``subtitle_segments`` de la pieza ``index`` de un lote.
+
+    Args:
+        sources: Fuentes de subtítulos del lote, o None.
+        index: Índice del video final dentro del lote.
+        total: Número de videos finales del lote.
+
+    Returns:
+        Tupla de SubtitleSegment de la pieza.
+    """
+    if sources is None:
+        return ()
+    segment = sources.segments[index] if 0 <= index < len(sources.segments) else None
+    suffix = f"_{index:02d}" if total > 1 else ""
+    return hydrate_piece_subtitle_segments(
         transcript=sources.transcript,
         segment=segment,
         subtitles_path=sources.subtitles_path,

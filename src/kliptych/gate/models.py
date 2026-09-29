@@ -1,11 +1,12 @@
 """Modelos del gate: estados, resultado y pieza a validar."""
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, PlatformRules
@@ -83,6 +84,30 @@ class MediaInfo(_GateBase):
     height: int | None = None
 
 
+class SubtitleSegment(_GateBase):
+    """Fragmento subtitulado o en pantalla, con su ventana temporal.
+
+    Lleva el texto dicho o mostrado y cuándo empieza y termina (segundos
+    del artefacto final): el gate verifica ventanas como el hook de los
+    primeros 3 s contra estos segmentos, nunca contra ``subtitle_text``
+    plano (sin tiempos no hay ventana verificable).
+    """
+
+    text: str = Field(min_length=1)
+    start_s: float = Field(ge=0)
+    end_s: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _window_is_ordered(self) -> Self:
+        if not math.isfinite(self.start_s) or not math.isfinite(self.end_s):
+            msg = f"la ventana del segmento debe ser finita: [{self.start_s}, {self.end_s}]"
+            raise ValueError(msg)
+        if self.end_s <= self.start_s:
+            msg = f"start_s ({self.start_s}) debe ser menor que end_s ({self.end_s})"
+            raise ValueError(msg)
+        return self
+
+
 class Piece(_GateBase):
     """Pieza lista para validar: el artefacto final más sus textos."""
 
@@ -91,6 +116,8 @@ class Piece(_GateBase):
     caption: str
     hashtags: tuple[str, ...] = ()
     subtitle_text: str | None = None
+    subtitle_segments: tuple[SubtitleSegment, ...] = ()
+    screen_text_segments: tuple[SubtitleSegment, ...] = ()
     artifact_path: Path
 
 

@@ -135,6 +135,13 @@ class GeoTargetDraft(ContractBase):
     min_pct: FieldCandidate[int] | None = None
 
 
+class UnmappedRuleDraft(ContractBase):
+    """Requisito del brief sin validador mecánico propuesto con su cita."""
+
+    rule: FieldCandidate[str] | None = None
+    quote: FieldCandidate[str] | None = None
+
+
 class ContractDraft(ContractBase):
     """Salida cruda del LLM: todo campo es opcional y lleva su evidencia."""
 
@@ -149,6 +156,10 @@ class ContractDraft(ContractBase):
     watermark: WatermarkDraft | None = None
     spelling_locks: FieldCandidate[list[str]] | None = None
     prohibitions: FieldCandidate[list[str]] | None = None
+    hook_keyword: FieldCandidate[str] | None = None
+    hook_window_seconds: FieldCandidate[float] | None = None
+    brand_safety: FieldCandidate[bool] | None = None
+    unmapped: list[UnmappedRuleDraft] = Field(default_factory=list)
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

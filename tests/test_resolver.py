@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import ContractDraft, Platform, Segment
+from kliptych.contract import (
+    ContractDraft,
+    Platform,
+    Segment,
+    UnmappedRule,
+)
 from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus
 from kliptych.resolver import (
     IssueCode,
@@ -1012,3 +1017,32 @@ def test_resolve_contract_rejects_out_of_bounds_offset(tmp_path: Path) -> None:
     )
     with pytest.raises(ProvenanceError, match=r"rango|longitud"):
         _ = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_BRIEF_TEXT)
+
+
+def test_h3_resolver_resolves_hook_keyword_and_activates_rule(tmp_path: Path) -> None:
+    draft = make_draft(hook_keyword=candidate("mira esto"))
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.RESOLVED
+    contract = result.contract
+    assert contract is not None
+    assert contract.hook_keyword == "mira esto"
+    assert "hook.keyword" in contract.rules.hard
+
+
+def test_h3_resolver_resolves_unmapped_rules_and_defaults_to_manual_review(
+    tmp_path: Path,
+) -> None:
+    draft = make_draft(
+        unmapped=[
+            {
+                "rule": candidate("caption.tone"),
+                "quote": candidate("tono épico"),
+            }
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result.status is ResolutionStatus.RESOLVED
+    contract = result.contract
+    assert contract is not None
+    assert contract.unmapped == (UnmappedRule(rule="caption.tone", quote="tono épico"),)
+    assert "caption.tone" in contract.rules.manual_review

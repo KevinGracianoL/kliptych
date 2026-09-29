@@ -61,11 +61,14 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    UnmappedRule,
     Watermark,
     WatermarkPosition,
     active_restriction_rules,
 )
 from kliptych.contract.base import ContractBase
+from kliptych.gate.brand_safety import BRAND_SAFETY_MENTIONS
+from kliptych.gate.text import normalize_text
 
 
 class ResolutionStatus(StrEnum):
@@ -276,7 +279,16 @@ def _build_contract(
     assets = _resolve_assets(draft, registry, issues)
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
+    if (
+        _brief_indicates_brand_safety(brief_text, prohibitions)
+        or _value(draft.brand_safety) is True
+    ):
+        prohibitions_text = normalize_text(" ".join(prohibitions))
+        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
+            prohibitions = [*prohibitions, "brand safety"]
     official_audio = _resolve_official_audio(draft, platforms, issues)
+    hook_keyword = _value(draft.hook_keyword)
+    unmapped = _resolve_unmapped(draft, issues)
     segments = _resolve_segments(draft, mode, issues)
     rules = _resolve_rules(
         draft,
@@ -290,9 +302,11 @@ def _build_contract(
                 spelling_locks=tuple(spelling_locks),
                 prohibitions=tuple(prohibitions),
                 audio_policy=_value(draft.audio_policy),
+                hook_keyword=hook_keyword,
             ),
             brief_text=brief_text,
         ),
+        unmapped=unmapped,
         issues=issues,
     )
     geo_target = _resolve_geo_target(draft, issues)
@@ -311,6 +325,8 @@ def _build_contract(
         watermark=watermark,
         spelling_locks=spelling_locks,
         prohibitions=prohibitions,
+        hook_keyword=hook_keyword,
+        unmapped=unmapped,
         rules=rules,
         assets=assets,
         segments=segments,
@@ -320,6 +336,27 @@ def _build_contract(
             value=bool(_value(draft.analytics_proof_required))
         ),
     )
+
+
+def _resolve_unmapped(
+    draft: ContractDraft,
+    issues: list[ResolutionIssue],
+) -> tuple[UnmappedRule, ...]:
+    resolved: list[UnmappedRule] = []
+    for index, item in enumerate(draft.unmapped):
+        rule = _value(item.rule)
+        quote = _value(item.quote)
+        if rule and quote:
+            resolved.append(UnmappedRule(rule=rule, quote=quote))
+        elif rule or quote:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field=f"unmapped[{index}]",
+                    detail="unmapped exige rule y quote",
+                )
+            )
+    return tuple(resolved)
 
 
 def _value[T](candidate: FieldCandidate[T] | None) -> T | None:
@@ -377,6 +414,7 @@ def _collect_conflicts(draft: ContractDraft) -> list[ResolutionIssue]:
     _collect_platform_conflicts(draft, issues)
     _collect_global_conflicts(draft, issues)
     _collect_asset_conflicts(draft, issues)
+    _collect_unmapped_conflicts(draft, issues)
     return issues
 
 
@@ -388,10 +426,22 @@ def _collect_top_level_conflicts(
         ("spelling_locks", draft.spelling_locks),
         ("prohibitions", draft.prohibitions),
         ("audio_policy", draft.audio_policy),
+        ("hook_keyword", draft.hook_keyword),
+        ("hook_window_seconds", draft.hook_window_seconds),
+        ("brand_safety", draft.brand_safety),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
         _note_conflict(draft_candidate, field, issues)
+
+
+def _collect_unmapped_conflicts(
+    draft: ContractDraft,
+    issues: list[ResolutionIssue],
+) -> None:
+    for index, item in enumerate(draft.unmapped):
+        _note_conflict(item.rule, f"unmapped[{index}].rule", issues)
+        _note_conflict(item.quote, f"unmapped[{index}].quote", issues)
 
 
 def _collect_platform_conflicts(
@@ -828,6 +878,7 @@ def _resolve_rules(
     draft: ContractDraft,
     *,
     context: _RuleContext,
+    unmapped: tuple[UnmappedRule, ...] = (),
     issues: list[ResolutionIssue],
 ) -> RuleSet:
     draft_rules = draft.rules
@@ -877,6 +928,30 @@ def _resolve_rules(
         manual_review=manual_review,
         issues=issues,
     )
+    if (
+        _brief_indicates_brand_safety(context.brief_text, context.global_restrictions.prohibitions)
+        or _value(draft.brand_safety) is True
+    ) and "brand.safety" not in classified:
+        classified.add("brand.safety")
+        hard.append("brand.safety")
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.RULE_DEFAULTED,
+                field="rules.brand.safety",
+                detail="el brief indica brand safety; se clasifica como hard (fail-closed)",
+            )
+        )
+    for entry in unmapped:
+        if entry.rule not in classified:
+            classified.add(entry.rule)
+            manual_review.append(entry.rule)
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.RULE_DEFAULTED,
+                    field=f"rules.{entry.rule}",
+                    detail="requisito sin validador clasificado como manual_review",
+                )
+            )
     return RuleSet(hard=hard, recommended=recommended, manual_review=manual_review)
 
 
@@ -977,6 +1052,19 @@ def _brief_mentions_official_sound(brief_text: str | None) -> bool:
         return False
     normalized = _normalize_mention_text(brief_text)
     return any(mention in normalized for mention in _OFFICIAL_SOUND_MENTIONS)
+
+
+def _brief_indicates_brand_safety(
+    brief_text: str | None,
+    prohibitions: Sequence[str],
+) -> bool:
+    combined: list[str] = list(prohibitions)
+    if brief_text:
+        combined.append(brief_text)
+    if not combined:
+        return False
+    haystack = normalize_text(" ".join(combined))
+    return any(normalize_text(mention) in haystack for mention in BRAND_SAFETY_MENTIONS)
 
 
 def _force_policy_review_when_brief_mentions_official_sound(

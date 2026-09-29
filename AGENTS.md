@@ -46,9 +46,9 @@ un gate. Se arregla el código.
 
 ## Roles de agentes
 
-- **Gemini 3.1 Pro High via OmniRoute** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta. No implementa código y no hace code reviews.
+- **LongCat 2.0** es el orquestador: diseña, delega al programmer, verifica gates, abre PRs y reporta. No implementa código y no hace code reviews.
 - **Gemini 3.8 Flash High via OmniRoute (programmer)** es el agente de implementación: ejecuta tareas de código delegadas por el orquestador. No hace code reviews.
-- **Muse Spark 1.3 free (xhigh) via OpenCode Zen (`reviewer`)** es el agente de revisión: ejecuta la skill `evidence-driven-review` sobre PRs completos (snapshot base/head, nunca commit por commit). Usa cuota de OpenCode Zen, independiente de Gemini.
+- **Nemotron 3 Ultra 550B via OmniRoute (`reviewer`)** es el agente de revisión: ejecuta la skill `evidence-driven-review` sobre PRs completos (snapshot base/head, nunca commit por commit).
 - El orquestador no implementa código directamente; delega al programmer la implementación y al reviewer las reviews, y verifica los resultados.
 
 ## Higiene de ramas
@@ -69,7 +69,7 @@ un gate. Se arregla el código.
 ## Proceso de revisión
 
 Al terminar un PR y con el CI verde, el owner pide la revisión: `reviewer`
-(Muse Spark 1.3 free, xhigh) invoca la skill `evidence-driven-review` en modo
+(Nemotron 3 Ultra 550B via OmniRoute) invoca la skill `evidence-driven-review` en modo
 report (subagentes con contexto limpio, validación adversarial, snapshot
 base/head). Los hallazgos confirmados se corrigen y se hace re-revisión del
 delta. La skill no aprueba ni publica nada.

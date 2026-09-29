@@ -18,15 +18,27 @@ Catálogo de reglas que el contrato puede declarar:
   ffmpeg solo mide la pista por defecto, así que un MP4 con 0 o más de 1
   pista se rechaza sin medir; con exactamente 1 pista se mide con
   ``-map 0:a:0``.
+- ``brand.safety``: riesgo de controversia/toxicidad solo si la campaña lo
+  exige explícitamente (menciones en ``prohibitions``); con la regla
+  activa un evaluador LLM decide (riesgo → ``manual_review``) y cualquier
+  fallo del evaluador es ``manual_review`` (fail-closed, jamás ``pass``).
 - ``caption.first_line``: el caption abre con la primera línea exigida.
-- ``caption.forbidden``: no aparecen términos prohibidos en el caption
-  (union de ``caption_rules.forbidden`` y ``prohibitions`` de la campaña).
+- ``caption.forbidden``: no aparecen términos prohibidos en lo publicado
+  por la cuenta (caption y hashtags, unión de ``caption_rules.forbidden``
+  y ``prohibitions`` de la campaña) ni en lo dicho por el streamer
+  (``subtitle_text`` de Whisper). La comparación normaliza (NFKD sin
+  diacríticos + casefold) y exige frontera de palabra sobre la frase
+  escapada (``re.escape``). La autoría decide el veredicto: coincidencia
+  en lo publicado → ``fail``; solo en lo dicho → ``manual_review``.
 - ``caption.required_hashtag``: están los hashtags obligatorios, con frontera
   de token y comparación insensible a mayúsculas.
 - ``caption.required_mention``: están las menciones obligatorias, con frontera
   de token y comparación insensible a mayúsculas.
 - ``duration.min`` / ``duration.max``: duración dentro del rango; si no se
   pudo medir, el resultado es ``unsupported`` (jamás ``pass``).
+- ``hook.keyword``: la palabra clave de apertura aparece en subtítulos o
+  texto en pantalla con inicio <= 3.0 s; ausente o tardía es ``fail``. El
+  volumen de los primeros 3 s se adjunta como nota informativa.
 - ``subtitles.spelling_lock``: spelling exacto en subtítulos; sin subtítulos
   y con locks declarados el resultado es ``unsupported``.
 - ``watermark.full_video`` / ``watermark.present``: watermark exigido durante
@@ -47,7 +59,10 @@ from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError
 from kliptych.contract import AudioPolicy, AudioRule, Format
+from kliptych.gate.brand_safety import check_brand_safety
+from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.text import contains_phrase
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 
 __all__ = [
@@ -59,10 +74,12 @@ __all__ = [
     "check_audio_policy",
     "check_audio_present",
     "check_audio_silence",
+    "check_brand_safety",
     "check_duration_max",
     "check_duration_min",
     "check_first_line",
     "check_forbidden_terms",
+    "check_hook_keyword",
     "check_required_assets",
     "check_required_hashtags",
     "check_required_mentions",
@@ -448,25 +465,54 @@ def check_required_hashtags(context: GateContext) -> CheckOutcome:
 
 
 def check_forbidden_terms(context: GateContext) -> CheckOutcome:
-    """Verifica que no aparezcan términos prohibidos en caption ni hashtags.
+    """Verifica que no aparezcan términos prohibidos, con autoría separada.
+
+    Lo publicado por la cuenta (caption y hashtags) falla el gate; lo
+    dicho por el streamer (``subtitle_text`` de Whisper) exige revisión
+    humana: el texto del directo no lo redacta la campaña y un falso
+    positivo no debe rechazar la pieza en silencio.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si no aparece ningún término de ``caption_rules.forbidden`` ni
-        de las ``prohibitions`` de la campaña en el caption ni en los
-        hashtags; FAIL con los encontrados.
+        FAIL si algún término de ``caption_rules.forbidden`` o de las
+        ``prohibitions`` aparece en caption o hashtags; MANUAL_REVIEW si
+        solo aparece en ``subtitle_text``; PASS en caso contrario.
     """
-    haystack = "\n".join((context.piece.caption, *context.piece.hashtags)).lower()
     forbidden = list(
         dict.fromkeys([*context.rules.caption_rules.forbidden, *context.contract.prohibitions])
     )
-    found = [term for term in forbidden if term.lower() in haystack]
-    evidence: dict[str, object] = {"forbidden": forbidden, "found": found}
+    screen_texts = [seg.text for seg in context.piece.screen_text_segments]
+    published = "\n".join((context.piece.caption, *context.piece.hashtags, *screen_texts))
+    spoken = context.piece.subtitle_text or ""
+    found_published = [term for term in forbidden if _contains_forbidden_term(published, term)]
+    found_spoken = [
+        term
+        for term in forbidden
+        if term not in found_published and _contains_forbidden_term(spoken, term)
+    ]
+    if found_published:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "forbidden": forbidden,
+                "found": found_published,
+                "authorship": "published",
+            },
+        )
+    if found_spoken:
+        return CheckOutcome(
+            status=CheckStatus.MANUAL_REVIEW,
+            evidence={
+                "forbidden": forbidden,
+                "found": found_spoken,
+                "authorship": "spoken",
+            },
+        )
     return CheckOutcome(
-        status=CheckStatus.FAIL if found else CheckStatus.PASS,
-        evidence=evidence,
+        status=CheckStatus.PASS,
+        evidence={"forbidden": forbidden, "found": [], "authorship": "none"},
     )
 
 
@@ -569,12 +615,14 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "audio.present": check_audio_present,
     "audio.policy": check_audio_policy,
     "audio.silence": check_audio_silence,
+    "brand.safety": check_brand_safety,
     "caption.first_line": check_first_line,
     "caption.forbidden": check_forbidden_terms,
     "caption.required_hashtag": check_required_hashtags,
     "caption.required_mention": check_required_mentions,
     "duration.max": check_duration_max,
     "duration.min": check_duration_min,
+    "hook.keyword": check_hook_keyword,
     "subtitles.spelling_lock": check_spelling_locks,
     "watermark.full_video": check_watermark_full_video,
     "watermark.present": check_watermark_present,
@@ -601,6 +649,23 @@ def _duration_outcome(context: GateContext, bound: int | None, *, minimum: bool)
 def _contains_mention(caption: str, mention: str) -> bool:
     pattern = rf"(?<![\w@]){re.escape(mention)}(?!\w)"
     return re.search(pattern, caption, flags=re.IGNORECASE) is not None
+
+
+def _contains_forbidden_term(haystack: str, term: str) -> bool:
+    """Indica si una frase prohibida aparece con frontera de palabra.
+
+    Ambos lados se normalizan (NFKD sin diacríticos salvando la 'ñ' + casefold)
+    y se tratan los espacios múltiples y guiones bajos como separadores de frontera.
+
+    Args:
+        haystack: Texto donde buscar (ya incluye caption/hashtags o
+            subtítulos, según la autoría evaluada).
+        term: Frase prohibida tal como la declara el contrato.
+
+    Returns:
+        True si la frase normalizada aparece con fronteras de palabra.
+    """
+    return contains_phrase(haystack, term)
 
 
 def _contains_hashtag(caption: str, tag: str) -> bool:

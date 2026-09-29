@@ -15,6 +15,7 @@ from kliptych.contract.draft import (
     RuleSetDraft,
     SegmentDraft,
     SegmentsDraft,
+    UnmappedRuleDraft,
     WatermarkDraft,
 )
 from kliptych.contract.enums import (
@@ -29,6 +30,7 @@ from kliptych.contract.enums import (
 )
 from kliptych.contract.evidence import Confidence, FieldCandidate, SourceEvidence
 from kliptych.contract.schema import (
+    KNOWN_VALIDATOR_RULES,
     AnalyticsProofRequired,
     AssetBundle,
     AssetRef,
@@ -46,6 +48,7 @@ from kliptych.contract.schema import (
     PlatformRules,
     RuleSet,
     Segment,
+    UnmappedRule,
     Watermark,
     WatermarkConfig,
     active_restriction_rules,
@@ -55,6 +58,7 @@ from kliptych.contract.schema import (
 )
 
 __all__ = [
+    "KNOWN_VALIDATOR_RULES",
     "AnalyticsProofRequired",
     "AssetBundle",
     "AssetDraft",
@@ -96,6 +100,8 @@ __all__ = [
     "SegmentDraft",
     "SegmentsDraft",
     "SourceEvidence",
+    "UnmappedRule",
+    "UnmappedRuleDraft",
     "Watermark",
     "WatermarkConfig",
     "WatermarkDraft",

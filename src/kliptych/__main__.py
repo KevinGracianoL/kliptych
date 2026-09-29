@@ -842,6 +842,7 @@ def _make_default_campaign_manager(
         gate=effective_gate,
         destination=effective_dest,
         assets=effective_assets,
+        model=backend,
     )
 
 

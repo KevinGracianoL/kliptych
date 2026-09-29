@@ -21,8 +21,17 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from kliptych.campaign_types import CampaignStatus
+from kliptych.gate.brand_safety import (
+    ChatJsonModel,
+    make_brand_safety_validator,
+    make_model_assessor,
+)
 from kliptych.intelligence import Archetype
-from kliptych.subtitle_text import PieceSubtitleSources, piece_subtitle_text
+from kliptych.subtitle_text import (
+    PieceSubtitleSources,
+    piece_subtitle_segments,
+    piece_subtitle_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -137,6 +146,7 @@ class CampaignManager:
         gate: Gate | None = None,
         assets: AssetRegistry | None = None,
         destination: Path | None = None,
+        model: object | None = None,
     ) -> None:
         """Configura el controlador y sus dependencias.
 
@@ -148,6 +158,7 @@ class CampaignManager:
             gate: Gate configurado para verificar las entregas; opcional.
             assets: Registro de assets del workspace; opcional.
             destination: Directorio de destino del paquete de entrega; opcional.
+            model: Modelo o backend LLM con soporte chat_json; opcional.
         """
         self._classifier: CampaignClassifier = classifier
         self._proposal_engine: ProposalEngine = proposal_engine
@@ -156,6 +167,7 @@ class CampaignManager:
         self._gate: Gate | None = gate
         self._assets: AssetRegistry | None = assets
         self._destination: Path | None = destination
+        self._model: object | None = model
 
     def process(
         self,
@@ -354,6 +366,12 @@ class CampaignManager:
         if effective_gate is None:
             msg = f"la campaña {campaign.campaign_id} requiere un Gate configurado para su entrega"
             raise CampaignManagerError(msg)
+
+        if isinstance(self._model, ChatJsonModel) and hasattr(effective_gate, "register_validator"):
+            effective_gate.register_validator(
+                "brand.safety",
+                make_brand_safety_validator(make_model_assessor(self._model)),
+            )
 
         from kliptych.assets import AssetRegistry
         from kliptych.exporter import ExportStatus, export_delivery
@@ -564,6 +582,9 @@ def _build_pieces(
     for vid_idx, video in enumerate(videos):
         index_for_id = vid_idx if multiple_videos else None
         subtitle_text = piece_subtitle_text(subtitle_sources, index=vid_idx, total=len(videos))
+        subtitle_segments = piece_subtitle_segments(
+            subtitle_sources, index=vid_idx, total=len(videos)
+        )
         for plat in platforms:
             plat_rules = contract.platforms[plat]
             piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
@@ -580,6 +601,7 @@ def _build_pieces(
                     caption=piece_caption,
                     hashtags=piece_tags,
                     subtitle_text=subtitle_text,
+                    subtitle_segments=subtitle_segments,
                     artifact_path=video,
                 )
             )

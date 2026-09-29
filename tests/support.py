@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from kliptych.contract import AssetRef, AudioPolicy, Contract, ContractDraft, Platform
-from kliptych.gate import MediaInfo, Piece, ProbeError
+from kliptych.gate import MediaInfo, Piece, ProbeError, SubtitleSegment
 
 ALL_HARD_RULES = (
     "artifact.integrity",
@@ -44,6 +44,27 @@ def make_asset_ref(
     )
 
 
+def _caption_rule_ids(
+    *,
+    first_line: str | None,
+    forbidden: Sequence[str],
+    prohibitions: Sequence[str],
+    must_mention: Sequence[str],
+    required_mentions: Sequence[str],
+    required_hashtags: Sequence[str],
+) -> list[str]:
+    active: list[str] = []
+    if first_line is not None:
+        active.append("caption.first_line")
+    if forbidden or prohibitions:
+        active.append("caption.forbidden")
+    if must_mention or required_mentions:
+        active.append("caption.required_mention")
+    if required_hashtags:
+        active.append("caption.required_hashtag")
+    return active
+
+
 def _active_rule_ids(
     *,
     min_s: int | None,
@@ -58,20 +79,23 @@ def _active_rule_ids(
     required_assets: Sequence[AssetRef],
     watermark_required: bool,
     watermark_visible_full_video: bool,
+    hook_keyword: str | None,
 ) -> list[str]:
     active: list[str] = []
     if min_s is not None:
         active.append("duration.min")
     if max_s is not None:
         active.append("duration.max")
-    if first_line is not None:
-        active.append("caption.first_line")
-    if forbidden or prohibitions:
-        active.append("caption.forbidden")
-    if must_mention or required_mentions:
-        active.append("caption.required_mention")
-    if required_hashtags:
-        active.append("caption.required_hashtag")
+    active.extend(
+        _caption_rule_ids(
+            first_line=first_line,
+            forbidden=forbidden,
+            prohibitions=prohibitions,
+            must_mention=must_mention,
+            required_mentions=required_mentions,
+            required_hashtags=required_hashtags,
+        )
+    )
     if spelling_locks:
         active.append("subtitles.spelling_lock")
     if required_assets:
@@ -82,6 +106,8 @@ def _active_rule_ids(
     )
     if watermark_rule is not None:
         active.append(watermark_rule)
+    if hook_keyword is not None:
+        active.append("hook.keyword")
     return active
 
 
@@ -121,6 +147,8 @@ def make_contract(
     audio_rule: str = "own_clip",
     language: str | None = None,
     audio_policy: AudioPolicy | None = None,
+    hook_keyword: str | None = None,
+    unmapped: Sequence[tuple[str, str]] = (),
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
@@ -148,6 +176,7 @@ def make_contract(
         required_assets=required_assets,
         watermark_required=watermark_required,
         watermark_visible_full_video=watermark_visible_full_video,
+        hook_keyword=hook_keyword,
     ):
         if rule_id not in classified:
             if rule_id == "audio.policy":
@@ -196,6 +225,8 @@ def make_contract(
             "spelling_locks": list(spelling_locks),
             "prohibitions": list(prohibitions),
             "audio_policy": audio_policy,
+            "hook_keyword": hook_keyword,
+            "unmapped": [{"rule": rule, "quote": quote} for rule, quote in unmapped],
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),
@@ -215,6 +246,8 @@ def make_piece(
     caption: str = "mira @marca #marca",
     hashtags: Sequence[str] = (),
     subtitle_text: str | None = None,
+    subtitle_segments: Sequence[SubtitleSegment] = (),
+    screen_text_segments: Sequence[SubtitleSegment] = (),
     platform: Platform = Platform.TIKTOK,
 ) -> Piece:
     return Piece(
@@ -223,6 +256,8 @@ def make_piece(
         caption=caption,
         hashtags=tuple(hashtags),
         subtitle_text=subtitle_text,
+        subtitle_segments=tuple(subtitle_segments),
+        screen_text_segments=tuple(screen_text_segments),
         artifact_path=artifact,
     )
 

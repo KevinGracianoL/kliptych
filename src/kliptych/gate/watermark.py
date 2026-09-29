@@ -5,21 +5,22 @@
   distribuidas con densidad temporal por la duración: si desaparece a
   mitad o al final del clip, el resultado es ``fail``.
 
-Cada muestra extrae un frame con ffmpeg (lista de argumentos, sin shell;
-``-ss`` después de ``-i`` para seek exacto) y lo compara con el PNG de
-referencia reescalado al tamaño esperado del render (con máscara alfa
-cuando el PNG la trae). La ubicación se busca con ``TM_SQDIFF``
-enmascarado (estable, sin NaN ni inf en parches planos) y la similitud se
-puntúa con la correlación cruzada normalizada calculada explícitamente en
-la caja esperada: al restar las medias locales, la mezcla del render
-(``opacidad * logo + (1 - opacidad) * fondo``) es una transformación afín
-de la intensidad y puntúa igual con cualquier opacidad, así que un logo
-semitransparente (opacidad mínima del contrato: 0.15) se detecta igual que
-uno opaco. (El mapa de ``TM_CCOEFF_NORMED`` enmascarado de OpenCV es
-numéricamente inestable —valores fuera de [-1, 1], ±inf— y su argmax
-global no es fiable; por eso la NCC se calcula a mano en una sola caja.)
-Los parches planos del fondo (varianza cero) no correlacionan: la muestra
-falla en vez de producir un falso positivo.
+Las muestras se leen con una sola captura ``cv2.VideoCapture`` (un ``open``
+y un seek por instante, sin un proceso ffmpeg por frame). Cada frame se
+compara con el PNG de referencia reescalado al tamaño esperado del render
+(con máscara alfa cuando el PNG la trae). La ubicación se busca con
+``TM_SQDIFF`` enmascarado (estable, sin NaN ni inf en parches planos) y la
+similitud se puntúa con la correlación cruzada normalizada calculada
+explícitamente en la caja esperada: al restar las medias locales, la mezcla
+del render (``opacidad * logo + (1 - opacidad) * fondo``) es una
+transformación afín de la intensidad y puntúa igual con cualquier opacidad,
+así que un logo semitransparente (opacidad mínima del contrato: 0.15) se
+detecta igual que uno opaco sobre fondos planos. (El mapa de
+``TM_CCOEFF_NORMED`` enmascarado de OpenCV es numéricamente inestable
+—valores fuera de [-1, 1], ±inf— y su argmax global no es fiable; por eso
+la NCC se calcula a mano en una sola caja.) Los parches planos del fondo
+(varianza cero) no correlacionan: la muestra falla en vez de producir un
+falso positivo.
 
 Los templates uniformes (varianza ~0 bajo la máscara, p. ej. un logo
 blanco plano) dejan a CCOEFF sin varianza que correlacionar: esas muestras
@@ -27,6 +28,20 @@ se verifican por contraste de borde en la posición esperada (media
 interior del logo frente al anillo de fondo que lo rodea), con un umbral
 que escala con la opacidad esperada del contrato. Sin watermark ambas
 medias son el mismo fondo y el contraste es ~0.
+
+Sobre fondos texturizados un template multicolor semitransparente
+(opacidad < 0.7) no alcanza el umbral NCC de 0.75 aunque el logo esté
+presente (NCC ~0.37 a opacidad 0.3 sobre ``testsrc2``, frente a ~0.0 sin
+watermark). Para esos casos la muestra exige señal consistente del
+contorno alfa: NCC sobre el suelo de textura más coincidencia de
+gradientes (magnitud Sobel del frame frente a la del template, bajo la
+máscara). Sin señal en algún frame (NCC bajo el suelo de ausencia o fuera
+de zona) el resultado es ``fail``; con señal consistente pero sin llegar
+al umbral fuerte el resultado es ``manual_review`` (revisión humana,
+fail-closed). La 4.ª ruta de W1-bis permite un ``pass`` directo cuando la
+opacidad es < 0.7 en un template no uniforme si la correlación NCC es
+>= 0.22 y la coincidencia de bordes alfa (alpha-edge matching) alcanza
+el umbral fuerte >= 0.90.
 
 La muestra exige tres condiciones: similitud sobre el umbral (correlación
 o contraste de borde según el template), posición en la zona del contrato
@@ -36,18 +51,15 @@ ancho del frame): un logo más pequeño o más grande que el contratado no
 correlaciona y falla.
 
 Fail-closed: sin PNG resoluble, sin video legible, sin duración medible,
-sin ffmpeg/cv2 o con cualquier muestra no evaluable, el resultado es
-``fail`` (jamás ``pass`` ni ``unsupported``).
+sin cv2 o con cualquier muestra no evaluable, el resultado es ``fail``
+(jamás ``pass`` ni ``unsupported``); la ruta semitransparente devuelve
+``manual_review`` (jamás ``pass`` silencioso sin contorno fuerte).
 """
 
 from __future__ import annotations
 
 import math
-import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never, cast
 
 from kliptych.assets import AssetError
@@ -56,6 +68,7 @@ from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     import cv2
     import numpy as np
@@ -66,7 +79,6 @@ _FULL_VIDEO_MAX_SAMPLES = 120
 _FULL_VIDEO_SAMPLES_PER_SECOND = 4
 _MATCH_THRESHOLD = 0.75
 _MARGIN = 20
-_FRAME_TIMEOUT_S = 30.0
 _GRAY_IMAGE_DIMS = 2
 _COLOR_IMAGE_DIMS = 3
 _RGB_CHANNELS = 3
@@ -76,6 +88,11 @@ _EDGE_NOISE_FLOOR = 5.0
 _EDGE_OPACITY_GAIN = 12.0
 _EDGE_RING_PAD = 8
 _NCC_MIN_DENOMINATOR = 1e-6
+_NO_SIGNAL_NCC = 0.18
+_TRANSLUCENT_MIN_NCC = 0.22
+_TRANSLUCENT_MIN_EDGE = 0.35
+_TRANSLUCENT_STRONG_EDGE = 0.90
+_TRANSLUCENT_MAX_OPACITY = 0.7
 
 
 class WatermarkError(Exception):
@@ -99,7 +116,6 @@ class _Ready:
     template: _Template
     duration: float
     video: Path
-    ffmpeg: str
     config: Watermark
 
 
@@ -116,13 +132,16 @@ class Sample:
     expected_y: float
     reason: str | None = None
     metric: Literal["ccoeff", "edge"] = "ccoeff"
+    edge_score: float | None = None
 
     def evidence(self) -> dict[str, object]:
         """Serializa la muestra para la evidencia del check.
 
         ``correlation`` guarda la correlación CCOEFF (métrica
         ``ccoeff``) o el contraste de borde en niveles de gris
-        (métrica ``edge``, para templates uniformes).
+        (métrica ``edge``, para templates uniformes). ``edge_score``
+        guarda la coincidencia de gradientes del contorno alfa
+        (métrica ``ccoeff`` sobre fondos texturizados).
 
         Returns:
             El dict con tiempo, correlación, posición detectada y esperada.
@@ -137,6 +156,8 @@ class Sample:
         }
         if self.reason is not None:
             detail["reason"] = self.reason
+        if self.edge_score is not None:
+            detail["edge_score"] = round(self.edge_score, 4)
         return detail
 
 
@@ -146,6 +167,10 @@ def _pass(**evidence: object) -> CheckOutcome:
 
 def _fail(**evidence: object) -> CheckOutcome:
     return CheckOutcome(status=CheckStatus.FAIL, evidence=dict(evidence))
+
+
+def _review(**evidence: object) -> CheckOutcome:
+    return CheckOutcome(status=CheckStatus.MANUAL_REVIEW, evidence=dict(evidence))
 
 
 def check_watermark_present(context: GateContext) -> CheckOutcome:
@@ -216,14 +241,10 @@ def _prepare_evaluation(context: GateContext, rule: str) -> _Ready | CheckOutcom
     video = context.piece.artifact_path
     if not video.is_file():
         return _fail(rule=rule, reason="el artefacto no existe; no se pudo verificar el watermark")
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return _fail(rule=rule, reason="ffmpeg no está disponible; no se pudo extraer frames")
     return _Ready(
         template=template,
         duration=duration,
         video=video,
-        ffmpeg=ffmpeg,
         config=context.contract.watermark,
     )
 
@@ -233,6 +254,12 @@ def _verdict(
 ) -> CheckOutcome:
     """Deriva el veredicto de las muestras evaluadas.
 
+    Además del paso fuerte (todas/alguna muestra sobre el umbral, según el
+    modo), reconoce la ruta semitransparente sobre fondos texturizados:
+    señal consistente del contorno sin llegar al umbral fuerte devuelve
+    ``manual_review`` (o ``pass`` con contorno muy fuerte); sin señal en
+    algún frame el resultado es ``fail``.
+
     Args:
         rule: Id de la regla en evaluación, para la evidencia.
         config: Watermark exigido por el contrato.
@@ -241,7 +268,8 @@ def _verdict(
             (``present``).
 
     Returns:
-        PASS si se cumple el modo exigido; FAIL en caso contrario.
+        PASS si se cumple el modo exigido; MANUAL_REVIEW con señal
+        semitransparente consistente; FAIL en caso contrario.
     """
     matched = [sample for sample in samples if sample.matched]
     evidence: dict[str, object] = {
@@ -255,20 +283,196 @@ def _verdict(
         "samples": [sample.evidence() for sample in samples],
     }
     if full_video:
-        if len(matched) == len(samples):
-            return _pass(**evidence)
-        missing = [sample.t_s for sample in samples if not sample.matched]
-        return _fail(
-            **evidence,
-            missing_timestamps=[round(stamp, 3) for stamp in missing],
-            reason="el watermark falta en alguna muestra del video",
-        )
+        return _verdict_full_video(config, samples, matched, evidence)
+    return _verdict_present(config, samples, matched, evidence)
+
+
+def _verdict_full_video(
+    config: Watermark,
+    samples: list[Sample],
+    matched: list[Sample],
+    evidence: dict[str, object],
+) -> CheckOutcome:
+    """Deriva el veredicto cuando el watermark debe cubrir todo el video.
+
+    Args:
+        config: Watermark exigido por el contrato.
+        samples: Muestras evaluadas, en orden temporal.
+        matched: Muestras que superaron la vía fuerte.
+        evidence: Evidencia base ya serializada.
+
+    Returns:
+        PASS si todas las muestras cumplen; MANUAL_REVIEW (o PASS) con
+        señal semitransparente consistente; FAIL en caso contrario.
+    """
+    if len(matched) == len(samples):
+        return _pass(**evidence)
+    translucent = _translucent_status(config, samples, full_video=True)
+    if translucent is not None:
+        return _translucent_outcome(translucent, evidence)
+    missing = [sample.t_s for sample in samples if not sample.matched]
+    return _fail(
+        **evidence,
+        missing_timestamps=[round(stamp, 3) for stamp in missing],
+        reason="el watermark falta en alguna muestra del video",
+    )
+
+
+def _verdict_present(
+    config: Watermark,
+    samples: list[Sample],
+    matched: list[Sample],
+    evidence: dict[str, object],
+) -> CheckOutcome:
+    """Deriva el veredicto cuando basta con que el watermark aparezca una vez.
+
+    Args:
+        config: Watermark exigido por el contrato.
+        samples: Muestras evaluadas, en orden temporal.
+        matched: Muestras que superaron la vía fuerte.
+        evidence: Evidencia base ya serializada.
+
+    Returns:
+        PASS si alguna muestra cumple; MANUAL_REVIEW (o PASS) con señal
+        semitransparente; FAIL en caso contrario.
+    """
     if matched:
         return _pass(
             **evidence,
             matched_timestamps=[round(sample.t_s, 3) for sample in matched],
         )
+    translucent = _translucent_status(config, samples, full_video=False)
+    if translucent is not None:
+        return _translucent_outcome(translucent, evidence)
     return _fail(**evidence, reason="el watermark no aparece en ninguna muestra del video")
+
+
+def _translucent_outcome(status: CheckStatus, evidence: dict[str, object]) -> CheckOutcome:
+    """Construye el resultado de la ruta semitransparente.
+
+    Args:
+        status: PASS con contorno muy fuerte o MANUAL_REVIEW consistente.
+        evidence: Evidencia base ya serializada.
+
+    Returns:
+        El PASS con decisión documentada o el MANUAL_REVIEW fail-closed.
+    """
+    if status is CheckStatus.PASS:
+        return _pass(**evidence, decision="translucent-strong-edge")
+    return _review(
+        **evidence,
+        decision="translucent-consistent",
+        reason=(
+            "el watermark semitransparente deja señal consistente del contorno "
+            "sobre el fondo texturizado sin alcanzar el umbral fuerte; "
+            "requiere revisión humana"
+        ),
+    )
+
+
+def _translucent_status(
+    config: Watermark, samples: list[Sample], *, full_video: bool
+) -> CheckStatus | None:
+    """Evalúa la ruta semitransparente sobre fondos texturizados.
+
+    Solo aplica con templates estructurados (métrica ``ccoeff``) y opacidad
+    contratada bajo ``_TRANSLUCENT_MAX_OPACITY``: en ese régimen la mezcla
+    del render atenúa la NCC sin borrar los bordes del contorno alfa. Cada
+    muestra con señal exige NCC sobre el suelo de textura y coincidencia
+    de gradientes, ambas medidas en la caja esperada del contrato (esa
+    medición localizada ya es la evidencia de posición: el argmin global
+    de ``_locate`` no es fiable sobre fondos texturizados y no se usa
+    aquí). Sin señal en algún frame (modo ``full_video``) o en todos
+    (modo ``present``) no hay revisión: es ``fail`` aguas arriba.
+
+    Args:
+        config: Watermark exigido por el contrato.
+        samples: Muestras evaluadas, en orden temporal.
+        full_video: Si todas deben tener señal o basta una.
+
+    Returns:
+        PASS con contorno muy fuerte, MANUAL_REVIEW con señal consistente,
+        o ``None`` si la ruta no aplica.
+    """
+    if config.opacity >= _TRANSLUCENT_MAX_OPACITY:
+        return None
+    if not samples or any(sample.metric != "ccoeff" for sample in samples):
+        return None
+    if full_video:
+        return _translucent_all(samples)
+    return _translucent_any(samples)
+
+
+def _translucent_all(samples: list[Sample]) -> CheckStatus | None:
+    """Evalúa la señal semitransparente cuando todas las muestras la exigen.
+
+    Args:
+        samples: Muestras evaluadas, en orden temporal.
+
+    Returns:
+        PASS si todas tienen contorno muy fuerte, MANUAL_REVIEW si todas
+        tienen señal consistente, o ``None`` si alguna no da señal.
+    """
+    if any(not _has_translucent_signal(sample) for sample in samples):
+        return None
+    if all(_has_strong_edge(sample) for sample in samples):
+        return CheckStatus.PASS
+    return CheckStatus.MANUAL_REVIEW
+
+
+def _translucent_any(samples: list[Sample]) -> CheckStatus | None:
+    """Evalúa la señal semitransparente cuando basta una muestra con señal.
+
+    Args:
+        samples: Muestras evaluadas, en orden temporal.
+
+    Returns:
+        PASS si alguna señal tiene contorno muy fuerte, MANUAL_REVIEW si
+        hay al menos una señal consistente, o ``None`` sin señales.
+    """
+    signals = [sample for sample in samples if _has_translucent_signal(sample)]
+    if not signals:
+        return None
+    if any(_has_strong_edge(sample) for sample in signals):
+        return CheckStatus.PASS
+    return CheckStatus.MANUAL_REVIEW
+
+
+def _has_strong_edge(sample: Sample) -> bool:
+    """Indica si la coincidencia de gradientes supera el umbral estricto.
+
+    Args:
+        sample: Muestra con coincidencia de gradientes medida.
+
+    Returns:
+        True si el contorno alfa coincide con fuerza de ``pass`` directo.
+    """
+    return sample.edge_score is not None and sample.edge_score >= _TRANSLUCENT_STRONG_EDGE
+
+
+def _has_translucent_signal(sample: Sample) -> bool:
+    """Indica si una muestra conserva señal del contorno alfa en la caja esperada.
+
+    Una muestra ya emparejada por la vía fuerte cuenta como señal: la ruta
+    semitransparente solo relaja el umbral NCC, nunca la coincidencia del
+    contorno. Sin watermark el fondo texturizado no correlaciona en la
+    caja esperada (NCC ~0.0) ni coincide en gradientes (~0.0); con el logo
+    en otra posición la caja esperada también contiene solo fondo y la
+    muestra no da señal (``fail`` aguas arriba).
+
+    Args:
+        sample: Muestra con similitud y coincidencia de gradientes medidas
+            en la caja esperada del contrato.
+
+    Returns:
+        True si la muestra tiene NCC sobre el suelo de textura y
+        coincidencia de gradientes sobre su umbral, en la caja esperada.
+    """
+    if sample.metric != "ccoeff":
+        return False
+    if sample.correlation < _TRANSLUCENT_MIN_NCC:
+        return False
+    return sample.edge_score is not None and sample.edge_score >= _TRANSLUCENT_MIN_EDGE
 
 
 def _load_template(context: GateContext) -> _Template:
@@ -345,7 +549,11 @@ def _full_video_timestamps(duration: float) -> list[float]:
 
 
 def _evaluate_samples(ready: _Ready, timestamps: Sequence[float]) -> list[Sample]:
-    """Evalúa las muestras temporales del video.
+    """Evalúa las muestras temporales del video con una sola captura.
+
+    Abre el artefacto una vez con ``cv2.VideoCapture`` y busca cada
+    instante (un seek por muestra, sin procesos ffmpeg por frame): un clip
+    de 20 s con 80 muestras se evalúa en segundos en vez de minutos.
 
     Args:
         ready: Entradas verificadas de la evaluación.
@@ -354,40 +562,84 @@ def _evaluate_samples(ready: _Ready, timestamps: Sequence[float]) -> list[Sample
     Returns:
         Una muestra por instante, en orden temporal.
     """
-    with tempfile.TemporaryDirectory(prefix="kliptych-wm-") as tmpdir:
-        tmp = Path(tmpdir)
-        return [
-            _evaluate_frame(ready, tmp / f"frame-{index:02d}.png", t_s)
-            for index, t_s in enumerate(timestamps)
-        ]
+    capture = _open_capture(ready.video)
+    try:
+        samples: list[Sample] = []
+        for t_s in timestamps:
+            frame = _read_frame_at(capture, ready.video, t_s)
+            shape = cast("tuple[int, ...]", frame.shape)
+            samples.append(_match_sample(frame, (shape[1], shape[0]), ready, t_s))
+        return samples
+    finally:
+        _ = capture.release()
 
 
-def _evaluate_frame(ready: _Ready, frame_path: Path, t_s: float) -> Sample:
-    """Evalúa una muestra temporal: similitud, zona y tamaño.
+def _open_capture(video: Path) -> cv2.VideoCapture:
+    """Abre el artefacto para lectura de frames con seek (fail-closed).
 
     Args:
-        ready: Entradas verificadas de la evaluación.
-        frame_path: Ruta del PNG temporal para el frame extraído.
+        video: Ruta del artefacto a verificar.
+
+    Returns:
+        La captura abierta, lista para buscar instantes.
+
+    Raises:
+        WatermarkError: Si cv2 no está disponible o el video no se pudo abrir.
+    """
+    import cv2
+
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        msg = f"el video no se pudo abrir para lectura de frames: {video}"
+        raise WatermarkError(msg)
+    return capture
+
+
+def _read_frame_at(capture: cv2.VideoCapture, video: Path, t_s: float) -> cv2.typing.MatLike:
+    """Lee el frame de un instante con seek sobre la captura abierta.
+
+    Args:
+        capture: Captura abierta del artefacto.
+        video: Ruta del artefacto, para los errores.
         t_s: Segundo del video a muestrear.
 
     Returns:
-        La muestra con su veredicto y evidencia.
+        El frame en grises ya decodificado.
 
     Raises:
-        WatermarkError: Si el frame no se pudo extraer o decodificar.
+        WatermarkError: Si el seek falla, el frame no se pudo leer o quedó vacío.
     """
-    try:
-        import cv2
-    except ImportError as error:
-        msg = "opencv (cv2) no está disponible; no se pudo verificar el watermark"
-        raise WatermarkError(msg) from error
-    _extract_frame(ready.ffmpeg, ready.video, t_s, frame_path)
-    frame = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
-    if frame is None:
-        msg = f"el frame en t={t_s:.3f}s no se pudo decodificar"
+    import cv2
+
+    if not capture.set(cv2.CAP_PROP_POS_MSEC, t_s * 1000.0):
+        msg = f"no se pudo buscar t={t_s:.3f}s en {video}"
         raise WatermarkError(msg)
-    shape = cast("tuple[int, ...]", frame.shape)
-    return _match_sample(frame, (shape[1], shape[0]), ready, t_s)
+    ok, frame = capture.read()
+    decoded = cast("cv2.typing.MatLike | None", frame)
+    if not ok or decoded is None:
+        msg = f"el frame en t={t_s:.3f}s no se pudo leer de {video}"
+        raise WatermarkError(msg)
+    gray = (
+        cv2.cvtColor(decoded, cv2.COLOR_BGR2GRAY) if decoded.ndim == _COLOR_IMAGE_DIMS else decoded
+    )
+    shape = cast("tuple[int, ...]", gray.shape)
+    if len(shape) < _GRAY_IMAGE_DIMS or shape[0] <= 0 or shape[1] <= 0:
+        msg = f"el frame en t={t_s:.3f}s quedó vacío tras decodificar"
+        raise WatermarkError(msg)
+    return gray
+
+
+@dataclass(frozen=True, slots=True)
+class _Expected:
+    """Caja esperada del render para una muestra, con su instante."""
+
+    frame_w: int
+    frame_h: int
+    width: int
+    height: int
+    x: float
+    y: float
+    t_s: float
 
 
 def _match_sample(
@@ -421,34 +673,18 @@ def _match_sample(
         msg = f"tamaño esperado degenerado {expected_w}x{expected_h} en t={t_s:.3f}s"
         raise WatermarkError(msg)
     resized, mask = _resized_template(ready.template, expected_w, expected_h)
-    expected_x, expected_y = expected_top_left(
-        frame_w, frame_h, expected_w, expected_h, ready.config.position
+    expected = _Expected(
+        frame_w,
+        frame_h,
+        expected_w,
+        expected_h,
+        *expected_top_left(frame_w, frame_h, expected_w, expected_h, ready.config.position),
+        t_s,
     )
     if _template_std(resized, mask) < _UNIFORM_TEMPLATE_STD:
-        contrast = _edge_contrast(frame, resized, mask, round(expected_x), round(expected_y))
-        sample = Sample(
-            t_s=t_s,
-            matched=True,
-            correlation=0.0 if contrast is None else contrast,
-            x=round(expected_x),
-            y=round(expected_y),
-            expected_x=expected_x,
-            expected_y=expected_y,
-            metric="edge",
-        )
+        sample = _match_uniform(frame, resized, mask, expected)
     else:
-        x, y = _locate(frame, resized, mask, t_s)
-        score = _masked_ncc(frame, resized, mask, round(expected_x), round(expected_y))
-        sample = Sample(
-            t_s=t_s,
-            matched=True,
-            correlation=0.0 if score is None else score,
-            x=x,
-            y=y,
-            expected_x=expected_x,
-            expected_y=expected_y,
-            metric="ccoeff",
-        )
+        sample = _match_structured(frame, resized, mask, expected)
     failure = _sample_failure(sample, frame_w, frame_h, expected_w, ready.config)
     if failure is None:
         return sample
@@ -462,6 +698,70 @@ def _match_sample(
         expected_y=sample.expected_y,
         reason=failure,
         metric=sample.metric,
+        edge_score=sample.edge_score,
+    )
+
+
+def _match_uniform(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    expected: _Expected,
+) -> Sample:
+    """Verifica un template uniforme por contraste de borde en la caja esperada.
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+        expected: Caja esperada del render con su instante.
+
+    Returns:
+        La muestra con el contraste de borde como similitud.
+    """
+    contrast = _edge_contrast(frame, resized, mask, round(expected.x), round(expected.y))
+    return Sample(
+        t_s=expected.t_s,
+        matched=True,
+        correlation=0.0 if contrast is None else contrast,
+        x=round(expected.x),
+        y=round(expected.y),
+        expected_x=expected.x,
+        expected_y=expected.y,
+        metric="edge",
+    )
+
+
+def _match_structured(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    expected: _Expected,
+) -> Sample:
+    """Verifica un template estructurado: NCC y gradientes en la caja esperada.
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+        expected: Caja esperada del render con su instante.
+
+    Returns:
+        La muestra con NCC, coincidencia de gradientes y posición detectada.
+    """
+    x, y = _locate(frame, resized, mask, expected.t_s)
+    score = _masked_ncc(frame, resized, mask, round(expected.x), round(expected.y))
+    edge = _gradient_match(frame, resized, mask, round(expected.x), round(expected.y))
+    return Sample(
+        t_s=expected.t_s,
+        matched=True,
+        correlation=0.0 if score is None else score,
+        x=x,
+        y=y,
+        expected_x=expected.x,
+        expected_y=expected.y,
+        metric="ccoeff",
+        edge_score=edge,
     )
 
 
@@ -601,6 +901,69 @@ def _crops_ncc(
     product = cv2.multiply(patch, template, dtype=cv2.CV_32F)
     covariance = cv2.mean(product, mask=mask)[0] - _scalar(template_mean) * _scalar(frame_mean)
     return max(-1.0, min(1.0, covariance / denominator))
+
+
+def _gradient_match(
+    frame: cv2.typing.MatLike,
+    resized: cv2.typing.MatLike,
+    mask: cv2.typing.MatLike | None,
+    x: int,
+    y: int,
+) -> float | None:
+    """Coincidencia de gradientes del contorno alfa en la caja esperada.
+
+    Compara la magnitud Sobel del frame con la del template (NCC bajo la
+    máscara): la mezcla semitransparente del render atenúa la correlación
+    de intensidades sobre fondos texturizados pero conserva los bordes del
+    contorno alfa, mientras que el fondo solo no guarda relación con esos
+    bordes (gradiente ~0.0 frente a >= 0.70 con watermark a opacidad 0.3
+    sobre ``testsrc2``).
+
+    Args:
+        frame: Frame en grises ya decodificado.
+        resized: Template reescalado al tamaño esperado del render.
+        mask: Máscara alfa reescalada (o ``None`` sin canal alfa).
+        x: Columna esperada de la esquina superior izquierda.
+        y: Fila esperada de la esquina superior izquierda.
+
+    Returns:
+        La NCC de magnitudes de gradiente en [-1, 1], o ``None`` si la
+        caja quedó degenerada o sin varianza medible.
+    """
+    frame_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", frame)
+    template_array = cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", resized)
+    mask_array = (
+        None if mask is None else cast("np.ndarray[tuple[int, ...], np.dtype[np.uint8]]", mask)
+    )
+    frame_h, frame_w = frame_array.shape[0], frame_array.shape[1]
+    box = _clamp_box((frame_w, frame_h), (template_array.shape[1], template_array.shape[0]), x, y)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    patch = frame_array[y0:y1, x0:x1]
+    template_crop = template_array[y0 - y : y0 - y + (y1 - y0), x0 - x : x0 - x + (x1 - x0)]
+    mask_crop = (
+        None
+        if mask_array is None
+        else mask_array[y0 - y : y0 - y + (y1 - y0), x0 - x : x0 - x + (x1 - x0)]
+    )
+    return _crops_ncc(_gradient_magnitude(patch), _gradient_magnitude(template_crop), mask_crop)
+
+
+def _gradient_magnitude(image: cv2.typing.MatLike) -> cv2.typing.MatLike:
+    """Magnitud del gradiente Sobel de una imagen en grises.
+
+    Args:
+        image: Imagen de un solo canal.
+
+    Returns:
+        La magnitud ``sqrt(gx² + gy²)`` en float32, del mismo tamaño.
+    """
+    import cv2
+
+    grad_x = cv2.Sobel(image, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(image, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.magnitude(grad_x, grad_y)
 
 
 def _scalar(matrix: cv2.typing.MatLike) -> float:
@@ -841,58 +1204,6 @@ def _similarity_failure(sample: Sample, config: Watermark) -> str | None:
     if sample.correlation < _MATCH_THRESHOLD:
         return f"correlación {sample.correlation:.3f} bajo el umbral {_MATCH_THRESHOLD}"
     return None
-
-
-def _extract_frame(ffmpeg: str, video: Path, t_s: float, destination: Path) -> None:
-    """Extrae un frame exacto del video con ffmpeg (fail-closed).
-
-    Args:
-        ffmpeg: Binario ffmpeg resuelto en el PATH.
-        video: Ruta del artefacto a verificar.
-        t_s: Segundo del video a muestrear (seek exacto tras ``-i``).
-        destination: Ruta del PNG a escribir.
-
-    Raises:
-        WatermarkError: Si ffmpeg falla, expira o no deja el frame.
-    """
-    argv = [
-        ffmpeg,
-        "-hide_banner",
-        "-nostdin",
-        "-v",
-        "error",
-        "-i",
-        str(video),
-        "-ss",
-        f"{t_s:.3f}",
-        "-frames:v",
-        "1",
-        str(destination),
-    ]
-    try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=_FRAME_TIMEOUT_S,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        msg = f"ffmpeg no está disponible: {error}"
-        raise WatermarkError(msg) from error
-    except subprocess.TimeoutExpired as error:
-        msg = f"la extracción del frame en t={t_s:.3f}s excedió {_FRAME_TIMEOUT_S} s"
-        raise WatermarkError(msg) from error
-    except OSError as error:
-        msg = f"no se pudo ejecutar ffmpeg: {error}"
-        raise WatermarkError(msg) from error
-    if completed.returncode != 0:
-        tail = completed.stderr.strip()[-200:]
-        msg = f"ffmpeg falló extrayendo el frame en t={t_s:.3f}s: {tail}"
-        raise WatermarkError(msg)
-    if not destination.is_file() or destination.stat().st_size == 0:
-        msg = f"ffmpeg no dejó el frame en t={t_s:.3f}s"
-        raise WatermarkError(msg)
 
 
 def _resized_template(
