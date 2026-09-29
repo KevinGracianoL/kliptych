@@ -81,6 +81,7 @@ _SLIDESHOW_FILTER = (
     f"scale={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:force_original_aspect_ratio=decrease,"
     f"pad={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 )
+_CUT_DURATION_TOLERANCE_S = 0.5
 
 
 class PipelineError(Exception):
@@ -1973,6 +1974,13 @@ def _cut_exact_ffmpeg(
     argv.append(str(destination))
     with _translated("corte exacto de la fuente"):
         _run_ffmpeg(argv, render=render)
+    info = _probe_video(destination, render=render)
+    if info.duration_s <= 0.0 or abs(info.duration_s - duration_s) > _CUT_DURATION_TOLERANCE_S:
+        msg = (
+            f"el corte exacto produjo una duración inválida ({info.duration_s:.3f} s), "
+            f"se esperaban {duration_s:.3f} s (tolerancia {_CUT_DURATION_TOLERANCE_S} s)"
+        )
+        raise PipelineError(msg)
     return destination
 
 
@@ -2343,8 +2351,19 @@ def _cut_segment(
     argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
     argv += list(audio_and_container_arguments())
     argv.append(str(destination))
+    expected_duration = segment.end_s - segment.start_s
     with _translated("corte del segmento"):
         _run_ffmpeg(argv, render=render)
+    info = _probe_video(destination, render=render)
+    if (
+        info.duration_s <= 0.0
+        or abs(info.duration_s - expected_duration) > _CUT_DURATION_TOLERANCE_S
+    ):
+        msg = (
+            f"el corte del segmento produjo una duración inválida ({info.duration_s:.3f} s), "
+            f"se esperaban {expected_duration:.3f} s (tolerancia {_CUT_DURATION_TOLERANCE_S} s)"
+        )
+        raise PipelineError(msg)
     return destination
 
 

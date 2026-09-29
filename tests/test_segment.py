@@ -334,3 +334,54 @@ def test_mandatory_timestamp_ranges_override_llm_selection() -> None:
     assert math.isclose(selection.segments[0].start_s, 15.0)
     assert math.isclose(selection.segments[0].end_s, 30.0)
     assert selection.rationale == "llm proposed segment"
+
+
+def test_mandatory_timestamp_ranges_exceeding_source_duration_fails_bounds() -> None:
+    base_contract = _contract(min_s=5, max_s=120)
+    contract = base_contract.model_copy(
+        update={"timestamp_ranges": (TimestampRange(start_sec=15.0, end_sec=75.0),)}
+    )
+    transcript = Transcript(
+        language="es",
+        duration_s=60.0,
+        text="hola",
+        words=(Word(start_s=0.0, end_s=1.0, text="hola", confidence=0.9, token_id=0),),
+    )
+    selector = LLMSegmentSelector()
+    _ = selector.build_prompt(transcript, (), contract)
+    with pytest.raises(SegmentSelectionError, match="excede el vídeo fuente"):
+        _ = selector.parse_response({"segments": [], "rationale": "test"})
+
+
+def test_mandatory_timestamp_ranges_shorter_than_min_duration_fails_bounds() -> None:
+    base_contract = _contract(min_s=10, max_s=60)
+    contract = base_contract.model_copy(
+        update={"timestamp_ranges": (TimestampRange(start_sec=15.0, end_sec=20.0),)}
+    )
+    transcript = Transcript(
+        language="es",
+        duration_s=60.0,
+        text="hola",
+        words=(Word(start_s=0.0, end_s=1.0, text="hola", confidence=0.9, token_id=0),),
+    )
+    selector = LLMSegmentSelector()
+    _ = selector.build_prompt(transcript, (), contract)
+    with pytest.raises(SegmentSelectionError, match="mínimo"):
+        _ = selector.parse_response({"segments": [], "rationale": "test"})
+
+
+def test_mandatory_timestamp_ranges_longer_than_max_duration_fails_bounds() -> None:
+    base_contract = _contract(min_s=5, max_s=20)
+    contract = base_contract.model_copy(
+        update={"timestamp_ranges": (TimestampRange(start_sec=10.0, end_sec=40.0),)}
+    )
+    transcript = Transcript(
+        language="es",
+        duration_s=60.0,
+        text="hola",
+        words=(Word(start_s=0.0, end_s=1.0, text="hola", confidence=0.9, token_id=0),),
+    )
+    selector = LLMSegmentSelector()
+    _ = selector.build_prompt(transcript, (), contract)
+    with pytest.raises(SegmentSelectionError, match="máximo"):
+        _ = selector.parse_response({"segments": [], "rationale": "test"})

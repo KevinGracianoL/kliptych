@@ -193,7 +193,9 @@ class LLMSegmentSelector:
             with contextlib.suppress(Exception):
                 parsed = _parse_selection(raw)
                 rationale = parsed.rationale
-            return SegmentSelection(segments=forced_segments, rationale=rationale)
+            selection = SegmentSelection(segments=forced_segments, rationale=rationale)
+            _validate_bounds(selection, bounds)
+            return selection
         selection = _parse_selection(raw)
         _validate_bounds(selection, bounds)
         return selection

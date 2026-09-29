@@ -89,6 +89,7 @@ def _private(name: str) -> object:
 
 _cleanup_registry = cast("Callable[[], _Registry]", _private("_CleanupRegistry"))
 _cut_segment = cast("Callable[..., Path]", _private("_cut_segment"))
+_cut_exact_ffmpeg = cast("Callable[..., Path]", _private("_cut_exact_ffmpeg"))
 _default_reframer = cast(
     "Callable[[PipelineConfig], FFmpegReframer]", _private("_default_reframer")
 )
@@ -325,8 +326,19 @@ class _Injectables:
 
 
 def _ffmpeg(harness: _Harness) -> object:
+    last_duration = ["1.0"]
+
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
+        if argv and "ffprobe" in argv[0]:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=f"width=1080\nheight=1920\nduration={last_duration[0]}\n",
+                stderr="",
+            )
+        if "-t" in argv:
+            last_duration[0] = argv[argv.index("-t") + 1]
         harness.events.append("cut")
         _ = Path(argv[-1]).write_bytes(b"clip")
         if harness.ffmpeg_error is not None:
@@ -695,6 +707,10 @@ def test_cut_segment_builds_list_argv(tmp_path: Path, monkeypatch: pytest.Monkey
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
+        if argv and "ffprobe" in argv[0]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="width=1080\nheight=1920\nduration=1.5\n", stderr=""
+            )
         captured["argv"] = argv
         _ = Path(argv[-1]).write_bytes(b"clip")
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
@@ -715,6 +731,80 @@ def test_cut_segment_builds_list_argv(tmp_path: Path, monkeypatch: pytest.Monkey
     assert argv[argv.index("-t") + 1] == "1.500"
     assert destination.is_file()
     assert destination in registry.paths
+
+
+def test_cut_segment_fails_when_probe_duration_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        if argv and argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="width=1080\nheight=1920\nduration=0.0\n", stderr=""
+            )
+        _ = Path(argv[-1]).write_bytes(b"clip")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", run)
+    source = tmp_path / "source.mp4"
+    _ = source.write_bytes(b"source")
+    with pytest.raises(PipelineError, match="duración inválida"):
+        _ = _cut_segment(
+            source,
+            segment=Segment(start_s=1.0, end_s=2.5),
+            render=RenderConfig(),
+            registry=_cleanup_registry(),
+        )
+
+
+def test_cut_segment_fails_when_probe_duration_mismatches_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        if argv and argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="width=1080\nheight=1920\nduration=0.8\n", stderr=""
+            )
+        _ = Path(argv[-1]).write_bytes(b"clip")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", run)
+    source = tmp_path / "source.mp4"
+    _ = source.write_bytes(b"source")
+    with pytest.raises(PipelineError, match="tolerancia"):
+        _ = _cut_segment(
+            source,
+            segment=Segment(start_s=1.0, end_s=2.5),
+            render=RenderConfig(),
+            registry=_cleanup_registry(),
+        )
+
+
+def test_cut_exact_ffmpeg_fails_when_probe_duration_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        if argv and argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="width=1080\nheight=1920\nduration=1.0\n", stderr=""
+            )
+        _ = Path(argv[-1]).write_bytes(b"clip")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", run)
+    source = tmp_path / "source.mp4"
+    dest = tmp_path / "dest.mp4"
+    _ = source.write_bytes(b"source")
+    with pytest.raises(PipelineError, match="tolerancia"):
+        _ = _cut_exact_ffmpeg(
+            source=source,
+            destination=dest,
+            start_s=10.0,
+            duration_s=5.0,
+            render=RenderConfig(),
+        )
 
 
 def test_segment_words_shifts_and_clamps() -> None:
