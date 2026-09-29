@@ -346,10 +346,18 @@ class MediaDownloader:
             margin_start = max(0.0, start_sec - 10.0)
             margin_end = end_sec + 10.0
             start_str = (
-                str(int(margin_start)) if margin_start == int(margin_start) else f"{margin_start:g}"
+                str(int(margin_start))
+                if margin_start == int(margin_start)
+                else f"{margin_start:.3f}"
             )
-            end_str = str(int(margin_end)) if margin_end == int(margin_end) else f"{margin_end:g}"
-            argv += ["--download-sections", f"*{start_str}-{end_str}"]
+            end_str = str(int(margin_end)) if margin_end == int(margin_end) else f"{margin_end:.3f}"
+            argv += [
+                "--download-sections",
+                f"*{start_str}-{end_str}",
+                "--force-keyframes-at-cuts",
+                "--merge-output-format",
+                "mp4",
+            ]
         argv += ["--", url]
         return argv
 
@@ -485,6 +493,8 @@ def is_kick_url(url: str) -> bool:
         host = urlsplit(url).hostname
     except ValueError:
         return False
+    if host:
+        host = host.rstrip(".")
     return bool(host and (host == "kick.com" or host.endswith(".kick.com")))
 
 

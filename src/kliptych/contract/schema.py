@@ -472,6 +472,15 @@ class Contract(ContractBase):
         return self
 
     @model_validator(mode="after")
+    def _brand_safety_citation_present_when_required(self) -> Self:
+        if self.brand_safety_required and (
+            not self.brand_safety_citation or not self.brand_safety_citation.strip()
+        ):
+            msg = "brand_safety_required=True exige brand_safety_citation no vacía"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _segments_valid_for_mode(self) -> Self:
         if self.mode is Mode.LONG_VIDEO:
             if not self.segments:
