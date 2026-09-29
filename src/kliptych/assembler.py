@@ -141,6 +141,105 @@ class FFmpegAssembler:
             raise AssembleError(msg) from error
         return destination
 
+    def cut_exact(
+        self,
+        *,
+        source: Path,
+        destination: Path,
+        start_s: float,
+        duration_s: float,
+    ) -> Path:
+        """Corta un clip con precisión de frame usando libx264/aac y reseteando PTS a 0.0s.
+
+        Args:
+            source: Video descargado (con margen).
+            destination: Ruta del artefacto cortado con precisión.
+            start_s: Segundo de inicio relativo a la fuente descargada.
+            duration_s: Duración exacta en segundos (end - start).
+
+        Returns:
+            La ruta del artefacto cortado con precisión.
+
+        Raises:
+            AssembleError: Si la fuente no existe, el intervalo es inválido o ffmpeg falla.
+        """
+        _require_file(source, what="source")
+        if start_s < 0 or duration_s <= 0:
+            msg = f"intervalo de corte inválido: start={start_s}, duration={duration_s}"
+            raise AssembleError(msg)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            msg = f"no se pudo preparar el directorio del destino {destination}: {error}"
+            raise AssembleError(msg) from error
+        temporary = _temporary_path(destination)
+        argv = [
+            self._ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-ss",
+            f"{start_s:.3f}",
+            "-t",
+            f"{duration_s:.3f}",
+            "-i",
+            str(source),
+            "-vf",
+            "setpts=PTS-STARTPTS",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(temporary),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_s,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            _remove_quietly(temporary)
+            msg = f"ffmpeg no está disponible: {self._ffmpeg}"
+            raise AssembleError(msg) from error
+        except subprocess.TimeoutExpired as error:
+            _remove_quietly(temporary)
+            msg = f"ffmpeg excedió el timeout de {self._timeout_s} s"
+            raise AssembleError(msg) from error
+        except OSError as error:
+            _remove_quietly(temporary)
+            msg = f"no se pudo ejecutar ffmpeg ({self._ffmpeg}): {error}"
+            raise AssembleError(msg) from error
+        if completed.returncode != 0:
+            _remove_quietly(temporary)
+            msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
+            raise AssembleError(msg)
+        try:
+            _ = temporary.replace(destination)
+        except OSError as error:
+            _remove_quietly(temporary)
+            msg = f"no se pudo publicar el artefacto en {destination}: {error}"
+            raise AssembleError(msg) from error
+        return destination
+
     def render_arguments(
         self,
         *,

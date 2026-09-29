@@ -221,6 +221,7 @@ class MediaDownloader:
         url: str,
         destination: Path,
         format_selector: str | None = None,
+        section: tuple[float, float] | None = None,
     ) -> Path:
         """Descarga un video con yt-dlp.
 
@@ -233,6 +234,7 @@ class MediaDownloader:
                 local o privada.
             destination: Ruta del artefacto descargado.
             format_selector: Selector de formato de yt-dlp, si se requiere.
+            section: Rango [start, end] en segundos para descarga quirúrgica.
 
         Returns:
             La ruta del artefacto descargado.
@@ -247,6 +249,7 @@ class MediaDownloader:
             destination=destination,
             max_size_bytes=self._max_size_bytes,
             format_selector=format_selector,
+            section=section,
         )
         return self._run_download(argv, destination=destination, tool=_YTDLP)
 
@@ -312,6 +315,7 @@ class MediaDownloader:
         destination: Path,
         max_size_bytes: int,
         format_selector: str | None = None,
+        section: tuple[float, float] | None = None,
     ) -> list[str]:
         """Construye el argv de yt-dlp, con límite de tamaño nativo.
 
@@ -320,6 +324,7 @@ class MediaDownloader:
             destination: Ruta del artefacto descargado.
             max_size_bytes: Tamaño máximo aceptado, en bytes.
             format_selector: Selector de formato opcional.
+            section: Rango [start, end] en segundos para descarga quirúrgica con margen.
 
         Returns:
             El argv completo, como lista de argumentos; la URL va tras ``--``.
@@ -336,6 +341,15 @@ class MediaDownloader:
         ]
         if format_selector is not None:
             argv += ["--format", format_selector]
+        if section is not None:
+            start_sec, end_sec = section
+            margin_start = max(0.0, start_sec - 10.0)
+            margin_end = end_sec + 10.0
+            start_str = (
+                str(int(margin_start)) if margin_start == int(margin_start) else f"{margin_start:g}"
+            )
+            end_str = str(int(margin_end)) if margin_end == int(margin_end) else f"{margin_end:g}"
+            argv += ["--download-sections", f"*{start_str}-{end_str}"]
         argv += ["--", url]
         return argv
 
@@ -413,8 +427,7 @@ class MediaDownloader:
             raise DownloadError(msg) from error
         if not result.ok:
             _clean_download_artifacts(destination, preexisting=preexisting)
-            msg = f"{tool} falló: {_tail(result.stderr)}"
-            raise DownloadError(msg)
+            _handle_download_failure(result, tool=tool, url=argv[-1] if argv else "")
         try:
             is_file = destination.is_file()
             size = destination.stat().st_size if is_file else 0
@@ -436,6 +449,45 @@ class MediaDownloader:
         return destination
 
 
+def _handle_download_failure(result: CommandResult, *, tool: str, url: str) -> None:
+    if is_kick_url(url):
+        stderr_lower = result.stderr.lower()
+        if any(
+            k in stderr_lower
+            for k in ("cookie", "auth", "login", "403", "cloudflare", "bot", "sign in")
+        ):
+            msg = (
+                f"{tool} falló en Kick (se requiere autenticación/cookies): {_tail(result.stderr)}"
+            )
+            raise DownloadError(msg)
+        if any(
+            k in stderr_lower
+            for k in ("network", "connection", "timeout", "timed out", "unreachable")
+        ):
+            msg = f"{tool} falló en Kick por error de red: {_tail(result.stderr)}"
+            raise DownloadError(msg)
+        msg = f"{tool} falló en Kick: {_tail(result.stderr)}"
+        raise DownloadError(msg)
+    msg = f"{tool} falló: {_tail(result.stderr)}"
+    raise DownloadError(msg)
+
+
+def is_kick_url(url: str) -> bool:
+    """Indica si una URL pertenece a Kick.
+
+    Args:
+        url: URL a verificar.
+
+    Returns:
+        True si el host es kick.com o un subdominio.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    return bool(host and (host == "kick.com" or host.endswith(".kick.com")))
+
+
 def _validate_url(url: str) -> None:
     # La URL entra a herramientas externas como último argumento; se rechaza
     # cualquier esquema que no sea http/https y cualquier destino local o
@@ -452,6 +504,11 @@ def _validate_url(url: str) -> None:
     if host is None:
         msg = f"URL sin host: {url!r}"
         raise DownloadError(msg)
+    if is_kick_url(url):
+        clean_path = parts.path.strip("/")
+        if not clean_path:
+            msg = f"URL de Kick incompleta sin canal o video: {url!r}"
+            raise DownloadError(msg)
     try:
         address = ipaddress.ip_address(host)
     except ValueError:

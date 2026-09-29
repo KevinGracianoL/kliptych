@@ -526,3 +526,59 @@ def test_subprocess_download_runner_isolates_process_group(
     else:
         assert captured["start_new_session"] is True
         assert "creationflags" not in captured
+
+
+def test_build_ytdlp_argv_download_sections_with_margin(tmp_path: Path) -> None:
+    destination = tmp_path / "video.mp4"
+    # start 15.0, end 45.0 -> margin [max(0, 15-10), 45+10] = [5, 55]
+    argv = MediaDownloader.build_ytdlp_argv(
+        url="https://example.com/v",
+        destination=destination,
+        max_size_bytes=1024,
+        section=(15.0, 45.0),
+    )
+    assert "--download-sections" in argv
+    idx = argv.index("--download-sections")
+    assert argv[idx + 1] in {"*5-55", "*5.0-55.0"}
+
+    # start 5.0, end 20.0 -> margin [max(0, 5-10), 20+10] = [0, 30]
+    argv2 = MediaDownloader.build_ytdlp_argv(
+        url="https://example.com/v",
+        destination=destination,
+        max_size_bytes=1024,
+        section=(5.0, 20.0),
+    )
+    assert "--download-sections" in argv2
+    idx2 = argv2.index("--download-sections")
+    assert argv2[idx2 + 1] in {"*0-30", "*0.0-30.0"}
+
+
+def test_kick_url_validation_and_fail_closed_errors(tmp_path: Path) -> None:
+    destination = tmp_path / "video.mp4"
+    with pytest.raises(DownloadError, match="Kick"):
+        _ = MediaDownloader().download_video(url="https://kick.com", destination=destination)
+
+    auth_stderr = "ERROR: Sign in to confirm you are not a bot. Cookies or authentication required."
+    fake_runner = FakeRunner(
+        available=[_YTDLP],
+        result=CommandResult(
+            ok=False,
+            stdout="",
+            stderr=auth_stderr,
+        ),
+    )
+    downloader = MediaDownloader(runner=fake_runner)
+    with pytest.raises(DownloadError, match=r"Kick.*autenticación"):
+        _ = downloader.download_video(url="https://kick.com/streamer", destination=destination)
+
+    net_runner = FakeRunner(
+        available=[_YTDLP],
+        result=CommandResult(
+            ok=False,
+            stdout="",
+            stderr="ERROR: Unable to download webpage: Network connection timed out",
+        ),
+    )
+    net_downloader = MediaDownloader(runner=net_runner)
+    with pytest.raises(DownloadError, match=r"Kick.*red"):
+        _ = net_downloader.download_video(url="https://kick.com/streamer", destination=destination)
