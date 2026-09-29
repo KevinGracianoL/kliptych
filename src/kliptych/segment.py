@@ -10,13 +10,14 @@ el contrato y la duración del vídeo solo se conocen al construir el prompt; la
 validación es explícita y falla si no hubo ``build_prompt``.
 """
 
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import ClassVar, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from kliptych.contract import Contract, Segment, prompt_languages
+from kliptych.contract import Contract, Segment, TimestampRange, prompt_languages
 from kliptych.moments import Moment
 from kliptych.transcribe import Transcript
 
@@ -26,6 +27,7 @@ SEGMENT_SYSTEM_PROMPT = (
     "contrato, y devuelves ÚNICAMENTE un JSON con la forma "
     '{"segments": [{"start_s": float, "end_s": float}], "rationale": str}. '
     "Reglas: elige los mejores cortes dentro de las cotas del vídeo fuente; "
+    "si el contrato especifica mandatory_timestamp_ranges, respétalos exactamente; "
     "respeta la duración mínima y máxima; los segmentos deben empezar antes de "
     "terminar y no inventes datos fuera del transcript."
 )
@@ -99,6 +101,7 @@ class LLMSegmentSelector:
     def __init__(self) -> None:
         """Inicializa el selector sin cotas hasta el primer ``build_prompt``."""
         self._bounds: _SelectionBounds | None = None
+        self._mandatory_ranges: tuple[TimestampRange, ...] = ()
 
     def build_prompt(
         self,
@@ -122,6 +125,7 @@ class LLMSegmentSelector:
         """
         bounds = _bounds_from(contract, transcript)
         self._bounds = bounds
+        self._mandatory_ranges = contract.timestamp_ranges
         return {
             "campaign_id": contract.campaign_id,
             "contract": {
@@ -137,6 +141,10 @@ class LLMSegmentSelector:
                 "spelling_locks": list(contract.spelling_locks),
                 "declared_segments": [
                     segment.model_dump(mode="json") for segment in contract.segments
+                ],
+                "mandatory_timestamp_ranges": [
+                    {"start_sec": tr.start_sec, "end_sec": tr.end_sec}
+                    for tr in contract.timestamp_ranges
                 ],
             },
             "transcript": {
@@ -177,6 +185,15 @@ class LLMSegmentSelector:
         if bounds is None:
             msg = "parse_response exige un build_prompt previo para conocer las cotas"
             raise SegmentSelectionError(msg)
+        if self._mandatory_ranges:
+            forced_segments = tuple(
+                Segment(start_s=tr.start_sec, end_s=tr.end_sec) for tr in self._mandatory_ranges
+            )
+            rationale = "mandatory timestamp ranges from contract"
+            with contextlib.suppress(Exception):
+                parsed = _parse_selection(raw)
+                rationale = parsed.rationale
+            return SegmentSelection(segments=forced_segments, rationale=rationale)
         selection = _parse_selection(raw)
         _validate_bounds(selection, bounds)
         return selection

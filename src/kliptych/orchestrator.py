@@ -428,6 +428,13 @@ def compute_long_video_fingerprint(
             "timeout_s": config.render.timeout_s,
             "nvenc_available": config.render.nvenc_available,
         },
+        "download": {
+            "timestamp_ranges": [
+                {"start_sec": tr.start_sec, "end_sec": tr.end_sec}
+                for tr in config.contract.timestamp_ranges
+            ],
+            "download_section_mode": bool(config.contract.timestamp_ranges),
+        },
         "repost_mode": config.repost_mode,
         "watermark": _watermark_signature(config),
     }
@@ -1134,6 +1141,7 @@ def _resolve_source_stage(
                 return _revalidate_remote_source(
                     url,
                     source_path,
+                    config=config,
                     downloader=downloader,
                     registry=registry,
                 )
@@ -1152,6 +1160,7 @@ def _revalidate_remote_source(
     url: str,
     source_path: Path,
     *,
+    config: PipelineConfig,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
 ) -> Path:
@@ -1165,6 +1174,7 @@ def _revalidate_remote_source(
     Args:
         url: URL http/https del vídeo fuente.
         source_path: Archivo local descargado en una corrida previa.
+        config: Configuración del pipeline con contrato y render.
         downloader: Descargador acotado para re-descargar los bytes.
         registry: Registro donde se anota el temporal de revalidación.
 
@@ -1176,7 +1186,28 @@ def _revalidate_remote_source(
     """
     temporary = registry.register(_temporary_path(source_path))
     with _translated("revalidación de la fuente"):
-        _ = downloader.download_video(url=url, destination=temporary)
+        if config.contract.timestamp_ranges:
+            tr = config.contract.timestamp_ranges[0]
+            actual_download_start = max(0.0, tr.start_sec - 10.0)
+            margin_dest = registry.register(
+                _temporary_path(source_path.with_name("margin_source.mp4"))
+            )
+            _ = downloader.download_video(
+                url=url,
+                destination=margin_dest,
+                section=(tr.start_sec, tr.end_sec),
+            )
+            cut_start = tr.start_sec - actual_download_start
+            cut_duration = tr.end_sec - tr.start_sec
+            _ = _cut_exact_ffmpeg(
+                source=margin_dest,
+                destination=temporary,
+                start_s=cut_start,
+                duration_s=cut_duration,
+                render=config.render,
+            )
+        else:
+            _ = downloader.download_video(url=url, destination=temporary)
     try:
         changed = sha256_file(temporary) != sha256_file(source_path)
     except OSError as error:
@@ -1909,6 +1940,42 @@ def _run_stages(
     )
 
 
+def _cut_exact_ffmpeg(
+    *,
+    source: Path,
+    destination: Path,
+    start_s: float,
+    duration_s: float,
+    render: RenderConfig,
+) -> Path:
+    argv = [
+        render.ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-ss",
+        _seconds(start_s),
+        "-t",
+        _seconds(duration_s),
+        "-i",
+        str(source),
+        "-vf",
+        "setpts=PTS-STARTPTS",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+    ]
+    argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
+    argv += list(audio_and_container_arguments())
+    argv.append(str(destination))
+    with _translated("corte exacto de la fuente"):
+        _run_ffmpeg(argv, render=render)
+    return destination
+
+
 def _download(
     url: str,
     *,
@@ -1919,7 +1986,26 @@ def _download(
     source = config.output_dir / _SOURCE_NAME
     temporary = registry.register(_temporary_path(source))
     with _translated("descarga"):
-        _ = downloader.download_video(url=url, destination=temporary)
+        if config.contract.timestamp_ranges:
+            tr = config.contract.timestamp_ranges[0]
+            actual_download_start = max(0.0, tr.start_sec - 10.0)
+            margin_dest = registry.register(_temporary_path(source.with_name("margin_source.mp4")))
+            _ = downloader.download_video(
+                url=url,
+                destination=margin_dest,
+                section=(tr.start_sec, tr.end_sec),
+            )
+            cut_start = tr.start_sec - actual_download_start
+            cut_duration = tr.end_sec - tr.start_sec
+            _ = _cut_exact_ffmpeg(
+                source=margin_dest,
+                destination=temporary,
+                start_s=cut_start,
+                duration_s=cut_duration,
+                render=config.render,
+            )
+        else:
+            _ = downloader.download_video(url=url, destination=temporary)
         _ = temporary.replace(source)
     return source
 
