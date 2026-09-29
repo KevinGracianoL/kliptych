@@ -54,7 +54,6 @@ Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 import re
 import shutil
 import subprocess
-import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 
@@ -63,6 +62,7 @@ from kliptych.contract import AudioPolicy, AudioRule, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.text import contains_phrase
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 
 __all__ = [
@@ -483,7 +483,8 @@ def check_forbidden_terms(context: GateContext) -> CheckOutcome:
     forbidden = list(
         dict.fromkeys([*context.rules.caption_rules.forbidden, *context.contract.prohibitions])
     )
-    published = "\n".join((context.piece.caption, *context.piece.hashtags))
+    screen_texts = [seg.text for seg in context.piece.screen_text_segments]
+    published = "\n".join((context.piece.caption, *context.piece.hashtags, *screen_texts))
     spoken = context.piece.subtitle_text or ""
     found_published = [term for term in forbidden if _contains_forbidden_term(published, term)]
     found_spoken = [
@@ -653,11 +654,8 @@ def _contains_mention(caption: str, mention: str) -> bool:
 def _contains_forbidden_term(haystack: str, term: str) -> bool:
     """Indica si una frase prohibida aparece con frontera de palabra.
 
-    Ambos lados se normalizan (NFKD sin diacríticos + casefold) para que
-    "¡ACTÍVA LA RACHA!" case con "¡activa la racha!"; la frase se escapa
-    con ``re.escape`` para que sus caracteres especiales ($, paréntesis)
-    casen literales, y se exige frontera no-alfanumérica para que "sorteo"
-    no case con "sorteos" ni "win $10" con "win $100".
+    Ambos lados se normalizan (NFKD sin diacríticos salvando la 'ñ' + casefold)
+    y se tratan los espacios múltiples y guiones bajos como separadores de frontera.
 
     Args:
         haystack: Texto donde buscar (ya incluye caption/hashtags o
@@ -667,28 +665,7 @@ def _contains_forbidden_term(haystack: str, term: str) -> bool:
     Returns:
         True si la frase normalizada aparece con fronteras de palabra.
     """
-    needle = _normalize_forbidden(term)
-    if not needle.strip():
-        return False
-    pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
-    return re.search(pattern, _normalize_forbidden(haystack)) is not None
-
-
-def _normalize_forbidden(text: str) -> str:
-    """Normaliza un texto para comparar frases prohibidas.
-
-    Descompone con NFKD, elimina diacríticos y pliega a minúsculas: así
-    "SORTEO", "sorteo" y "sórteo" casan con la misma frase del contrato
-    sin falsos negativos por mayúsculas o tildes.
-
-    Args:
-        text: Texto crudo (frase del contrato o texto de la pieza).
-
-    Returns:
-        El texto normalizado para búsqueda de frases.
-    """
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(char for char in decomposed if not unicodedata.combining(char)).casefold()
+    return contains_phrase(haystack, term)
 
 
 def _contains_hashtag(caption: str, tag: str) -> bool:

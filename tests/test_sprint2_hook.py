@@ -240,6 +240,27 @@ def test_hook_failure_rejects_piece(tmp_path: Path) -> None:
     assert result.status is GateStatus.REJECTED
 
 
+def test_h2_hook_keyword_gana_fails_with_ganador(tmp_path: Path) -> None:
+    status, evidence = _hook_check(
+        tmp_path,
+        hook_keyword="gana",
+        subtitle_segments=_segments(("el ganador", 1.0, 2.0)),
+    )
+    assert status is CheckStatus.FAIL
+    assert "no aparece" in cast("str", evidence["reason"])
+
+
+def test_h2_hook_keyword_split_across_segments_passes(tmp_path: Path) -> None:
+    status, evidence = _hook_check(
+        tmp_path,
+        hook_keyword="gana ya",
+        subtitle_segments=_segments(("gana", 1.0, 1.5), ("ya", 1.8, 2.3)),
+    )
+    assert status is CheckStatus.PASS
+    assert evidence["matched_at_s"] == [1.0]
+    assert evidence["matched_in"] == ["subtitles"]
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
 def test_hook_volume_measured_on_real_clip(tmp_path: Path) -> None:

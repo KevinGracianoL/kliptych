@@ -16,11 +16,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import unicodedata
 from operator import itemgetter
 from typing import TYPE_CHECKING
 
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.text import contains_phrase, normalize_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,8 +53,7 @@ def check_hook_keyword(context: GateContext) -> CheckOutcome:
             status=CheckStatus.PASS,
             evidence={"rule": _RULE, "active": False},
         )
-    needle = _normalize(keyword)
-    if not needle:
+    if not normalize_text(keyword):
         return CheckOutcome(
             status=CheckStatus.FAIL,
             evidence={
@@ -63,7 +62,7 @@ def check_hook_keyword(context: GateContext) -> CheckOutcome:
                 "reason": "la palabra clave quedó vacía tras normalizar",
             },
         )
-    hits = _hook_hits(needle, context.piece)
+    hits = _hook_hits(keyword, context.piece)
     volume: dict[str, object] = {
         "volume_first_3s_db": _measure_first_3s_volume(context.piece.artifact_path),
         "volume_note": _VOLUME_NOTE,
@@ -95,11 +94,11 @@ def check_hook_keyword(context: GateContext) -> CheckOutcome:
     )
 
 
-def _hook_hits(needle: str, piece: Piece) -> list[tuple[str, float]]:
+def _hook_hits(keyword: str, piece: Piece) -> list[tuple[str, float]]:
     """Busca la palabra clave en ventana en ambas fuentes temporizadas.
 
     Args:
-        needle: Palabra clave ya normalizada.
+        keyword: Palabra clave requerida por el contrato.
         piece: Pieza con segmentos de subtítulos y texto en pantalla.
 
     Returns:
@@ -109,30 +108,20 @@ def _hook_hits(needle: str, piece: Piece) -> list[tuple[str, float]]:
         ("subtitles", piece.subtitle_segments),
         ("screen", piece.screen_text_segments),
     )
-    hits = [
-        (source, segment.start_s)
-        for source, segments in sources
-        for segment in segments
-        if segment.start_s <= _HOOK_WINDOW_S and needle in _normalize(segment.text)
-    ]
-    return sorted(hits, key=itemgetter(1))
-
-
-def _normalize(text: str) -> str:
-    """Normaliza un texto para buscar la palabra clave del hook.
-
-    Descompone con NFKD, elimina diacríticos y pliega a minúsculas: así
-    "¡ACTÍVA" casa con "¡activa" sin falsos negativos por mayúsculas o
-    tildes.
-
-    Args:
-        text: Texto crudo (palabra del contrato o segmento de la pieza).
-
-    Returns:
-        El texto normalizado para búsqueda de subcadenas.
-    """
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(char for char in decomposed if not unicodedata.combining(char)).casefold()
+    hits: list[tuple[str, float]] = []
+    for source, segments in sources:
+        window_segments = [s for s in segments if s.start_s <= _HOOK_WINDOW_S]
+        source_hits: list[float] = [
+            segment.start_s for segment in window_segments if contains_phrase(segment.text, keyword)
+        ]
+        if not source_hits and window_segments:
+            for i, seg in enumerate(window_segments):
+                sub_concat = " ".join(s.text for s in window_segments[i:])
+                if contains_phrase(sub_concat, keyword):
+                    source_hits = [seg.start_s]
+        hits.extend((source, start_s) for start_s in source_hits)
+    deduped = list(dict.fromkeys(hits))
+    return sorted(deduped, key=itemgetter(1))
 
 
 def _measure_first_3s_volume(artifact: Path) -> float | None:
