@@ -148,11 +148,16 @@ def make_contract(
     language: str | None = None,
     audio_policy: AudioPolicy | None = None,
     hook_keyword: str | None = None,
+    brand_safety_required: bool = False,
+    brand_safety_citation: str | None = None,
     unmapped: Sequence[tuple[str, str]] = (),
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
     classified = {*hard, *recommended, *manual_review}
+    if brand_safety_required and "brand.safety" not in classified:
+        plan.append("brand.safety")
+        classified.add("brand.safety")
     audio_rule_id = _AUDIO_MANUAL_RULES.get(audio_rule)
     if audio_rule_id is not None and audio_rule_id not in classified:
         manual.append(audio_rule_id)
@@ -226,6 +231,8 @@ def make_contract(
             "prohibitions": list(prohibitions),
             "audio_policy": audio_policy,
             "hook_keyword": hook_keyword,
+            "brand_safety_required": brand_safety_required,
+            "brand_safety_citation": brand_safety_citation,
             "unmapped": [{"rule": rule, "quote": quote} for rule, quote in unmapped],
             "rules": {
                 "hard": plan,

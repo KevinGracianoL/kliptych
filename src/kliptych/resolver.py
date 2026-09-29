@@ -263,6 +263,35 @@ def resolve_contract(
     )
 
 
+def _resolve_brand_safety(
+    draft: ContractDraft,
+    brief_text: str | None,
+    prohibitions: list[str],
+) -> tuple[bool, str | None, list[str]]:
+    brand_safety_indicated = (
+        _brief_indicates_brand_safety(brief_text, prohibitions)
+        or _value(draft.brand_safety) is True
+        or _value(draft.brand_safety_required) is True
+    )
+    brand_safety_required = (
+        _value(draft.brand_safety_required) is True
+        or _value(draft.brand_safety) is True
+        or brand_safety_indicated
+    )
+    brand_safety_citation = _value(draft.brand_safety_citation)
+    if (
+        brand_safety_citation is None
+        and draft.brand_safety_required is not None
+        and draft.brand_safety_required.evidence is not None
+    ):
+        brand_safety_citation = draft.brand_safety_required.evidence.quote
+    if brand_safety_indicated or brand_safety_required:
+        prohibitions_text = normalize_text(" ".join(prohibitions))
+        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
+            prohibitions = [*prohibitions, "brand safety"]
+    return brand_safety_required, brand_safety_citation, prohibitions
+
+
 def _build_contract(
     draft: ContractDraft,
     registry: AssetRegistry,
@@ -279,13 +308,9 @@ def _build_contract(
     assets = _resolve_assets(draft, registry, issues)
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
-    if (
-        _brief_indicates_brand_safety(brief_text, prohibitions)
-        or _value(draft.brand_safety) is True
-    ):
-        prohibitions_text = normalize_text(" ".join(prohibitions))
-        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
-            prohibitions = [*prohibitions, "brand safety"]
+    brand_safety_required, brand_safety_citation, prohibitions = _resolve_brand_safety(
+        draft, brief_text, prohibitions
+    )
     official_audio = _resolve_official_audio(draft, platforms, issues)
     hook_keyword = _value(draft.hook_keyword)
     unmapped = _resolve_unmapped(draft, issues)
@@ -303,6 +328,7 @@ def _build_contract(
                 prohibitions=tuple(prohibitions),
                 audio_policy=_value(draft.audio_policy),
                 hook_keyword=hook_keyword,
+                brand_safety_required=brand_safety_required,
             ),
             brief_text=brief_text,
         ),
@@ -326,6 +352,8 @@ def _build_contract(
         spelling_locks=spelling_locks,
         prohibitions=prohibitions,
         hook_keyword=hook_keyword,
+        brand_safety_required=brand_safety_required,
+        brand_safety_citation=brand_safety_citation,
         unmapped=unmapped,
         rules=rules,
         assets=assets,
@@ -429,6 +457,8 @@ def _collect_top_level_conflicts(
         ("hook_keyword", draft.hook_keyword),
         ("hook_window_seconds", draft.hook_window_seconds),
         ("brand_safety", draft.brand_safety),
+        ("brand_safety_required", draft.brand_safety_required),
+        ("brand_safety_citation", draft.brand_safety_citation),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
@@ -929,8 +959,12 @@ def _resolve_rules(
         issues=issues,
     )
     if (
-        _brief_indicates_brand_safety(context.brief_text, context.global_restrictions.prohibitions)
+        context.global_restrictions.brand_safety_required
+        or _brief_indicates_brand_safety(
+            context.brief_text, context.global_restrictions.prohibitions
+        )
         or _value(draft.brand_safety) is True
+        or _value(draft.brand_safety_required) is True
     ) and "brand.safety" not in classified:
         classified.add("brand.safety")
         hard.append("brand.safety")

@@ -267,6 +267,7 @@ class GlobalRestrictions(ContractBase):
     prohibitions: tuple[str, ...] = ()
     audio_policy: AudioPolicy | None = None
     hook_keyword: str | None = None
+    brand_safety_required: bool = False
 
 
 class UnmappedRule(ContractBase):
@@ -324,6 +325,8 @@ class Contract(ContractBase):
     spelling_locks: list[str] = Field(default_factory=list)
     prohibitions: list[str] = Field(default_factory=list)
     hook_keyword: str | None = Field(default=None, min_length=1, max_length=140)
+    brand_safety_required: bool = False
+    brand_safety_citation: str | None = None
     unmapped: tuple[UnmappedRule, ...] = ()
     rules: RuleSet
     assets: AssetBundle
@@ -352,8 +355,9 @@ class Contract(ContractBase):
     def _unmapped_rules_do_not_collide_with_catalog(
         cls, unmapped: tuple[UnmappedRule, ...]
     ) -> tuple[UnmappedRule, ...]:
+        normalized_known = {rule.strip().lower() for rule in KNOWN_VALIDATOR_RULES}
         for entry in unmapped:
-            if entry.rule in KNOWN_VALIDATOR_RULES:
+            if entry.rule.strip().lower() in normalized_known:
                 msg = (
                     f"la regla no mapeada '{entry.rule}' colisiona con un validador "
                     "conocido en el catálogo del gate"
@@ -416,6 +420,7 @@ class Contract(ContractBase):
             prohibitions=tuple(self.prohibitions),
             audio_policy=self.audio_policy,
             hook_keyword=self.hook_keyword,
+            brand_safety_required=self.brand_safety_required,
         )
         aliases: dict[str, tuple[str, ...]] = {
             "audio.official_track": (
@@ -540,6 +545,10 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         _ = dump.pop("hook_keyword", None)
     if not contract.unmapped:
         _ = dump.pop("unmapped", None)
+    if not contract.brand_safety_required:
+        _ = dump.pop("brand_safety_required", None)
+    if contract.brand_safety_citation is None:
+        _ = dump.pop("brand_safety_citation", None)
     _prune_default_watermark_options(dump)
 
 
@@ -632,6 +641,8 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
         active.append("hook.keyword")
     if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
         active.extend(("audio.policy", "audio.silence"))
+    if global_restrictions.brand_safety_required:
+        active.append("brand.safety")
     return active
 
 

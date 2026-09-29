@@ -29,7 +29,8 @@ def normalize_text(text: str) -> str:
     Returns:
         Texto normalizado en minúsculas y sin acentos salvo 'ñ'.
     """
-    folded = text.casefold()
+    nfc = unicodedata.normalize("NFC", text)
+    folded = nfc.casefold()
     protected = folded.replace("ñ", _ENIE_SENTINEL)
     decomposed = unicodedata.normalize("NFKD", protected)
     filtered = "".join(char for char in decomposed if not unicodedata.combining(char))

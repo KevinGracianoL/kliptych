@@ -221,3 +221,13 @@ def test_h8_forbidden_in_screen_text_segments_fails_as_published(tmp_path: Path)
     assert status is CheckStatus.FAIL
     assert evidence["found"] == ["sorteo"]
     assert evidence["authorship"] == "published"
+
+
+def test_h7_bis_decomposed_unicode_matches_forbidden_phrase(tmp_path: Path) -> None:
+    status, evidence = _check(
+        tmp_path,
+        forbidden=("año",),
+        caption="feliz an\u0303o @marca #marca",
+    )
+    assert status is CheckStatus.FAIL
+    assert evidence["found"] == ["año"]

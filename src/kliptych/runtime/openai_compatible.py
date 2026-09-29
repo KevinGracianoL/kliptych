@@ -53,6 +53,9 @@ _EXTRACT_SYSTEM_PROMPT = (
     'textual usa "missing". Extrae "hook_keyword" con su evidencia (palabra o frase '
     'clave exigida en los primeros segundos del video) y "hook_window_seconds" '
     '(ventana en segundos, por defecto 3.0); sin cita textual usa "missing". '
+    'Extrae "brand_safety_required" (booleano) y "brand_safety_citation" con su '
+    "evidencia cuando el brief pida evitar insultos, NSFW, temas sensibles o "
+    'lenguaje inapropiado; sin mención usa "missing". '
     'Extrae "unmapped": lista de requisitos del brief sin validador mecánico '
     'asociado, cada uno con "rule" (nombre del requisito) y "quote" (cita textual).'
 )
