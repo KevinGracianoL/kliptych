@@ -172,3 +172,82 @@ def test_resolver_brief_preserves_order_of_appearance(tmp_path: Path) -> None:
     assert len(result.contract.timestamp_ranges) == 2
     assert math.isclose(result.contract.timestamp_ranges[0].start_sec, 300.0)
     assert math.isclose(result.contract.timestamp_ranges[1].start_sec, 60.0)
+
+
+def test_resolver_accepts_int_json_in_draft(tmp_path: Path) -> None:
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 10},
+                end_sec={"value": 25},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result is not None
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert len(result.contract.timestamp_ranges) == 1
+    assert math.isclose(result.contract.timestamp_ranges[0].start_sec, 10.0)
+    assert math.isclose(result.contract.timestamp_ranges[0].end_sec, 25.0)
+
+
+def test_resolver_partial_range_forces_manual_review(tmp_path: Path) -> None:
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 10},
+                end_sec=None,
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_confidence_missing_forces_manual_review(tmp_path: Path) -> None:
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 10, "confidence": "missing"},
+                end_sec={"value": 20},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_confidence_conflict_forces_manual_review(tmp_path: Path) -> None:
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"confidence": "conflict"},
+                end_sec={"value": 20},
+            )
+        ]
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)
+
+
+def test_resolver_citation_not_in_brief_forces_issue(tmp_path: Path) -> None:
+    draft = make_draft(
+        timestamp_ranges=[
+            TimestampRangeDraft(
+                start_sec={"value": 10, "evidence": {"quote": "inventada"}},
+                end_sec={"value": 20, "evidence": {"quote": "inventada"}},
+            )
+        ]
+    )
+    brief = "cita del brief. contenido real sin esa frase."
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=brief)
+    assert result is not None
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "timestamp_ranges" for issue in result.issues)

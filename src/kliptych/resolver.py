@@ -410,11 +410,86 @@ def _extract_candidate_value(
     candidate: FieldCandidate[float | str] | dict[str, object] | float | str | None,
 ) -> float | str | None:
     if isinstance(candidate, FieldCandidate):
-        return candidate.value
+        val = candidate.value
+        return val if isinstance(val, (int, float, str)) and not isinstance(val, bool) else None
     if isinstance(candidate, dict):
         val = candidate.get("value")
-        return val if isinstance(val, (float, str)) else None
-    return candidate
+        return val if isinstance(val, (int, float, str)) and not isinstance(val, bool) else None
+    if isinstance(candidate, (int, float, str)) and not isinstance(candidate, bool):
+        return candidate
+    return None
+
+
+def _extract_candidate_quote(bound: object) -> str | None:
+    if isinstance(bound, FieldCandidate):
+        return bound.evidence.quote if bound.evidence else None
+    if isinstance(bound, dict):
+        d = cast("dict[str, object]", bound)
+        ev = d.get("evidence")
+        if isinstance(ev, dict):
+            ev_dict = cast("dict[str, object]", ev)
+            quote = ev_dict.get("quote")
+            if isinstance(quote, str):
+                return quote
+        elif isinstance(ev, SourceEvidence):
+            return ev.quote
+        citation = d.get("citation")
+        if isinstance(citation, str):
+            return citation
+        quote_val = d.get("quote")
+        if isinstance(quote_val, str):
+            return quote_val
+    return None
+
+
+def _extract_candidate_confidence(bound: object) -> object:
+    if isinstance(bound, FieldCandidate):
+        return bound.confidence
+    if isinstance(bound, dict):
+        d = cast("dict[str, object]", bound)
+        return d.get("confidence")
+    return None
+
+
+def _check_candidate_provenance(
+    bound: object,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> bool:
+    conf = _extract_candidate_confidence(bound)
+    if conf is not None:
+        conf_str = str(conf).lower()
+        if "conflict" in conf_str:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.CONFLICT,
+                    field="timestamp_ranges",
+                    detail="rango temporal en conflicto",
+                )
+            )
+            return False
+        if "missing" in conf_str:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field="timestamp_ranges",
+                    detail="rango temporal con confianza 'missing'",
+                )
+            )
+            return False
+
+    quote = _extract_candidate_quote(bound)
+    if quote is not None and brief_text is not None and quote not in brief_text:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=f"cita del rango temporal no encontrada en el brief: {quote!r}",
+            )
+        )
+        return False
+
+    return True
 
 
 def _resolve_timestamp_ranges(
@@ -424,22 +499,48 @@ def _resolve_timestamp_ranges(
 ) -> tuple[TimestampRange, ...]:
     ranges: list[TimestampRange] = []
     for item in draft.timestamp_ranges:
-        start_raw = _extract_candidate_value(item.start_sec)
-        end_raw = _extract_candidate_value(item.end_sec)
-        if start_raw is not None and end_raw is not None:
-            s = parse_timestamp_seconds(start_raw)
-            e = parse_timestamp_seconds(end_raw)
-            if s is not None and e is not None and 0.0 <= s < e:
-                ranges.append(TimestampRange(start_sec=s, end_sec=e))
-            else:
-                issues.append(
-                    ResolutionIssue(
-                        code=IssueCode.INVALID_CONTRACT,
-                        field="timestamp_ranges",
-                        detail=f"rango temporal inválido: start={start_raw}, end={end_raw}",
-                    )
+        start_bound = item.start_sec
+        end_bound = item.end_sec
+        if start_bound is None or end_bound is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field="timestamp_ranges",
+                    detail="rango temporal incompleto: falta start_sec o end_sec",
                 )
-    if not ranges and brief_text:
+            )
+            continue
+
+        start_valid = _check_candidate_provenance(start_bound, brief_text, issues)
+        end_valid = _check_candidate_provenance(end_bound, brief_text, issues)
+        if not (start_valid and end_valid):
+            continue
+
+        start_raw = _extract_candidate_value(start_bound)
+        end_raw = _extract_candidate_value(end_bound)
+        if start_raw is None or end_raw is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=f"rango temporal sin valor válido: start={start_raw}, end={end_raw}",
+                )
+            )
+            continue
+
+        s = parse_timestamp_seconds(start_raw)
+        e = parse_timestamp_seconds(end_raw)
+        if s is not None and e is not None and 0.0 <= s < e:
+            ranges.append(TimestampRange(start_sec=s, end_sec=e))
+        else:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=f"rango temporal inválido: start={start_raw}, end={end_raw}",
+                )
+            )
+    if not ranges and brief_text and not issues:
         ranges.extend(_extract_timestamp_ranges_from_text(brief_text, issues=issues))
     return tuple(ranges)
 
