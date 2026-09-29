@@ -1160,9 +1160,9 @@ def _revalidate_remote_source(
     url: str,
     source_path: Path,
     *,
-    config: PipelineConfig,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    config: PipelineConfig | None = None,
 ) -> Path:
     """Re-descarga la fuente remota y actualiza el local solo si cambió.
 
@@ -1174,9 +1174,9 @@ def _revalidate_remote_source(
     Args:
         url: URL http/https del vídeo fuente.
         source_path: Archivo local descargado en una corrida previa.
-        config: Configuración del pipeline con contrato y render.
         downloader: Descargador acotado para re-descargar los bytes.
         registry: Registro donde se anota el temporal de revalidación.
+        config: Configuración del pipeline con contrato y render (opcional).
 
     Returns:
         La ruta del archivo fuente local (actualizado).
@@ -1186,7 +1186,7 @@ def _revalidate_remote_source(
     """
     temporary = registry.register(_temporary_path(source_path))
     with _translated("revalidación de la fuente"):
-        if config.contract.timestamp_ranges:
+        if config is not None and config.contract.timestamp_ranges:
             tr = config.contract.timestamp_ranges[0]
             actual_download_start = max(0.0, tr.start_sec - 10.0)
             margin_dest = registry.register(
