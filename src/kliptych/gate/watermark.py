@@ -38,7 +38,10 @@ gradientes (magnitud Sobel del frame frente a la del template, bajo la
 máscara). Sin señal en algún frame (NCC bajo el suelo de ausencia o fuera
 de zona) el resultado es ``fail``; con señal consistente pero sin llegar
 al umbral fuerte el resultado es ``manual_review`` (revisión humana,
-fail-closed); solo un contorno muy fuerte devuelve ``pass``.
+fail-closed). La 4.ª ruta de W1-bis permite un ``pass`` directo cuando la
+opacidad es < 0.7 en un template no uniforme si la correlación NCC es
+>= 0.22 y la coincidencia de bordes alfa (alpha-edge matching) alcanza
+el umbral fuerte >= 0.90.
 
 La muestra exige tres condiciones: similitud sobre el umbral (correlación
 o contraste de borde según el template), posición en la zona del contrato
