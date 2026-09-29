@@ -390,3 +390,60 @@ def test_contract_hook_and_unmapped_schema_validation() -> None:
     dump = contract.model_dump(mode="python")
     assert dump["hook_keyword"] == "mira esto"
     assert dump["unmapped"] == ({"rule": "caption.tone", "quote": "épico"},)
+
+
+def test_h1_unmapped_outside_rules_forces_pending_review(tmp_path: Path) -> None:
+    contract = make_contract(
+        hard=["artifact.integrity"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        unmapped=(("caption.tone", "tono épico"),),
+    )
+    result = Gate(FakeProbe(info=make_media())).run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+    assert result.status is GateStatus.PENDING_REVIEW
+    matches = [check for check in result.checks if check.id == "rules.unmapped"]
+    assert len(matches) == 1
+    assert matches[0].status is CheckStatus.MANUAL_REVIEW
+    assert matches[0].evidence["rules"] == ["caption.tone"]
+    assert matches[0].evidence["citations"] == ["tono épico"]
+
+
+def test_h1_contract_rejects_unmapped_colliding_with_known_validators() -> None:
+    for rule_id in ("artifact.integrity", "caption.forbidden", "watermark.present"):
+        with pytest.raises(ValueError, match="colisiona con un validador conocido"):
+            _ = make_contract(
+                hard=["artifact.integrity"],
+                audio_rule="any",
+                min_s=None,
+                max_s=None,
+                required_mentions=(),
+                required_hashtags=(),
+                unmapped=((rule_id, "cita"),),
+            )
+
+
+def test_h1_engine_with_colliding_unmapped_is_never_passed(tmp_path: Path) -> None:
+    base = make_contract(
+        hard=["artifact.integrity"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+    )
+    bypassed_contract = base.model_copy(
+        update={"unmapped": (UnmappedRule(rule="artifact.integrity", quote="cita"),)}
+    )
+    result = Gate(FakeProbe(info=make_media())).run(
+        contract=bypassed_contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+    assert result.status is not GateStatus.PASSED

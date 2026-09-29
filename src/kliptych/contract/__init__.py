@@ -29,6 +29,7 @@ from kliptych.contract.enums import (
 )
 from kliptych.contract.evidence import Confidence, FieldCandidate, SourceEvidence
 from kliptych.contract.schema import (
+    KNOWN_VALIDATOR_RULES,
     AnalyticsProofRequired,
     AssetBundle,
     AssetRef,
@@ -56,6 +57,7 @@ from kliptych.contract.schema import (
 )
 
 __all__ = [
+    "KNOWN_VALIDATOR_RULES",
     "AnalyticsProofRequired",
     "AssetBundle",
     "AssetDraft",

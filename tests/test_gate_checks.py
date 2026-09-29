@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Contract
+from kliptych.contract import KNOWN_VALIDATOR_RULES, Contract
 from kliptych.gate import (
     CheckResult,
     CheckStatus,
@@ -15,6 +15,7 @@ from kliptych.gate import (
     MediaInfo,
     Piece,
 )
+from kliptych.gate.checks import DEFAULT_VALIDATORS
 from tests.support import FakeProbe, make_asset_ref, make_contract, make_media, make_piece
 
 
@@ -344,3 +345,7 @@ def test_full_video_watermark_without_png_is_fail_closed(tmp_path: Path) -> None
     result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)))
     assert _check(result, "watermark.full_video").status is CheckStatus.FAIL
     assert result.status is GateStatus.REJECTED
+
+
+def test_known_validator_rules_matches_default_validators() -> None:
+    assert frozenset(DEFAULT_VALIDATORS.keys()) == KNOWN_VALIDATOR_RULES

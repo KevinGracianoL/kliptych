@@ -280,6 +280,29 @@ class UnmappedRule(ContractBase):
     quote: str = Field(min_length=1)
 
 
+KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
+    {
+        "artifact.integrity",
+        "artifact.video_stream",
+        "assets.required",
+        "audio.present",
+        "audio.policy",
+        "audio.silence",
+        "brand.safety",
+        "caption.first_line",
+        "caption.forbidden",
+        "caption.required_hashtag",
+        "caption.required_mention",
+        "duration.max",
+        "duration.min",
+        "hook.keyword",
+        "subtitles.spelling_lock",
+        "watermark.full_video",
+        "watermark.present",
+    }
+)
+
+
 class Contract(ContractBase):
     """Contrato validado y normalizado que consumen pipeline y gate."""
 
@@ -323,6 +346,20 @@ class Contract(ContractBase):
             msg = "hook_keyword no puede ser vacío o solo espacios"
             raise ValueError(msg)
         return hook_keyword
+
+    @field_validator("unmapped")
+    @classmethod
+    def _unmapped_rules_do_not_collide_with_catalog(
+        cls, unmapped: tuple[UnmappedRule, ...]
+    ) -> tuple[UnmappedRule, ...]:
+        for entry in unmapped:
+            if entry.rule in KNOWN_VALIDATOR_RULES:
+                msg = (
+                    f"la regla no mapeada '{entry.rule}' colisiona con un validador "
+                    "conocido en el catálogo del gate"
+                )
+                raise ValueError(msg)
+        return unmapped
 
     @model_validator(mode="after")
     def _audio_policy_compatible_with_mode(self) -> Self:

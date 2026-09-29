@@ -101,6 +101,28 @@ class Gate:
             outcomes.extend(
                 (strength, self._run_rule(rule_id, strength, context)) for rule_id in rule_ids
             )
+        if contract.unmapped:
+            colliding = [
+                entry.rule for entry in contract.unmapped if entry.rule in self._validators
+            ]
+            check_status = CheckStatus.FAIL if colliding else CheckStatus.MANUAL_REVIEW
+            evidence: dict[str, object] = {
+                "unmapped": [{"rule": u.rule, "quote": u.quote} for u in contract.unmapped],
+                "rules": [u.rule for u in contract.unmapped],
+                "citations": [u.quote for u in contract.unmapped],
+            }
+            if colliding:
+                evidence["colliding_rules"] = colliding
+            outcomes.append(
+                (
+                    RuleStrength.HARD if colliding else RuleStrength.MANUAL_REVIEW,
+                    CheckResult(
+                        id="rules.unmapped",
+                        status=check_status,
+                        evidence=evidence,
+                    ),
+                )
+            )
         return GateResult(
             status=_derive_status(outcomes),
             checks=tuple(check for _, check in outcomes),
