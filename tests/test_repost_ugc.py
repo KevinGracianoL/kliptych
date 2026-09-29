@@ -292,17 +292,24 @@ class _SubtitleRenderer:
 
 
 def _ffmpeg(harness: _Harness) -> Callable[..., object]:
+    last_duration = ["2.0"]
+
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         harness.commands.append(list(argv))
         if str(argv[0]).lower().endswith("ffprobe"):
             harness.events.append("probe")
+            stdout = harness.probe_stdout
+            if stdout == _DEFAULT_PROBE and last_duration[0] != "2.0":
+                stdout = f"width=1080\nheight=1920\nduration={last_duration[0]}\n"
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=harness.probe_returncode,
-                stdout=harness.probe_stdout,
+                stdout=stdout,
                 stderr="probe boom",
             )
+        if "-t" in argv:
+            last_duration[0] = argv[argv.index("-t") + 1]
         if "-ss" in argv:
             tag = "cut"
         elif "-filter_complex" in argv:
@@ -477,12 +484,12 @@ def test_backward_compatible_when_repost_disabled(
         "select_segments",
         "parse_response",
         "cut",
+        "probe",
         "analyze",
         "render",
         "write",
         "burn",
     ]
-    assert "probe" not in harness.events
     assert result.transcript == _transcript()
     assert result.moments == (_moment(),)
     assert result.reframe == _reframe_result()

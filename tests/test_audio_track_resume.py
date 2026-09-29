@@ -80,22 +80,27 @@ def _contract() -> Contract:
     )
 
 
+_last_audio_duration: list[str] = ["2.0"]
+
+
 def _ffmpeg_run(argv: list[str], **kwargs: object) -> object:
     _ = kwargs
     if argv and argv[0] == "ffprobe":
         return SimpleNamespace(
             args=argv,
             returncode=0,
-            stdout="width=320\nheight=240\nduration=2.0\n",
+            stdout=f"width=320\nheight=240\nduration={_last_audio_duration[0]}\n",
             stderr="",
         )
+    if "-t" in argv:
+        _last_audio_duration[0] = argv[argv.index("-t") + 1]
     out_path = Path(argv[-1])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _ = out_path.write_bytes(b"ffmpeg_output")
     return SimpleNamespace(
         args=argv,
         returncode=0,
-        stdout="width=320\nheight=240\nduration=2.0\n",
+        stdout=f"width=320\nheight=240\nduration={_last_audio_duration[0]}\n",
         stderr="",
     )
 

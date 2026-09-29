@@ -239,15 +239,19 @@ class _SubtitleRenderer:
 
 
 def _ffmpeg(events: list[str], captured: list[list[str]]) -> Callable[..., object]:
+    last_duration = ["10.000"]
+
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         if str(argv[0]).lower().endswith("ffprobe") or "ffprobe" in str(argv[0]).lower():
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=0,
-                stdout="width=1080\nheight=1920\nduration=10.000\n",
+                stdout=f"width=1080\nheight=1920\nduration={last_duration[0]}\n",
                 stderr="",
             )
+        if "-t" in argv:
+            last_duration[0] = argv[argv.index("-t") + 1]
         if "-ss" in argv:
             tag = "cut"
         elif "-filter_complex" in argv:

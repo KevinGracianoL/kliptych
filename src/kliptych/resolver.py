@@ -283,12 +283,18 @@ def _resolve_brand_safety(
         or brand_safety_indicated
     )
     brand_safety_citation = _value(draft.brand_safety_citation)
-    if (
-        brand_safety_citation is None
-        and draft.brand_safety_required is not None
-        and draft.brand_safety_required.evidence is not None
-    ):
-        brand_safety_citation = draft.brand_safety_required.evidence.quote
+    if brand_safety_citation is None and brand_safety_required:
+        if (
+            draft.brand_safety_required is not None
+            and draft.brand_safety_required.evidence is not None
+        ):
+            brand_safety_citation = draft.brand_safety_required.evidence.quote
+        elif draft.brand_safety is not None and draft.brand_safety.evidence is not None:
+            brand_safety_citation = draft.brand_safety.evidence.quote
+        elif draft.prohibitions is not None and draft.prohibitions.evidence is not None:
+            brand_safety_citation = draft.prohibitions.evidence.quote
+        elif prohibitions:
+            brand_safety_citation = prohibitions[0]
     if brand_safety_indicated or brand_safety_required:
         prohibitions_text = normalize_text(" ".join(prohibitions))
         if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):

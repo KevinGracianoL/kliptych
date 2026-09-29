@@ -26,6 +26,7 @@ el resultado se publica con la misma limpieza determinista.
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -39,7 +40,13 @@ from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
-from kliptych.contract import Contract, Segment, contract_digest, contract_mutes_audio
+from kliptych.contract import (
+    Contract,
+    Segment,
+    TimestampRange,
+    contract_digest,
+    contract_mutes_audio,
+)
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
@@ -1188,18 +1195,19 @@ def _revalidate_remote_source(
     temporary = registry.register(_temporary_path(source_path))
     with _translated("revalidación de la fuente"):
         if config is not None and config.contract.timestamp_ranges:
-            tr = config.contract.timestamp_ranges[0]
-            actual_download_start = max(0.0, tr.start_sec - 10.0)
+            window_start = min(tr.start_sec for tr in config.contract.timestamp_ranges)
+            window_end = max(tr.end_sec for tr in config.contract.timestamp_ranges)
+            actual_download_start = max(0.0, window_start - 10.0)
             margin_dest = registry.register(
                 _temporary_path(source_path.with_name("margin_source.mp4"))
             )
             _ = downloader.download_video(
                 url=url,
                 destination=margin_dest,
-                section=(tr.start_sec, tr.end_sec),
+                section=(window_start, window_end),
             )
-            cut_start = tr.start_sec - actual_download_start
-            cut_duration = tr.end_sec - tr.start_sec
+            cut_start = window_start - actual_download_start
+            cut_duration = window_end - window_start
             _ = _cut_exact_ffmpeg(
                 source=margin_dest,
                 destination=temporary,
@@ -1440,6 +1448,25 @@ def _resolve_moments_stage(
         return moments
 
 
+def _source_time_offset_sec(config: PipelineConfig) -> float:
+    if config.contract.timestamp_ranges:
+        return min(tr.start_sec for tr in config.contract.timestamp_ranges)
+    return 0.0
+
+
+def _contract_with_relative_timestamps(contract: Contract, *, offset_sec: float) -> Contract:
+    if math.isclose(offset_sec, 0.0, abs_tol=1e-6) or not contract.timestamp_ranges:
+        return contract
+    rel_ranges = tuple(
+        TimestampRange(
+            start_sec=max(0.0, tr.start_sec - offset_sec),
+            end_sec=max(0.0, tr.end_sec - offset_sec),
+        )
+        for tr in contract.timestamp_ranges
+    )
+    return contract.model_copy(update={"timestamp_ranges": rel_ranges})
+
+
 def _resolve_selection_stage(
     *,
     transcript: Transcript,
@@ -1465,10 +1492,13 @@ def _resolve_selection_stage(
                     state.mark_done(PipelineStage.SELECT, artifact_file)
                 return selection
     try:
+        rel_contract = _contract_with_relative_timestamps(
+            config.contract, offset_sec=_source_time_offset_sec(config)
+        )
         selection = _select(
             transcript,
             moments,
-            contract=config.contract,
+            contract=rel_contract,
             model=model,
             selector=selector,
         )
@@ -1995,16 +2025,17 @@ def _download(
     temporary = registry.register(_temporary_path(source))
     with _translated("descarga"):
         if config.contract.timestamp_ranges:
-            tr = config.contract.timestamp_ranges[0]
-            actual_download_start = max(0.0, tr.start_sec - 10.0)
+            window_start = min(tr.start_sec for tr in config.contract.timestamp_ranges)
+            window_end = max(tr.end_sec for tr in config.contract.timestamp_ranges)
+            actual_download_start = max(0.0, window_start - 10.0)
             margin_dest = registry.register(_temporary_path(source.with_name("margin_source.mp4")))
             _ = downloader.download_video(
                 url=url,
                 destination=margin_dest,
-                section=(tr.start_sec, tr.end_sec),
+                section=(window_start, window_end),
             )
-            cut_start = tr.start_sec - actual_download_start
-            cut_duration = tr.end_sec - tr.start_sec
+            cut_start = window_start - actual_download_start
+            cut_duration = window_end - window_start
             _ = _cut_exact_ffmpeg(
                 source=margin_dest,
                 destination=temporary,
