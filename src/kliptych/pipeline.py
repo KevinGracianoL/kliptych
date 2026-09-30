@@ -38,7 +38,10 @@ from kliptych.gate.brand_safety import (
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.hashing import brief_key, sha256_file
 from kliptych.lyrics import (
+    LyricLine,
     LyricsError,
+    cut_lyric_window,
+    lyric_lines_to_ass,
     lyric_lines_to_subtitle_segments,
     lyric_lines_to_subtitle_text,
     resolve_synced_lyrics,
@@ -336,24 +339,117 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
     )
 
 
+def _clip_window(contract: Contract) -> tuple[float | None, float | None]:
+    """Ventana temporal única del contrato para las piezas given_clips.
+
+    Solo un rango unívoco puede mapearse a todas las piezas; con cero o
+    varios rangos no hay ventana asignable y el gate decide en cerrado.
+
+    Args:
+        contract: Contrato validado de la corrida.
+
+    Returns:
+        El par ``(start_sec, end_sec)``, o ``(None, None)`` sin rango único.
+    """
+    if len(contract.timestamp_ranges) == 1:
+        single = contract.timestamp_ranges[0]
+        return single.start_sec, single.end_sec
+    return None, None
+
+
+def _resolve_lyric_source_lines(
+    context: _RunContext, contract: Contract
+) -> tuple[LyricLine, ...] | None:
+    """Resuelve las líneas .lrc completas de una corrida lyric_video.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+
+    Returns:
+        Las líneas sincronizadas, o ``None`` si no es lyric_video o no se
+        pudieron resolver (el gate falla en cerrado en ese caso).
+    """
+    if contract.format is not Format.LYRIC_VIDEO:
+        return None
+    try:
+        return resolve_synced_lyrics(contract=contract, registry=context.registry)
+    except (LyricsError, OSError):
+        return None
+
+
+def _cut_lyric_window_lines(
+    lines: Sequence[LyricLine], *, start_sec: float | None, end_sec: float | None
+) -> tuple[LyricLine, ...] | None:
+    """Recorta las líneas .lrc a la ventana del clip.
+
+    Args:
+        lines: Líneas sincronizadas completas del tema.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        Las líneas de la ventana (o completas sin recorte), o ``None``
+        cuando la ventana queda vacía.
+    """
+    if start_sec is None or end_sec is None:
+        return tuple(lines)
+    try:
+        return cut_lyric_window(lines, start_sec=start_sec, end_sec=end_sec)
+    except (LyricsError, ValueError):
+        return None
+
+
+def _write_lyric_sidecar(
+    artifact: Path, lines: tuple[LyricLine, ...] | None, *, duration_s: float | None
+) -> Path | None:
+    """Escribe el .ass de la pieza junto al artefacto para el gate.
+
+    Args:
+        artifact: Ruta del MP4 final de la pieza.
+        lines: Líneas de la ventana del clip, o ``None`` sin letras.
+        duration_s: Duración del clip para acotar los eventos, o ``None``.
+
+    Returns:
+        La ruta del .ass escrito, o ``None`` sin líneas o si no se pudo
+        escribir (el gate falla en cerrado en ambos casos).
+    """
+    if lines is None:
+        return None
+    sidecar = artifact.with_suffix(".ass")
+    try:
+        _ = sidecar.write_text(lyric_lines_to_ass(lines, duration_s=duration_s), encoding="utf-8")
+    except OSError:
+        return None
+    return sidecar
+
+
 def _resolve_piece_subtitles(
     context: _RunContext,
-    contract: Contract,
     asset_id: str,
+    *,
+    lyric_window: tuple[LyricLine, ...] | None,
 ) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    """Deriva el texto y los segmentos de subtítulos de una pieza.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        asset_id: Identificador del clip en el registro de assets.
+        lyric_window: Líneas .lrc de la ventana del clip, o ``None`` sin
+            letras (los valores inyectados en la petición mandan sobre ellas).
+
+    Returns:
+        El texto y los segmentos de la pieza.
+    """
     subtitle_texts = context.request.subtitle_texts or {}
     subtitle_segments = context.request.subtitle_segments or {}
     sub_segments = tuple(subtitle_segments.get(asset_id, ()))
     sub_text = subtitle_texts.get(asset_id)
-    if contract.format is Format.LYRIC_VIDEO:
-        try:
-            lines = resolve_synced_lyrics(contract=contract, registry=context.registry)
-            if not sub_segments:
-                sub_segments = lyric_lines_to_subtitle_segments(lines)
-            if sub_text is None:
-                sub_text = lyric_lines_to_subtitle_text(lines)
-        except (LyricsError, OSError):
-            pass
+    if lyric_window is not None:
+        if not sub_segments:
+            sub_segments = lyric_lines_to_subtitle_segments(lyric_window)
+        if sub_text is None:
+            sub_text = lyric_lines_to_subtitle_text(lyric_window)
     if not sub_segments:
         sub_segments = hydrate_piece_subtitle_segments(
             transcript=None,
@@ -369,6 +465,43 @@ def _resolve_piece_subtitles(
     return sub_text, sub_segments
 
 
+@dataclass(frozen=True, slots=True)
+class _LyricClipState:
+    """Ventana de letra del clip para subtítulos, .ass y tiempos de la pieza."""
+
+    start_sec: float | None
+    end_sec: float | None
+    lines: tuple[LyricLine, ...] | None
+
+    @property
+    def duration_s(self) -> float | None:
+        """Duración de la ventana, o ``None`` sin recorte asignable."""
+        if self.start_sec is None or self.end_sec is None:
+            return None
+        return self.end_sec - self.start_sec
+
+
+def _prepare_lyric_clip(context: _RunContext, contract: Contract) -> _LyricClipState:
+    """Resuelve y recorta una sola vez la letra del clip given_clips.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+
+    Returns:
+        La ventana temporal y las líneas recortadas (o ``None`` sin letras,
+        con el gate fallando en cerrado).
+    """
+    start_sec, end_sec = _clip_window(contract)
+    source_lines = _resolve_lyric_source_lines(context, contract)
+    lines = (
+        _cut_lyric_window_lines(source_lines, start_sec=start_sec, end_sec=end_sec)
+        if source_lines is not None
+        else None
+    )
+    return _LyricClipState(start_sec=start_sec, end_sec=end_sec, lines=lines)
+
+
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
@@ -379,6 +512,7 @@ def _assemble_pieces(
     watermark = _watermark_path(contract, context.registry)
     watermark_config = contract.watermark if watermark is not None else None
     mute_audio = contract_mutes_audio(contract)
+    lyric = _prepare_lyric_clip(context, contract)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
             if asset.kind != _VIDEO_KIND:
@@ -396,7 +530,9 @@ def _assemble_pieces(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
             )
-            sub_text, sub_segments = _resolve_piece_subtitles(context, contract, asset.asset_id)
+            sub_text, sub_segments = _resolve_piece_subtitles(
+                context, asset.asset_id, lyric_window=lyric.lines
+            )
             piece = Piece(
                 piece_id=asset.asset_id,
                 platform=platform,
@@ -405,6 +541,9 @@ def _assemble_pieces(
                 subtitle_text=sub_text,
                 subtitle_segments=sub_segments,
                 artifact_path=artifact,
+                start_sec=lyric.start_sec,
+                end_sec=lyric.end_sec,
+                ass_path=_write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s),
             )
             pieces.append(piece)
             gates.append(

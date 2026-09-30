@@ -14,6 +14,7 @@ el primer uso.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from kliptych.gate import Gate, Piece, SubtitleSegment
     from kliptych.git_proposals import ProposalEngine, PullRequest
     from kliptych.intelligence import ArchetypeClassification, CampaignClassifier
+    from kliptych.lyrics import LyricLine
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
 _MAX_PIECE_ID_LENGTH: int = 64
@@ -557,24 +559,166 @@ def _subtitle_sources(result: PipelineResult) -> PieceSubtitleSources:
     )
 
 
-def _resolve_lyric_subtitles(
+def _piece_window(
     contract: Contract,
-    assets: AssetRegistry | None,
-) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    sources: PieceSubtitleSources | None,
+    *,
+    index: int,
+) -> tuple[float | None, float | None]:
+    """Deriva la ventana temporal de la pieza i-ésima de un lote.
+
+    El segmento de la selección manda (es lo que se renderizó); con un único
+    rango temporal declarado se usa ese; sin ventana asignable se devuelve
+    ``(None, None)`` y el gate decide en cerrado.
+
+    Args:
+        contract: Contrato de la campaña con sus rangos temporales.
+        sources: Fuentes de subtítulos del lote, o ``None``.
+        index: Índice del video final dentro del lote.
+
+    Returns:
+        El par ``(start_sec, end_sec)`` de la pieza, o ``(None, None)``.
+    """
+    if sources is not None and 0 <= index < len(sources.segments):
+        segment = sources.segments[index]
+        return segment.start_s, segment.end_s
+    if len(contract.timestamp_ranges) == 1:
+        single = contract.timestamp_ranges[0]
+        return single.start_sec, single.end_sec
+    return None, None
+
+
+def _piece_ass_path(sources: PieceSubtitleSources | None, *, index: int, total: int) -> Path | None:
+    """Resuelve el .ass renderizado de la pieza i-ésima, incluido --resume.
+
+    El .ass persiste junto a la fuente (``subtitles[_NN].ass``), así que al
+    reanudar la ruta sigue siendo válida aunque la transcripción en memoria
+    falte. La ruta se devuelve exista o no el archivo: el gate falla en
+    cerrado cuando no hay .ass verificable.
+
+    Args:
+        sources: Fuentes de subtítulos del lote, o ``None``.
+        index: Índice del video final dentro del lote.
+        total: Número de videos finales del lote.
+
+    Returns:
+        La ruta del .ass de la pieza, o ``None`` sin fuentes.
+    """
+    suffix = f"_{index:02d}" if total > 1 else ""
+    if sources is not None and sources.work_dir is not None:
+        return sources.work_dir / f"subtitles{suffix}.ass"
+    if sources is not None and sources.subtitles_path is not None and (total == 1 or index == 0):
+        return sources.subtitles_path
+    return None
+
+
+def _resolve_lyric_lines(
+    contract: Contract, assets: AssetRegistry | None
+) -> tuple[LyricLine, ...] | None:
+    """Resuelve las líneas .lrc completas de un contrato lyric_video.
+
+    Args:
+        contract: Contrato de la campaña.
+        assets: Registro de assets del workspace, o ``None``.
+
+    Returns:
+        Las líneas sincronizadas, o ``None`` si no es lyric_video o no se
+        pudieron resolver (el gate falla en cerrado en ese caso).
+    """
     if contract.format is not Format.LYRIC_VIDEO or assets is None:
-        return None, ()
-    from kliptych.lyrics import (
-        LyricsError,
-        lyric_lines_to_subtitle_segments,
-        lyric_lines_to_subtitle_text,
-        resolve_synced_lyrics,
-    )
+        return None
+    from kliptych.lyrics import LyricsError, resolve_synced_lyrics
 
     try:
-        lines = resolve_synced_lyrics(contract=contract, registry=assets)
-        return lyric_lines_to_subtitle_text(lines), lyric_lines_to_subtitle_segments(lines)
+        return resolve_synced_lyrics(contract=contract, registry=assets)
     except (LyricsError, OSError):
-        return None, ()
+        return None
+
+
+def _cut_lyric_piece(
+    lines: Sequence[LyricLine], *, start_sec: float | None, end_sec: float | None
+) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    """Recorta las líneas .lrc a la ventana de la pieza.
+
+    Args:
+        lines: Líneas sincronizadas completas del tema.
+        start_sec: Inicio de la ventana de la pieza, o ``None`` sin recorte.
+        end_sec: Fin de la ventana de la pieza, o ``None`` sin recorte.
+
+    Returns:
+        El texto y los segmentos de la ventana, o ``(None, ())`` cuando la
+        ventana queda vacía (el gate falla en cerrado).
+    """
+    from kliptych.lyrics import LyricsError, cut_lyric_window
+
+    if start_sec is not None and end_sec is not None:
+        try:
+            window: Sequence[LyricLine] = cut_lyric_window(
+                lines, start_sec=start_sec, end_sec=end_sec
+            )
+        except (LyricsError, ValueError):
+            return None, ()
+    else:
+        window = lines
+    from kliptych.lyrics import lyric_lines_to_subtitle_segments, lyric_lines_to_subtitle_text
+
+    return lyric_lines_to_subtitle_text(window), lyric_lines_to_subtitle_segments(window)
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoPieceFields:
+    """Subtítulos y rutas verificables de un video del lote."""
+
+    subtitle_text: str | None
+    subtitle_segments: tuple[SubtitleSegment, ...]
+    start_sec: float | None
+    end_sec: float | None
+    ass_path: Path | None
+
+
+def _video_piece_fields(
+    contract: Contract,
+    subtitle_sources: PieceSubtitleSources | None,
+    lyric_lines: tuple[LyricLine, ...] | None,
+    *,
+    index: int,
+    total: int,
+) -> _VideoPieceFields:
+    """Deriva los campos verificables de la pieza i-ésima de un lote.
+
+    La ventana temporal sale de la selección (o del rango único), el .ass de
+    los artefactos persistidos (válido en --resume) y los subtítulos de la
+    letra recortada a la ventana cuando hay .lrc (verdad de tierra del
+    render), con respaldo a las fuentes de transcripción.
+
+    Args:
+        contract: Contrato de la campaña.
+        subtitle_sources: Fuentes de subtítulos del lote, o ``None``.
+        lyric_lines: Líneas .lrc completas, o ``None`` sin letras.
+        index: Índice del video final dentro del lote.
+        total: Número de videos finales del lote.
+
+    Returns:
+        Los campos de subtítulos, ventana y .ass de la pieza.
+    """
+    start_sec, end_sec = _piece_window(contract, subtitle_sources, index=index)
+    subtitle_text = piece_subtitle_text(subtitle_sources, index=index, total=total)
+    subtitle_segments = piece_subtitle_segments(subtitle_sources, index=index, total=total)
+    if lyric_lines is not None:
+        window_text, window_segs = _cut_lyric_piece(
+            lyric_lines, start_sec=start_sec, end_sec=end_sec
+        )
+        if window_text is not None:
+            subtitle_text = window_text
+        if window_segs:
+            subtitle_segments = window_segs
+    return _VideoPieceFields(
+        subtitle_text=subtitle_text,
+        subtitle_segments=subtitle_segments,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        ass_path=_piece_ass_path(subtitle_sources, index=index, total=total),
+    )
 
 
 def _build_pieces(
@@ -603,17 +747,12 @@ def _build_pieces(
     multiple_platforms = len(platforms) > 1
     multiple_videos = len(videos) > 1
     pieces: list[Piece] = []
-    lyric_text, lyric_segs = _resolve_lyric_subtitles(contract, assets)
+    lyric_lines = _resolve_lyric_lines(contract, assets)
     for vid_idx, video in enumerate(videos):
         index_for_id = vid_idx if multiple_videos else None
-        subtitle_text = piece_subtitle_text(subtitle_sources, index=vid_idx, total=len(videos))
-        if subtitle_text is None:
-            subtitle_text = lyric_text
-        subtitle_segments = piece_subtitle_segments(
-            subtitle_sources, index=vid_idx, total=len(videos)
+        fields = _video_piece_fields(
+            contract, subtitle_sources, lyric_lines, index=vid_idx, total=len(videos)
         )
-        if not subtitle_segments:
-            subtitle_segments = lyric_segs
         for plat in platforms:
             plat_rules = contract.platforms[plat]
             piece_caption = _piece_caption(campaign.brief, plat_rules, caption)
@@ -629,9 +768,12 @@ def _build_pieces(
                     platform=plat,
                     caption=piece_caption,
                     hashtags=piece_tags,
-                    subtitle_text=subtitle_text,
-                    subtitle_segments=subtitle_segments,
+                    subtitle_text=fields.subtitle_text,
+                    subtitle_segments=fields.subtitle_segments,
                     artifact_path=video,
+                    start_sec=fields.start_sec,
+                    end_sec=fields.end_sec,
+                    ass_path=fields.ass_path,
                 )
             )
     return pieces

@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import AudioPolicy, AudioRule, Format
+from kliptych.contract import AudioPolicy, AudioRule, Contract, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext, Piece, SubtitleSegment
@@ -835,6 +835,18 @@ def _load_verified_lrc_lines(
         return None, f"archivo .lrc de referencia inválido: {error}"
 
 
+def _is_lyric_multi_range(contract: Contract) -> bool:
+    """Indica si el contrato lyric_video declara más de un clip.
+
+    Args:
+        contract: Contrato de la campaña con sus rangos y segmentos.
+
+    Returns:
+        ``True`` cuando hay más de un rango temporal o segmento declarado.
+    """
+    return len(contract.timestamp_ranges) > 1 or len(contract.segments) > 1
+
+
 def _validate_unwindowed_segments(
     segments: Sequence[SubtitleSegment],
     expected_tokens: Sequence[str],
@@ -898,6 +910,37 @@ def _validate_lyric_concordance(
     return _verify_ass_dialogue_events(context.piece, expected_lines)
 
 
+def _concordance_outcome(
+    context: GateContext,
+    expected_lines: Sequence[LyricLine],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> CheckOutcome | None:
+    """Evalúa la concordancia de la pieza contra la ventana .lrc esperada.
+
+    Args:
+        context: Contexto resuelto del gate.
+        expected_lines: Líneas de la ventana temporal ya recortada.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        El FAIL correspondiente, o ``None`` si la pieza concuerda.
+    """
+    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
+    if not expected_tokens:
+        return CheckOutcome(
+            status=CheckStatus.FAIL, evidence={"reason": "archivo .lrc sin tokens de letra"}
+        )
+    mismatch_reason = _validate_lyric_concordance(
+        context, expected_lines, start_sec=start_sec, end_sec=end_sec
+    )
+    if mismatch_reason is not None:
+        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": mismatch_reason})
+    return None
+
+
 def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
     if (
         context.contract.format is not Format.LYRIC_VIDEO
@@ -916,19 +959,18 @@ def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
             status=CheckStatus.FAIL,
             evidence={"reason": f"error en ventana temporal de letras: {window_err}"},
         )
-    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
-    if not expected_tokens:
+    if (start_sec is None or end_sec is None) and _is_lyric_multi_range(context.contract):
         return CheckOutcome(
-            status=CheckStatus.FAIL, evidence={"reason": "archivo .lrc sin tokens de letra"}
+            status=CheckStatus.FAIL,
+            evidence={
+                "reason": (
+                    "contrato lyric_video multi-rango sin start_sec/end_sec en la pieza: "
+                    "cada pieza debe declarar su ventana temporal, "
+                    "no se compara contra el .lrc completo"
+                )
+            },
         )
-
-    mismatch_reason = _validate_lyric_concordance(
-        context, expected_lines, start_sec=start_sec, end_sec=end_sec
-    )
-    if mismatch_reason is not None:
-        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": mismatch_reason})
-
-    return None
+    return _concordance_outcome(context, expected_lines, start_sec=start_sec, end_sec=end_sec)
 
 
 def check_spelling_locks(context: GateContext) -> CheckOutcome:
