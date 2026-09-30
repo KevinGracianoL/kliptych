@@ -27,10 +27,12 @@ from pydantic import ValidationError
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Layout, Platform, SplitScreenConfig
+from kliptych.contract.draft import SplitScreenDraft
 from kliptych.gate import CheckStatus, Gate, GateContext
 from kliptych.gate.checks import check_split_screen_geometry
 from kliptych.gate.probe import FFprobeProbe
-from tests.support import make_contract, make_media, make_piece
+from kliptych.resolver import ResolutionStatus, resolve_contract
+from tests.support import make_contract, make_draft, make_media, make_piece
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -399,3 +401,172 @@ def test_geometry_gate_rejects_single_clip_artifact(tmp_path: Path) -> None:
     )
     outcome = next(check for check in result.checks if check.id == "layout.geometry")
     assert outcome.status is CheckStatus.FAIL
+
+
+_SPLIT_BRIEF = (
+    "cita del brief. Directors cut: panel superior con clip-top y panel inferior "
+    "con clip-bottom, gap de 20 píxeles, reparto 50/50 del lienzo 1080x1920."
+)
+
+
+def _cand_at(value: object, quote: str, start: int) -> dict[str, object]:
+    return {
+        "value": value,
+        "evidence": {
+            "quote": quote,
+            "start": start,
+            "end": start + len(quote),
+            "location": "brief.md#l1",
+        },
+        "confidence": "explicit",
+    }
+
+
+def _split_draft(
+    *,
+    top: object = "default",
+    bottom: object = "default",
+    gap: object = "default",
+    ratio: object = "default",
+    width: object = "default",
+    height: object = "default",
+) -> SplitScreenDraft:
+    top_quote = "panel superior con clip-top"
+    bottom_quote = "panel inferior con clip-bottom"
+    gap_quote = "gap de 20 píxeles"
+    ratio_quote = "reparto 50/50"
+    canvas_quote = "lienzo 1080x1920"
+    values: dict[str, object] = {
+        "top_source": _cand_at("clip-top", top_quote, _SPLIT_BRIEF.index(top_quote))
+        if top == "default"
+        else top,
+        "bottom_source": _cand_at("clip-bottom", bottom_quote, _SPLIT_BRIEF.index(bottom_quote))
+        if bottom == "default"
+        else bottom,
+        "gap": _cand_at(20, gap_quote, _SPLIT_BRIEF.index(gap_quote)) if gap == "default" else gap,
+        "panel_ratio": _cand_at(0.5, ratio_quote, _SPLIT_BRIEF.index(ratio_quote))
+        if ratio == "default"
+        else ratio,
+        "width": _cand_at(1080, canvas_quote, _SPLIT_BRIEF.index(canvas_quote))
+        if width == "default"
+        else width,
+        "height": _cand_at(1920, canvas_quote, _SPLIT_BRIEF.index(canvas_quote))
+        if height == "default"
+        else height,
+    }
+    return SplitScreenDraft.model_validate(values)
+
+
+def test_resolver_resolves_split_screen_from_draft(tmp_path: Path) -> None:
+    draft = make_draft(split_screen=_split_draft())
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert result.contract.split_screen is not None
+    split = result.contract.split_screen
+    assert split.top_source == "clip-top"
+    assert split.bottom_source == "clip-bottom"
+    assert split.gap == 20
+    assert split.panel_ratio == pytest.approx(0.5)
+    assert (split.width, split.height) == (1080, 1920)
+    assert "layout.geometry" in result.contract.rules.hard
+
+
+def test_resolver_rejects_split_without_provenance(tmp_path: Path) -> None:
+    draft = make_draft(split_screen=_split_draft(top="clip-top"))
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_confidence_missing(tmp_path: Path) -> None:
+    draft = make_draft(
+        split_screen=_split_draft(top={"value": "clip-top", "confidence": "missing"})
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_confidence_conflict(tmp_path: Path) -> None:
+    draft = make_draft(split_screen=_split_draft(top={"confidence": "conflict"}))
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_without_evidence_quote(tmp_path: Path) -> None:
+    draft = make_draft(
+        split_screen=_split_draft(top={"value": "clip-top", "confidence": "explicit"})
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_with_root_citation_alias(tmp_path: Path) -> None:
+    draft = make_draft(
+        split_screen=_split_draft(
+            top={"value": "clip-top", "confidence": "explicit", "citation": "clip-top"}
+        )
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_with_root_quote_alias(tmp_path: Path) -> None:
+    draft = make_draft(
+        split_screen=_split_draft(
+            top={"value": "clip-top", "confidence": "explicit", "quote": "clip-top"}
+        )
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_quote_not_in_brief(tmp_path: Path) -> None:
+    draft = make_draft(
+        split_screen=_split_draft(
+            top={
+                "value": "clip-top",
+                "confidence": "explicit",
+                "evidence": {"quote": "cita inventada fuera del brief"},
+            },
+        )
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_value_outside_own_quote(tmp_path: Path) -> None:
+    other_quote = "panel inferior con clip-bottom"
+    draft = make_draft(
+        split_screen=_split_draft(
+            top=_cand_at("clip-top", other_quote, _SPLIT_BRIEF.index(other_quote)),
+        )
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_numeric_mismatch(tmp_path: Path) -> None:
+    gap_quote = "gap de 20 píxeles"
+    draft = make_draft(
+        split_screen=_split_draft(
+            gap=_cand_at(40, gap_quote, _SPLIT_BRIEF.index(gap_quote)),
+        )
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+def test_resolver_rejects_split_missing_sources(tmp_path: Path) -> None:
+    draft = make_draft(split_screen=_split_draft(top=None, bottom=None))
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.field == "split_screen" for issue in result.issues)
