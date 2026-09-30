@@ -120,3 +120,45 @@ def test_p42_2a_ass_dialogue_with_wrong_times_fails(tmp_path: Path) -> None:
     )
     outcome = check_spelling_locks(ctx)
     assert outcome.status is CheckStatus.FAIL
+
+
+def test_p42_2b_declared_missing_ass_path_fails(tmp_path: Path) -> None:
+    """ass_path inexistente falla aunque exista un sidecar válido en el dir."""
+    registry = _register_lrc(tmp_path)
+    _ = _write_ass(
+        tmp_path / "subtitles.ass",
+        [
+            ("0:00:00.00", "0:00:02.00", "alpha beta"),
+            ("0:00:02.00", "0:00:05.00", "gamma delta"),
+        ],
+    )
+    ctx = _lyric_context(
+        registry,
+        tmp_path / "clip.mp4",
+        subtitle_text="alpha beta gamma delta",
+        subtitle_segments=[
+            SubtitleSegment(text="alpha beta", start_s=0.0, end_s=2.0),
+            SubtitleSegment(text="gamma delta", start_s=2.0, end_s=5.0),
+        ],
+        ass_path=tmp_path / "missing.ass",
+    )
+    outcome = check_spelling_locks(ctx)
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_p42_2b_missing_sidecar_fails_closed(tmp_path: Path) -> None:
+    """Lyric video sin .ass verificable falla en cerrado, nunca pasa."""
+    registry = _register_lrc(tmp_path)
+    ctx = _lyric_context(
+        registry,
+        tmp_path / "clip.mp4",
+        start_sec=0.0,
+        end_sec=5.0,
+        subtitle_text="alpha beta gamma delta",
+        subtitle_segments=[
+            SubtitleSegment(text="alpha beta", start_s=0.0, end_s=2.0),
+            SubtitleSegment(text="gamma delta", start_s=2.0, end_s=5.0),
+        ],
+    )
+    outcome = check_spelling_locks(ctx)
+    assert outcome.status is CheckStatus.FAIL

@@ -585,17 +585,15 @@ def _parse_ass_timestamp(token: str) -> float | None:
     return float(hours) * _SECONDS_PER_HOUR + float(minutes) * _SECONDS_PER_MINUTE + seconds
 
 
-def _find_ass_path(piece: Piece) -> Path | None:
-    """Busca el .ass declarado o el sidecar junto al artefacto.
+def _inferred_ass_sidecar(piece: Piece) -> Path | None:
+    """Busca el .ass junto al artefacto, sin sustituir un ass_path declarado.
 
     Args:
-        piece: Pieza con el ``ass_path`` declarado y la ruta del artefacto.
+        piece: Pieza cuyo directorio de artefacto se inspecciona.
 
     Returns:
-        La ruta existente a verificar, o ``None`` sin candidato en disco.
+        El sidecar existente, o ``None`` si no hay ninguno verificable.
     """
-    if piece.ass_path is not None and piece.ass_path.is_file():
-        return piece.ass_path
     candidate_default = piece.artifact_path.parent / "subtitles.ass"
     if candidate_default.is_file():
         return candidate_default
@@ -603,6 +601,33 @@ def _find_ass_path(piece: Piece) -> Path | None:
     if candidate_stem.is_file():
         return candidate_stem
     return None
+
+
+def _resolve_ass_path(piece: Piece) -> tuple[Path | None, str | None]:
+    """Resuelve el .ass a verificar sin sustituciones silenciosas.
+
+    Un ``ass_path`` declarado que no exista (o no sea un archivo regular)
+    falla en cerrado: jamás se sustituye por un sidecar válido del mismo
+    directorio. Sin ``ass_path`` declarado solo se acepta un sidecar que
+    exista junto al artefacto; un lyric video sin .ass verificable falla.
+
+    Args:
+        piece: Pieza con el ``ass_path`` declarado y la ruta del artefacto.
+
+    Returns:
+        La ruta a verificar y ``None``, o ``None`` y el motivo del fallo.
+    """
+    if piece.ass_path is not None:
+        if piece.ass_path.is_file():
+            return piece.ass_path, None
+        return None, f"ass_path declarado no existe o no es un archivo: {piece.ass_path}"
+    sidecar = _inferred_ass_sidecar(piece)
+    if sidecar is None:
+        return None, (
+            "pieza lyric_video sin archivo .ass verificable junto al artefacto "
+            f"(se buscó {piece.artifact_path.parent / 'subtitles.ass'})"
+        )
+    return sidecar, None
 
 
 def _read_ass_dialogues(ass_path: Path) -> tuple[list[tuple[float, float, str]], str | None]:
@@ -653,9 +678,9 @@ def _verify_ass_dialogue_events(piece: Piece, expected_lines: Sequence[LyricLine
         ``None`` si cada evento concuerda en texto y tiempos; el motivo del
         fallo en caso contrario.
     """
-    ass_path = _find_ass_path(piece)
-    if ass_path is None:
-        return None
+    ass_path, resolve_err = _resolve_ass_path(piece)
+    if resolve_err is not None or ass_path is None:
+        return resolve_err
     events, read_err = _read_ass_dialogues(ass_path)
     if read_err is not None:
         return read_err

@@ -198,6 +198,13 @@ def test_gate_spelling_lock_ground_truth_lrc_asset_detects_altered_word(tmp_path
         required_assets=[ref],
     )
 
+    ass_content = (
+        "[Script Info]\nTitle: Test\n\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,palabra exacta del tema\n"
+    )
+    _ = (tmp_path / "subtitles.ass").write_text(ass_content, encoding="utf-8")
+
     bad_piece = make_piece(
         tmp_path / "clip.mp4",
         subtitle_text="palabra cambiada del tema",
@@ -250,6 +257,13 @@ def test_gate_spelling_lock_ground_truth_reordered_words_fails(tmp_path: Path) -
         required_assets=[ref],
     )
     platform = next(iter(contract.platforms.keys()))
+
+    ass_content = (
+        "[Script Info]\nTitle: Test\n\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,hello world\n"
+    )
+    _ = (tmp_path / "subtitles.ass").write_text(ass_content, encoding="utf-8")
 
     # 1. Exact match -> PASS
     pass_piece = make_piece(
@@ -340,6 +354,14 @@ def test_gate_spelling_lock_partial_window_clip(tmp_path: Path) -> None:
         required_assets=[ref],
     )
     platform = next(iter(contract.platforms.keys()))
+
+    ass_content = (
+        "[Script Info]\nTitle: Test\n\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,verse line ten\n"
+        "Dialogue: 0,0:00:05.00,0:00:10.00,Default,,0,0,0,,chorus line fifteen\n"
+    )
+    _ = (tmp_path / "subtitles.ass").write_text(ass_content, encoding="utf-8")
 
     # Piece cut at 10s..20s matching 10s..20s sequence -> PASS
     good_piece = make_piece(
