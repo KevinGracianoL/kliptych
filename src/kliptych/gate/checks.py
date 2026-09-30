@@ -55,6 +55,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
@@ -558,9 +559,41 @@ def _extract_ordered_tokens(text: str) -> list[str]:
 
 _ASS_DIALOGUE_PARTS: int = 10
 _ASS_SPLIT_MAX: int = 9
+_ASS_TIME_TOLERANCE_SEC = 0.02
+_ASS_TIME_RE = re.compile(r"^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$")
+_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_HOUR = 3600.0
+
+
+def _parse_ass_timestamp(token: str) -> float | None:
+    """Parsea una marca de tiempo ``H:MM:SS.cc`` de un evento Dialogue.
+
+    Args:
+        token: Marca tal como aparece en los campos Start/End del Dialogue.
+
+    Returns:
+        Los segundos como flotante, o ``None`` si el formato es inválido.
+    """
+    match = _ASS_TIME_RE.match(token.strip())
+    if match is None:
+        return None
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    if minutes >= _SECONDS_PER_MINUTE or seconds >= _SECONDS_PER_MINUTE:
+        return None
+    hours = int(match.group(1))
+    return float(hours) * _SECONDS_PER_HOUR + float(minutes) * _SECONDS_PER_MINUTE + seconds
 
 
 def _find_ass_path(piece: Piece) -> Path | None:
+    """Busca el .ass declarado o el sidecar junto al artefacto.
+
+    Args:
+        piece: Pieza con el ``ass_path`` declarado y la ruta del artefacto.
+
+    Returns:
+        La ruta existente a verificar, o ``None`` sin candidato en disco.
+    """
     if piece.ass_path is not None and piece.ass_path.is_file():
         return piece.ass_path
     candidate_default = piece.artifact_path.parent / "subtitles.ass"
@@ -572,27 +605,151 @@ def _find_ass_path(piece: Piece) -> Path | None:
     return None
 
 
-def _verify_ass_dialogue_tokens(piece: Piece, expected_tokens: Sequence[str]) -> str | None:
-    ass_path = _find_ass_path(piece)
-    if ass_path is None:
-        return None
+def _read_ass_dialogues(ass_path: Path) -> tuple[list[tuple[float, float, str]], str | None]:
+    """Lee los eventos Dialogue de un .ass como (inicio, fin, texto).
+
+    Args:
+        ass_path: Ruta del archivo .ass ya resuelto.
+
+    Returns:
+        La lista de eventos y ``None``, o la lista vacía y el motivo del
+        fallo cuando el archivo no se puede leer o trae eventos
+        inverificables (fail-closed).
+    """
     try:
         content = ass_path.read_text(encoding="utf-8")
     except OSError as error:
-        return f"no se pudo leer el archivo .ass en {ass_path}: {error}"
-    dialogues: list[str] = []
-    for line in content.splitlines():
+        return [], f"no se pudo leer el archivo .ass en {ass_path}: {error}"
+    events: list[tuple[float, float, str]] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
         stripped = line.strip()
-        if stripped.startswith("Dialogue:"):
-            parts = stripped.split(",", _ASS_SPLIT_MAX)
-            if len(parts) >= _ASS_DIALOGUE_PARTS:
-                dialogues.append(parts[_ASS_SPLIT_MAX].strip())
-    ass_tokens = _extract_ordered_tokens(" ".join(dialogues))
-    if ass_tokens != list(expected_tokens):
+        if not stripped.startswith("Dialogue:"):
+            continue
+        parts = stripped.split(",", _ASS_SPLIT_MAX)
+        if len(parts) < _ASS_DIALOGUE_PARTS:
+            return [], f"evento Dialogue malformado en {ass_path} (línea {lineno})"
+        start = _parse_ass_timestamp(parts[1])
+        end = _parse_ass_timestamp(parts[2])
+        if start is None or end is None or end <= start:
+            return [], f"marca de tiempo .ass inválida en {ass_path} (línea {lineno})"
+        events.append((start, end, parts[_ASS_SPLIT_MAX].strip()))
+    return events, None
+
+
+def _verify_ass_dialogue_events(piece: Piece, expected_lines: Sequence[LyricLine]) -> str | None:
+    """Verifica tiempos y textos de los eventos Dialogue contra la ventana esperada.
+
+    Exige el mismo número de eventos que de líneas recortadas por
+    ``cut_lyric_window`` y, por cada línea, tokens idénticos e intervalos
+    (inicio y fin) dentro de ``_ASS_TIME_TOLERANCE_SEC``. Cualquier
+    desplazamiento, compresión o extensión falla.
+
+    Args:
+        piece: Pieza con el ``ass_path`` declarado o inferible.
+        expected_lines: Líneas de la ventana temporal ya recortada y
+            desplazada a 0.0 s.
+
+    Returns:
+        ``None`` si cada evento concuerda en texto y tiempos; el motivo del
+        fallo en caso contrario.
+    """
+    ass_path = _find_ass_path(piece)
+    if ass_path is None:
+        return None
+    events, read_err = _read_ass_dialogues(ass_path)
+    if read_err is not None:
+        return read_err
+    if len(events) != len(expected_lines):
         return (
-            "eventos Dialogue en .ass no concuerdan con .lrc "
-            f"(esperado {expected_tokens}, obtenido {ass_tokens})"
+            f"archivo .ass con {len(events)} eventos Dialogue, "
+            f"se esperaban {len(expected_lines)} líneas de la ventana .lrc"
         )
+    for index, ((start, end, text), expected) in enumerate(
+        zip(events, expected_lines, strict=True)
+    ):
+        candidate = _LyricCandidate(
+            label="evento Dialogue", index=index, text=text, start=start, end=end
+        )
+        mismatch = _match_lyric_interval(candidate, expected)
+        if mismatch is not None:
+            return mismatch
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _LyricCandidate:
+    """Texto e intervalo declarados por la pieza para comparar contra el .lrc."""
+
+    label: str
+    index: int
+    text: str
+    start: float
+    end: float
+
+
+def _match_lyric_interval(candidate: _LyricCandidate, expected: LyricLine) -> str | None:
+    """Compara los tokens y el intervalo de una línea contra lo esperado.
+
+    Args:
+        candidate: Texto e intervalo declarados por la pieza.
+        expected: Línea recortada por ``cut_lyric_window``.
+
+    Returns:
+        ``None`` si tokens e intervalo coinciden dentro de
+        ``_ASS_TIME_TOLERANCE_SEC``; el motivo del fallo en caso contrario.
+    """
+    if _extract_ordered_tokens(candidate.text) != _extract_ordered_tokens(expected.text):
+        return (
+            f"{candidate.label} {candidate.index} no concuerda con .lrc "
+            f"(esperado {expected.text!r}, obtenido {candidate.text!r})"
+        )
+    if abs(candidate.start - expected.start_sec) > _ASS_TIME_TOLERANCE_SEC:
+        return (
+            f"{candidate.label} {candidate.index} desplazado en tiempo "
+            f"(esperado {expected.start_sec:.2f} s, obtenido {candidate.start:.2f} s)"
+        )
+    if (
+        expected.end_sec is not None
+        and abs(candidate.end - expected.end_sec) > _ASS_TIME_TOLERANCE_SEC
+    ):
+        return (
+            f"{candidate.label} {candidate.index} con fin desplazado "
+            f"(esperado {expected.end_sec:.2f} s, obtenido {candidate.end:.2f} s)"
+        )
+    return None
+
+
+def _verify_subtitle_segments_exact(
+    segments: Sequence[SubtitleSegment],
+    expected_lines: Sequence[LyricLine],
+) -> str | None:
+    """Exige una línea de letra por segmento, con tokens y tiempos exactos.
+
+    Args:
+        segments: Segmentos declarados por la pieza, relativos al clip.
+        expected_lines: Líneas de la ventana temporal ya recortada y
+            desplazada a 0.0 s.
+
+    Returns:
+        ``None`` si el conteo, los tokens y los intervalos coinciden dentro
+        de ``_ASS_TIME_TOLERANCE_SEC``; el motivo del fallo en caso contrario.
+    """
+    if len(segments) != len(expected_lines):
+        return (
+            f"pieza con {len(segments)} subtitle_segments, "
+            f"se esperaban {len(expected_lines)} líneas de la ventana .lrc"
+        )
+    for index, (segment, expected) in enumerate(zip(segments, expected_lines, strict=True)):
+        candidate = _LyricCandidate(
+            label="segmento",
+            index=index,
+            text=segment.text,
+            start=segment.start_s,
+            end=segment.end_s,
+        )
+        mismatch = _match_lyric_interval(candidate, expected)
+        if mismatch is not None:
+            return mismatch
     return None
 
 
@@ -653,13 +810,45 @@ def _load_verified_lrc_lines(
         return None, f"archivo .lrc de referencia inválido: {error}"
 
 
-def _validate_lyric_concordance(
-    context: GateContext,
+def _validate_unwindowed_segments(
+    segments: Sequence[SubtitleSegment],
     expected_tokens: Sequence[str],
     *,
     start_sec: float | None,
     end_sec: float | None,
 ) -> str | None:
+    """Valida segmentos sin ventana temporal exacta (contrato de un solo clip).
+
+    Args:
+        segments: Segmentos declarados por la pieza.
+        expected_tokens: Tokens esperados del .lrc completo.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        ``None`` si los tiempos son sanos y la concatenación concuerda;
+        el motivo del fallo en caso contrario.
+    """
+    timing_err = _verify_subtitle_segments_timing(segments, start_sec=start_sec, end_sec=end_sec)
+    if timing_err is not None:
+        return timing_err
+    seg_tokens = _extract_ordered_tokens(" ".join(seg.text for seg in segments))
+    if seg_tokens != list(expected_tokens):
+        return (
+            "concatenación de subtitle_segments no concuerda con .lrc "
+            f"(esperado {expected_tokens}, obtenido {seg_tokens})"
+        )
+    return None
+
+
+def _validate_lyric_concordance(
+    context: GateContext,
+    expected_lines: Sequence[LyricLine],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
     if context.piece.subtitle_text is None:
         return "pieza sin subtitle_text"
     sub_tokens = _extract_ordered_tokens(context.piece.subtitle_text)
@@ -672,17 +861,16 @@ def _validate_lyric_concordance(
     segments = context.piece.subtitle_segments
     if not segments:
         return "pieza sin subtitle_segments"
-    timing_err = _verify_subtitle_segments_timing(segments, start_sec=start_sec, end_sec=end_sec)
-    if timing_err is not None:
-        return timing_err
-    seg_tokens = _extract_ordered_tokens(" ".join(seg.text for seg in segments))
-    if seg_tokens != list(expected_tokens):
-        return (
-            "concatenación de subtitle_segments no concuerda con .lrc "
-            f"(esperado {expected_tokens}, obtenido {seg_tokens})"
+    if start_sec is not None and end_sec is not None:
+        segments_err = _verify_subtitle_segments_exact(segments, expected_lines)
+    else:
+        segments_err = _validate_unwindowed_segments(
+            segments, expected_tokens, start_sec=start_sec, end_sec=end_sec
         )
+    if segments_err is not None:
+        return segments_err
 
-    return _verify_ass_dialogue_tokens(context.piece, expected_tokens)
+    return _verify_ass_dialogue_events(context.piece, expected_lines)
 
 
 def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
@@ -703,7 +891,6 @@ def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
             status=CheckStatus.FAIL,
             evidence={"reason": f"error en ventana temporal de letras: {window_err}"},
         )
-
     expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
     if not expected_tokens:
         return CheckOutcome(
@@ -711,7 +898,7 @@ def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
         )
 
     mismatch_reason = _validate_lyric_concordance(
-        context, expected_tokens, start_sec=start_sec, end_sec=end_sec
+        context, expected_lines, start_sec=start_sec, end_sec=end_sec
     )
     if mismatch_reason is not None:
         return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": mismatch_reason})
