@@ -224,6 +224,14 @@ ignore = [
     # sección Raises documenta el contrato público.
     "docstring-extraneous-exception",
 ]
+"src/kliptych/lyrics.py" = [
+    # petición al endpoint configurado por el operador; el esquema http/https
+    # se valida antes de construirla.
+    "suspicious-url-open-usage",
+    # get_synced_lyrics delega en _fetch_bytes, que lanza LyricsError; la sección
+    # Raises documenta el contrato público.
+    "docstring-extraneous-exception",
+]
 "src/kliptych/runtime/transport.py" = [
     # petición al endpoint configurado por el operador; el esquema http/https
     # se valida antes de construirla y no hay redirecciones.
