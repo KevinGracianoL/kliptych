@@ -212,6 +212,10 @@ ignore = [
     # run_given_clips delega el ensamblado y la exportación; PipelineError se
     # lanza en el helper _resolved y la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
+    # PieceAssembler.assemble/render_arguments exponen la superficie de render
+    # (watermark, subtitles, mute_audio) como keyword-only; igual que
+    # FFmpegAssembler en src/kliptych/assembler.py.
+    "too-many-arguments",
 ]
 "src/kliptych/runtime/openai_compatible.py" = [
     # extract_contract/write_caption delegan en _complete, que es quien lanza
@@ -502,6 +506,18 @@ ignore = [
 "tests/test_lyric_video_integration.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el
     # fixture sintético y probar el quemado con letras sincronizadas.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_lyric_absolute_offset.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético de la descarga quirúrgica (P42-4a).
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
+"tests/test_lyric_burn_given_clips.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # clip negro del E2E de quemado (P42-5).
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]

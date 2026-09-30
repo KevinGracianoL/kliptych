@@ -45,9 +45,7 @@ _FFPROBE = shutil.which("ffprobe")
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(
-        _FFMPEG is None or _FFPROBE is None, reason="ffmpeg/ffprobe no disponibles"
-    ),
+    pytest.mark.skipif(_FFMPEG is None or _FFPROBE is None, reason="ffmpeg/ffprobe no disponibles"),
 ]
 
 _LRC_BLACK = "[00:00.50]luz primera\n[00:02.00]luz segunda\n"
@@ -95,7 +93,7 @@ class _StaticModel(CampaignModel):
     model_version: str = "static"
 
     def __init__(self, draft: ContractDraft, caption: Caption) -> None:
-        self._draft = draft
+        self._draft: ContractDraft = draft
         self._caption: Caption = caption
 
     @override
@@ -137,7 +135,7 @@ def _lyric_draft(*, timestamp_ranges: list[TimestampRangeDraft] | None = None) -
         platforms={"tiktok": _lyric_platform_draft()},
         lyric_video=LyricConfigDraft(
             lrc_asset_id=candidate("song_lrc"),
-            lrclib_enabled=candidate(False),
+            lrclib_enabled=candidate(value=False),
         ),
         timestamp_ranges=timestamp_ranges or [],
         assets={
@@ -160,9 +158,7 @@ def _register_lyric_assets(root: Path) -> AssetRegistry:
     _ = (root / "song.lrc").write_text(_LRC_BLACK, encoding="utf-8")
     registry = AssetRegistry(root)
     _ = registry.register(asset_id="clip-01", kind="video", uri="clip.mp4", origin="test")
-    _ = registry.register(
-        asset_id="song_lrc", kind="lyrics", uri="song.lrc", origin="test"
-    )
+    _ = registry.register(asset_id="song_lrc", kind="lyrics", uri="song.lrc", origin="test")
     return registry
 
 
@@ -234,8 +230,7 @@ class _LegacyAssembler:
         watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (clip, watermark_config, mute_audio)
-        _ = watermark
+        _ = (self, clip, watermark, watermark_config, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         return destination
@@ -249,7 +244,7 @@ class _LegacyAssembler:
         watermark_config: Watermark | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, watermark, watermark_config, mute_audio)
+        _ = (self, clip, watermark, watermark_config, mute_audio)
         return ("ffmpeg", str(destination))
 
 
@@ -264,7 +259,9 @@ def test_p42_5_assembler_without_subtitle_support_fails_closed(tmp_path: Path) -
         prompt_version=PROMPT_VERSION,
         caption_prompt_version=CAPTION_PROMPT_VERSION,
         run_id="p42-5-legacy",
-        assembler=cast("PieceAssembler", _LegacyAssembler()),
+        # El doble cast simula una inyección legacy anterior a P42-5: el objeto
+        # no declara `subtitles` y el pipeline debe rechazarlo en cerrado.
+        assembler=cast("PieceAssembler", cast("object", _LegacyAssembler())),
         gate=Gate(FFprobeProbe()),
         registry=registry,
     )
@@ -294,7 +291,7 @@ def test_p42_5_empty_lyric_window_fails_closed_before_render(tmp_path: Path) -> 
         prompt_version=PROMPT_VERSION,
         caption_prompt_version=CAPTION_PROMPT_VERSION,
         run_id="p42-5-empty",
-        assembler=cast("PieceAssembler", _LegacyAssembler()),
+        assembler=cast("PieceAssembler", cast("object", _LegacyAssembler())),
         gate=Gate(FakeProbe(info=make_media())),
         registry=registry,
     )

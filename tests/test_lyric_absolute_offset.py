@@ -33,7 +33,7 @@ from kliptych.gate.checks import check_spelling_locks
 from kliptych.git_proposals import ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification
 from kliptych.lyrics import cut_lyric_window, lyric_lines_to_ass, parse_lrc
-from kliptych.moments import Moment
+from kliptych.moments import ChatMessage, Moment
 from kliptych.orchestrator import PipelineConfig, PipelineResult, SlideshowResult, run_long_video
 from kliptych.reframe import ReframeResult
 from kliptych.segment import SegmentSelection
@@ -47,7 +47,9 @@ pytestmark = [
     pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg no instalado"),
 ]
 
-_LRC_OFFSET = "[00:00.00]PRELUDE\n[00:02.00]ACTUAL FIRST\n[00:07.00]ACTUAL SECOND\n[00:12.00]OUTRO\n"
+_LRC_OFFSET = (
+    "[00:00.00]PRELUDE\n[00:02.00]ACTUAL FIRST\n[00:07.00]ACTUAL SECOND\n[00:12.00]OUTRO\n"
+)
 _RANGES_ABSOLUTE: list[tuple[float, float]] = [(2.0, 7.0), (7.0, 12.0)]
 _VIDEO_URL = "https://example.com/source.mp4"
 _FIXTURE_TIMEOUT_S = 120
@@ -104,7 +106,7 @@ def _install_section_downloader(monkeypatch: pytest.MonkeyPatch, fixture: Path) 
             format_selector: str | None = None,
             section: tuple[float, float] | None = None,
         ) -> Path:
-            _ = (url, format_selector, section)
+            _ = (self, url, format_selector, section)
             destination.parent.mkdir(parents=True, exist_ok=True)
             _ = shutil.copyfile(fixture, destination)
             return destination
@@ -114,15 +116,19 @@ def _install_section_downloader(monkeypatch: pytest.MonkeyPatch, fixture: Path) 
 
 class _EmptyTranscriber:
     def transcribe(self, audio: Path) -> Transcript:
-        _ = audio
+        _ = (self, audio)
         return Transcript(words=(), language="es", duration_s=10.0, text="sin palabras")
 
 
 class _NoMoments:
     def detect(
-        self, video: Path, *, transcript: Transcript | None = None
+        self,
+        video: Path,
+        *,
+        transcript: Transcript | None = None,
+        chat: Sequence[ChatMessage] | None = None,
     ) -> tuple[Moment, ...]:
-        _ = (video, transcript)
+        _ = (self, video, transcript, chat)
         return ()
 
 
@@ -135,11 +141,11 @@ class _RelativeSelector:
         moments: tuple[Moment, ...],
         contract: Contract,
     ) -> dict[str, object]:
-        _ = (transcript, moments, contract)
+        _ = (self, transcript, moments, contract)
         return {}
 
     def parse_response(self, raw: object) -> SegmentSelection:
-        _ = raw
+        _ = (self, raw)
         return SegmentSelection(
             segments=(Segment(start_s=0.0, end_s=5.0), Segment(start_s=5.0, end_s=10.0)),
             rationale="dos cortes relativos al vídeo descargado",
@@ -148,13 +154,11 @@ class _RelativeSelector:
 
 class _CopyReframer:
     def analyze(self, video: Path) -> ReframeResult:
-        _ = video
-        return ReframeResult(
-            targets=(), source_width=360, source_height=640, target_aspect="9:16"
-        )
+        _ = (self, video)
+        return ReframeResult(targets=(), source_width=360, source_height=640, target_aspect="9:16")
 
     def render(self, *, video: Path, destination: Path, result: ReframeResult) -> Path:
-        _ = result
+        _ = (self, result)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = shutil.copyfile(video, destination)
         return destination
@@ -243,13 +247,15 @@ def _register_offset_lrc(tmp_path: Path) -> AssetRegistry:
     return registry
 
 
-def test_p42_4a_pieces_carry_absolute_windows_with_relative_segments(
-    tmp_path: Path,
-) -> None:
-    """El manager propaga ventanas absolutas y letras relativas que pasan el gate."""
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    registry = _register_offset_lrc(tmp_path)
+def _write_offset_ass_files(work_dir: Path) -> tuple[Path, Path]:
+    """Escribe los .ass que el orquestador produciría con el offset aplicado.
+
+    Args:
+        work_dir: Directorio de trabajo donde persisten los .ass por pieza.
+
+    Returns:
+        Las rutas de ``subtitles_00.ass`` y ``subtitles_01.ass``.
+    """
     lines = parse_lrc(_LRC_OFFSET)
     ass_00 = work_dir / "subtitles_00.ass"
     _ = ass_00.write_text(
@@ -261,17 +267,27 @@ def test_p42_4a_pieces_carry_absolute_windows_with_relative_segments(
         lyric_lines_to_ass(cut_lyric_window(lines, start_sec=7.0, end_sec=12.0)),
         encoding="utf-8",
     )
+    return ass_00, ass_01
+
+
+def _offset_pipeline_result(work_dir: Path, ass_00: Path) -> PipelineResult:
+    """Arma el resultado con segmentos relativos y desplazamiento absoluto.
+
+    Args:
+        work_dir: Directorio de trabajo con los finales y la fuente.
+        ass_00: .ass primario del lote (el ``_01`` se resuelve por convenio).
+
+    Returns:
+        El resultado con selección relativa y ``source_offset_sec=2.0``.
+    """
     final_00 = work_dir / "final_00.mp4"
     _ = final_00.write_bytes(b"video zero")
     final_01 = work_dir / "final_01.mp4"
     _ = final_01.write_bytes(b"video one")
     _ = (work_dir / "source.mp4").write_bytes(b"source")
-
-    result = PipelineResult(
+    return PipelineResult(
         source=work_dir / "source.mp4",
-        transcript=Transcript(
-            words=(), language="es", duration_s=10.0, text="sin palabras"
-        ),
+        transcript=Transcript(words=(), language="es", duration_s=10.0, text="sin palabras"),
         moments=(),
         selection=_relative_selection(),
         reframe=None,
@@ -281,6 +297,17 @@ def test_p42_4a_pieces_carry_absolute_windows_with_relative_segments(
         final_videos=(final_00, final_01),
         source_offset_sec=2.0,
     )
+
+
+def test_p42_4a_pieces_carry_absolute_windows_with_relative_segments(
+    tmp_path: Path,
+) -> None:
+    """El manager propaga ventanas absolutas y letras relativas que pasan el gate."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    registry = _register_offset_lrc(tmp_path)
+    ass_00, _ = _write_offset_ass_files(work_dir)
+    result = _offset_pipeline_result(work_dir, ass_00)
     contract = make_contract(
         format_=Format.LYRIC_VIDEO,
         lyric_video=LyricConfig(lrc_asset_id="song_lrc"),
@@ -393,8 +420,7 @@ class _StubVideoOrchestrator:
         return self._result
 
     def run_slideshow(self, images: Sequence[Path], **kwargs: object) -> SlideshowResult:
-        _ = kwargs
-        _ = images
+        _ = (self, images, kwargs)
         msg = "no debe usar slideshow en este test"
         raise AssertionError(msg)
 

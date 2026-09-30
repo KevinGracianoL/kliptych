@@ -297,9 +297,7 @@ def test_assemble_with_subtitles_burns_ass_relative_to_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[_Call] = []
-    monkeypatch.setattr(
-        "kliptych.assembler.subprocess.run", _fake_run(calls, expect_cwd=True)
-    )
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls, expect_cwd=True))
     clip = _file(tmp_path, "clip.mp4")
     subtitles = _file(tmp_path, "song.ass")
     destination = tmp_path / "run" / "piece.mp4"

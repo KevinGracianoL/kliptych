@@ -6,11 +6,11 @@ el artefacto final y el exportador solo publica piezas que pasan: un caption
 sin la mención obligatoria queda rechazado y el paquete lo reporta.
 """
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-import inspect
 from pathlib import Path
 from typing import ClassVar, Protocol
 
@@ -511,9 +511,7 @@ def _prepare_lyric_clip(
     else:
         absolute_start, absolute_end = start_sec, end_sec
     lines = (
-        _cut_lyric_window_lines(
-            source_lines, start_sec=absolute_start, end_sec=absolute_end
-        )
+        _cut_lyric_window_lines(source_lines, start_sec=absolute_start, end_sec=absolute_end)
         if source_lines is not None
         else None
     )
