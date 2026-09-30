@@ -13,8 +13,10 @@ render exitoso reemplaza el destino; un fallo deja intacto el artefacto previo.
 
 import contextlib
 import math
+import os
 import subprocess
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import assert_never
 
@@ -30,6 +32,25 @@ _STDERR_TAIL = 400
 
 class AssembleError(Exception):
     """La pieza no se pudo ensamblar."""
+
+
+@dataclass(frozen=True, slots=True)
+class RenderSpec:
+    """Entradas inmutables de un render ``given_clips``.
+
+    Agrupa la superficie de render (clip, destino, watermark, subtítulos y
+    política de audio) en un único valor para que los ensambladores expongan
+    una firma mínima sin perder explicitud.
+    """
+
+    clip: Path
+    destination: Path
+    watermark: Path | None = None
+    watermark_config: Watermark | None = None
+    width: int = _DEFAULT_WIDTH
+    height: int = _DEFAULT_HEIGHT
+    subtitles: Path | None = None
+    mute_audio: bool = False
 
 
 class FFmpegAssembler:
@@ -50,17 +71,7 @@ class FFmpegAssembler:
         self._ffmpeg: str = ffmpeg
         self._timeout_s: float = timeout_s
 
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None = None,
-        watermark_config: Watermark | None = None,
-        width: int = _DEFAULT_WIDTH,
-        height: int = _DEFAULT_HEIGHT,
-        mute_audio: bool = False,
-    ) -> Path:
+    def assemble(self, spec: RenderSpec) -> Path:
         """Ensambla un clip entregado en una pieza vertical para el gate.
 
         El render ocurre en un temporal hermano y se publica con un reemplazo
@@ -68,17 +79,8 @@ class FFmpegAssembler:
         artefacto previo en ``destination`` queda intacto.
 
         Args:
-            clip: Clip entregado por la campaña (ya cortado).
-            destination: Ruta del artefacto final; se reemplaza al publicar y
-                se crean los directorios padre que falten.
-            watermark: Imagen opcional para superponer durante todo el video,
-                en la zona y tamaño de ``watermark_config``.
-            watermark_config: Posición, tamaño y opacidad del watermark; sin
-                valor se usa el defecto del contrato (arriba a la derecha).
-            width: Ancho del lienzo vertical.
-            height: Alto del lienzo vertical.
-            mute_audio: Si es True, silencia la pista sin eliminarla
-                (``audio_policy=internal_official_sound``).
+            spec: Entradas inmutables del render (clip, destino, watermark,
+                lienzo, subtítulos y política de audio).
 
         Returns:
             La ruta del artefacto ensamblado.
@@ -88,34 +90,51 @@ class FFmpegAssembler:
                 inválidas, el destino no se puede preparar, ffmpeg falla o
                 expira.
         """
-        _require_file(clip, what="clip")
-        if watermark is not None:
-            _require_file(watermark, what="watermark")
-        if width <= 0 or height <= 0:
-            msg = f"dimensiones de lienzo inválidas: {width}x{height}"
+        _require_file(spec.clip, what="clip")
+        if spec.watermark is not None:
+            _require_file(spec.watermark, what="watermark")
+        if spec.subtitles is not None:
+            _require_file(spec.subtitles, what="subtítulos")
+        if spec.width <= 0 or spec.height <= 0:
+            msg = f"dimensiones de lienzo inválidas: {spec.width}x{spec.height}"
             raise AssembleError(msg)
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            spec.destination.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            msg = f"no se pudo preparar el directorio del destino {destination}: {error}"
+            msg = f"no se pudo preparar el directorio del destino {spec.destination}: {error}"
             raise AssembleError(msg) from error
-        temporary = _temporary_path(destination)
+        temporary = _temporary_path(spec.destination)
         argv = self._build_argv(
-            clip=clip,
+            clip=spec.clip,
             destination=temporary,
-            watermark=watermark,
-            watermark_config=watermark_config,
-            width=width,
-            height=height,
-            mute_audio=mute_audio,
+            watermark=spec.watermark,
+            watermark_config=spec.watermark_config,
+            width=spec.width,
+            height=spec.height,
+            subtitles=spec.subtitles,
+            mute_audio=spec.mute_audio,
         )
         try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
-                check=False,
+            # Sin subtítulos el contrato de invocación no lleva `cwd`; con
+            # subtítulos ffmpeg corre en el directorio de salida para que el
+            # filtro `subtitles` acepte la ruta relativa del .ass en Windows.
+            completed = (
+                subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_s,
+                    check=False,
+                )
+                if spec.subtitles is None
+                else subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_s,
+                    check=False,
+                    cwd=temporary.parent,
+                )
             )
         except FileNotFoundError as error:
             _remove_quietly(temporary)
@@ -134,12 +153,12 @@ class FFmpegAssembler:
             msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
             raise AssembleError(msg)
         try:
-            _ = temporary.replace(destination)
+            _ = temporary.replace(spec.destination)
         except OSError as error:
             _remove_quietly(temporary)
-            msg = f"no se pudo publicar el artefacto en {destination}: {error}"
+            msg = f"no se pudo publicar el artefacto en {spec.destination}: {error}"
             raise AssembleError(msg) from error
-        return destination
+        return spec.destination
 
     def cut_exact(
         self,
@@ -240,43 +259,28 @@ class FFmpegAssembler:
             raise AssembleError(msg) from error
         return destination
 
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None = None,
-        watermark_config: Watermark | None = None,
-        width: int = _DEFAULT_WIDTH,
-        height: int = _DEFAULT_HEIGHT,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
         """Devuelve el argv de ffmpeg que se usaría para este ensamblado.
 
         Es la receta de render que se registra en el manifiesto; el ensamblado
         real escribe primero en un temporal y publica al final.
 
         Args:
-            clip: Clip entregado por la campaña.
-            destination: Ruta final del artefacto.
-            watermark: Imagen opcional a superponer.
-            watermark_config: Posición, tamaño y opacidad del watermark.
-            width: Ancho del lienzo vertical.
-            height: Alto del lienzo vertical.
-            mute_audio: Si es True, la receta incluye el silenciado de audio.
+            spec: Entradas inmutables del render.
 
         Returns:
             El argv completo de ffmpeg, como tupla inmutable.
         """
         return tuple(
             self._build_argv(
-                clip=clip,
-                destination=destination,
-                watermark=watermark,
-                watermark_config=watermark_config,
-                width=width,
-                height=height,
-                mute_audio=mute_audio,
+                clip=spec.clip,
+                destination=spec.destination,
+                watermark=spec.watermark,
+                watermark_config=spec.watermark_config,
+                width=spec.width,
+                height=spec.height,
+                subtitles=spec.subtitles,
+                mute_audio=spec.mute_audio,
             )
         )
 
@@ -289,12 +293,28 @@ class FFmpegAssembler:
         watermark_config: Watermark | None,
         width: int,
         height: int,
+        subtitles: Path | None,
         mute_audio: bool,
     ) -> list[str]:
         square = "scale=trunc(iw*sar/2)*2:ih,setsar=1"
         scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
         pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
         base = f"{square},{scale},{pad},setsar=1"
+        if subtitles is None:
+            clip_arg = str(clip)
+            watermark_arg = str(watermark) if watermark is not None else None
+            destination_arg = str(destination)
+            subtitles_suffix = ""
+        else:
+            # ffmpeg corre con cwd en el directorio de salida: las entradas
+            # viajan absolutas y el .ass en ruta relativa, que es lo único
+            # que el parser del filtro `subtitles` acepta en Windows.
+            clip_arg = str(clip.resolve())
+            watermark_arg = str(watermark.resolve()) if watermark is not None else None
+            destination_arg = str(destination.resolve())
+            subtitles_suffix = (
+                f",subtitles=filename='{_subtitles_filter_value(subtitles, destination)}'"
+            )
         argv = [
             self._ffmpeg,
             "-hide_banner",
@@ -303,23 +323,31 @@ class FFmpegAssembler:
             "error",
             "-y",
             "-i",
-            str(clip),
+            clip_arg,
         ]
         if watermark is None:
-            argv += ["-vf", base, "-map", "0:v:0", "-map", "0:a?"]
+            argv += ["-vf", f"{base}{subtitles_suffix}", "-map", "0:v:0", "-map", "0:a?"]
         else:
             config = (
                 watermark_config
                 if watermark_config is not None
                 else Watermark(required=True, visible_full_video=True)
             )
+            graph = _watermark_filter(base, config, canvas_width=width)
+            video_label = "[v]"
+            if subtitles is not None:
+                graph += (
+                    f";{video_label}subtitles=filename='"
+                    f"{_subtitles_filter_value(subtitles, destination)}'[vout]"
+                )
+                video_label = "[vout]"
             argv += [
                 "-i",
-                str(watermark),
+                str(watermark_arg),
                 "-filter_complex",
-                _watermark_filter(base, config, canvas_width=width),
+                graph,
                 "-map",
-                "[v]",
+                video_label,
                 "-map",
                 "0:a?",
             ]
@@ -340,9 +368,31 @@ class FFmpegAssembler:
             "192k",
             "-movflags",
             "+faststart",
-            str(destination),
+            destination_arg,
         ]
         return argv
+
+
+def _subtitles_filter_value(subtitles: Path, output: Path) -> str:
+    """Devuelve la ruta del .ass para el filtro ``subtitles`` de ffmpeg.
+
+    ffmpeg corre con ``cwd`` en el directorio de salida, así que una ruta
+    relativa funciona en Windows donde una absoluta rompe el parser del
+    filtro (misma estrategia que el quemado de ``SubtitleRenderer``).
+
+    Args:
+        subtitles: Ruta del archivo ``.ass`` a quemar.
+        output: Ruta del artefacto de salida (su padre es el cwd de ffmpeg).
+
+    Returns:
+        La ruta relativa en formato POSIX, o la absoluta con ``:`` escapado
+        cuando no se puede relativizar.
+    """
+    try:
+        rel = os.path.relpath(subtitles, start=output.parent)
+    except (ValueError, OSError):
+        return subtitles.as_posix().replace(":", "\\:")
+    return Path(rel).as_posix()
 
 
 def _watermark_filter(base: str, config: Watermark, *, canvas_width: int) -> str:

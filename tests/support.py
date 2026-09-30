@@ -13,6 +13,8 @@ from kliptych.contract import (
     AudioPolicy,
     Contract,
     ContractDraft,
+    Format,
+    LyricConfig,
     Platform,
     TimestampRange,
 )
@@ -144,6 +146,9 @@ def _build_timestamp_payload(
 
 def make_contract(
     *,
+    format_: str | Format = "video",
+    mode: str = "given_clips",
+    lyric_video: dict[str, object] | LyricConfig | None = None,
     hard: Sequence[str] = ALL_HARD_RULES,
     recommended: Sequence[str] = (),
     manual_review: Sequence[str] = (),
@@ -210,12 +215,16 @@ def make_contract(
                 plan.append(rule_id)
             classified.add(rule_id)
     timestamp_ranges_payload = _build_timestamp_payload(timestamp_ranges)
+    format_val = format_.value if isinstance(format_, Format) else str(format_)
+    if format_val == "lyric_video" and "subtitles.spelling_lock" not in classified:
+        plan.append("subtitles.spelling_lock")
+        classified.add("subtitles.spelling_lock")
     return Contract.model_validate(
         {
             "schema_version": "1.1",
             "campaign_id": "camp-test",
-            "format": "video",
-            "mode": "given_clips",
+            "format": format_val,
+            "mode": mode,
             "platforms": {
                 "tiktok": {
                     "duration": {"min_s": min_s, "max_s": max_s},
@@ -256,6 +265,11 @@ def make_contract(
             "brand_safety_citation": brand_safety_citation,
             "unmapped": [{"rule": rule, "quote": quote} for rule, quote in unmapped],
             "timestamp_ranges": timestamp_ranges_payload,
+            "lyric_video": (
+                lyric_video.model_dump(mode="json")
+                if isinstance(lyric_video, LyricConfig)
+                else lyric_video
+            ),
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),
@@ -278,6 +292,9 @@ def make_piece(
     subtitle_segments: Sequence[SubtitleSegment] = (),
     screen_text_segments: Sequence[SubtitleSegment] = (),
     platform: Platform = Platform.TIKTOK,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+    ass_path: Path | None = None,
 ) -> Piece:
     return Piece(
         piece_id="piece-01",
@@ -288,6 +305,9 @@ def make_piece(
         subtitle_segments=tuple(subtitle_segments),
         screen_text_segments=tuple(screen_text_segments),
         artifact_path=artifact,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        ass_path=ass_path,
     )
 
 

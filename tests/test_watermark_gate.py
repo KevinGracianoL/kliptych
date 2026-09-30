@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import pytest
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, Watermark, WatermarkPosition
 from kliptych.gate import (
@@ -198,7 +198,7 @@ def _render(
     destination = tmp_path / f"{name}.mp4"
     watermark = _registry_with_png(tmp_path, white=white_template).path_for("wm-marca")
     if position is None:
-        _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
+        _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(RenderSpec(clip=clip, destination=destination))
         return destination
     config = Watermark(
         required=True,
@@ -208,7 +208,7 @@ def _render(
         opacity=opacity,
     )
     _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
-        clip=clip, destination=destination, watermark=watermark, watermark_config=config
+        RenderSpec(clip=clip, destination=destination, watermark=watermark, watermark_config=config)
     )
     return destination
 
@@ -243,7 +243,7 @@ def _render_plain_from_source(
     assert _FFMPEG is not None
     clip = _generate_textured_clip(tmp_path / f"{name}-clip.mp4", lavfi=lavfi, duration=duration)
     destination = tmp_path / f"{name}.mp4"
-    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(RenderSpec(clip=clip, destination=destination))
     return destination
 
 

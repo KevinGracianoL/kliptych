@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 
-from kliptych.assembler import AssembleError, FFmpegAssembler
+from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
 from kliptych.gate.probe import FFprobeProbe
 
 _FFMPEG = shutil.which("ffmpeg")
@@ -38,7 +38,13 @@ def _file(tmp_path: Path, name: str) -> Path:
     return path
 
 
-def _assert_invocation(kwargs: dict[str, object], *, timeout_s: float) -> None:
+def _assert_invocation(
+    kwargs: dict[str, object], *, timeout_s: float, expect_cwd: bool = False
+) -> None:
+    if expect_cwd:
+        cwd = kwargs.pop("cwd", None)
+        assert cwd is not None
+        assert Path(str(cwd)).is_dir()
     assert kwargs == {
         "capture_output": True,
         "text": True,
@@ -54,10 +60,11 @@ def _fake_run(
     returncode: int = 0,
     stderr: str = "",
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    expect_cwd: bool = False,
 ) -> _FakeRun:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
-        _assert_invocation(kwargs, timeout_s=timeout_s)
+        _assert_invocation(dict(kwargs), timeout_s=timeout_s, expect_cwd=expect_cwd)
         _ = Path(argv[-1]).write_bytes(payload)
         return _completed(returncode=returncode, stderr=stderr)
 
@@ -94,23 +101,29 @@ def _no_partials(destination: Path) -> None:
 
 def test_missing_clip_fails(tmp_path: Path) -> None:
     with pytest.raises(AssembleError, match="clip no existe"):
-        _ = FFmpegAssembler().assemble(clip=tmp_path / "nope.mp4", destination=tmp_path / "out.mp4")
+        _ = FFmpegAssembler().assemble(
+            RenderSpec(clip=tmp_path / "nope.mp4", destination=tmp_path / "out.mp4")
+        )
 
 
 def test_missing_watermark_fails(tmp_path: Path) -> None:
     clip = _file(tmp_path, "clip.mp4")
     with pytest.raises(AssembleError, match="watermark no existe"):
         _ = FFmpegAssembler().assemble(
-            clip=clip,
-            destination=tmp_path / "out.mp4",
-            watermark=tmp_path / "nope.png",
+            RenderSpec(
+                clip=clip,
+                destination=tmp_path / "out.mp4",
+                watermark=tmp_path / "nope.png",
+            )
         )
 
 
 def test_invalid_canvas_fails(tmp_path: Path) -> None:
     clip = _file(tmp_path, "clip.mp4")
     with pytest.raises(AssembleError, match="dimensiones"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=tmp_path / "out.mp4", width=0)
+        _ = FFmpegAssembler().assemble(
+            RenderSpec(clip=clip, destination=tmp_path / "out.mp4", width=0)
+        )
 
 
 def test_unpreparable_destination_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -119,7 +132,7 @@ def test_unpreparable_destination_fails(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls))
     clip = _file(tmp_path, "clip.mp4")
     with pytest.raises(AssembleError, match="directorio del destino"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=blocker / "out.mp4")
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=blocker / "out.mp4"))
     assert calls == []
 
 
@@ -128,7 +141,9 @@ def test_invokes_ffmpeg_with_exact_argv(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls))
     clip = _file(tmp_path, "clip.mp4")
     destination = tmp_path / "run" / "piece.mp4"
-    result = FFmpegAssembler(ffmpeg="ffmpeg").assemble(clip=clip, destination=destination)
+    result = FFmpegAssembler(ffmpeg="ffmpeg").assemble(
+        RenderSpec(clip=clip, destination=destination)
+    )
     assert result == destination
     assert destination.read_bytes() == b"artefacto"
     _no_partials(destination)
@@ -175,7 +190,7 @@ def test_invocation_contract_pins_timeout(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls, timeout_s=7.5))
     clip = _file(tmp_path, "clip.mp4")
     _ = FFmpegAssembler(ffmpeg="ffmpeg", timeout_s=7.5).assemble(
-        clip=clip, destination=tmp_path / "piece.mp4"
+        RenderSpec(clip=clip, destination=tmp_path / "piece.mp4")
     )
     assert len(calls) == 1
 
@@ -189,9 +204,7 @@ def test_watermark_argv_binds_watermark_input(
     watermark = _file(tmp_path, "wm.png")
     destination = tmp_path / "piece.mp4"
     _ = FFmpegAssembler(ffmpeg="ffmpeg").assemble(
-        clip=clip,
-        destination=destination,
-        watermark=watermark,
+        RenderSpec(clip=clip, destination=destination, watermark=watermark)
     )
     assert len(calls) == 1
     argv, _ = calls[0]
@@ -209,7 +222,7 @@ def test_missing_binary_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _failing_run(FileNotFoundError()))
     clip = _file(tmp_path, "clip.mp4")
     with pytest.raises(AssembleError, match="no está disponible"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=tmp_path / "out.mp4")
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=tmp_path / "out.mp4"))
 
 
 def test_timeout_keeps_previous_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -219,7 +232,7 @@ def test_timeout_keeps_previous_artifact(monkeypatch: pytest.MonkeyPatch, tmp_pa
     destination = tmp_path / "piece.mp4"
     _ = destination.write_bytes(b"artefacto-previo")
     with pytest.raises(AssembleError, match="timeout"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=destination)
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=destination))
     assert destination.read_bytes() == b"artefacto-previo"
     _no_partials(destination)
 
@@ -232,7 +245,7 @@ def test_unexpected_os_error_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     clip = _file(tmp_path, "clip.mp4")
     destination = tmp_path / "piece.mp4"
     with pytest.raises(AssembleError, match="no se pudo ejecutar ffmpeg"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=destination)
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=destination))
     _no_partials(destination)
 
 
@@ -248,7 +261,7 @@ def test_nonzero_exit_reports_stderr_and_keeps_previous_artifact(
     destination = tmp_path / "piece.mp4"
     _ = destination.write_bytes(b"artefacto-previo")
     with pytest.raises(AssembleError, match="código 1: Invalid data found"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=destination)
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=destination))
     assert destination.read_bytes() == b"artefacto-previo"
     _no_partials(destination)
 
@@ -264,7 +277,7 @@ def test_failed_assemble_leaves_no_partial_artifact(
     clip = _file(tmp_path, "clip.mp4")
     destination = tmp_path / "piece.mp4"
     with pytest.raises(AssembleError, match="código 1"):
-        _ = FFmpegAssembler().assemble(clip=clip, destination=destination)
+        _ = FFmpegAssembler().assemble(RenderSpec(clip=clip, destination=destination))
     assert not destination.exists()
     _no_partials(destination)
 
@@ -277,13 +290,61 @@ def test_render_arguments_match_executed_argv(
     clip = _file(tmp_path, "clip.mp4")
     destination = tmp_path / "piece.mp4"
     assembler = FFmpegAssembler(ffmpeg="ffmpeg")
-    recipe = assembler.render_arguments(clip=clip, destination=destination, watermark=None)
-    _ = assembler.assemble(clip=clip, destination=destination)
+    recipe = assembler.render_arguments(RenderSpec(clip=clip, destination=destination))
+    _ = assembler.assemble(RenderSpec(clip=clip, destination=destination))
     assert len(calls) == 1
     executed, _ = calls[0]
     assert list(recipe[:-1]) == executed[:-1]
     assert recipe[-1] == str(destination)
     assert executed[-1] != str(destination)
+
+
+def test_assemble_with_subtitles_burns_ass_relative_to_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[_Call] = []
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _fake_run(calls, expect_cwd=True))
+    clip = _file(tmp_path, "clip.mp4")
+    subtitles = _file(tmp_path, "song.ass")
+    destination = tmp_path / "run" / "piece.mp4"
+    result = FFmpegAssembler(ffmpeg="ffmpeg").assemble(
+        RenderSpec(clip=clip, destination=destination, subtitles=subtitles)
+    )
+    assert result == destination
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert kwargs["cwd"] == Path(argv[-1]).parent
+    assert Path(argv[-1]).is_absolute()
+    vf = argv[argv.index("-vf") + 1]
+    assert vf == _SCALE + ",subtitles=filename='../song.ass'"
+
+
+def test_render_arguments_with_watermark_and_subtitles_chain_burn_after_overlay(
+    tmp_path: Path,
+) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    watermark = _file(tmp_path, "mark.png")
+    subtitles = _file(tmp_path, "song.ass")
+    destination = tmp_path / "run" / "piece.mp4"
+    argv = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
+        RenderSpec(clip=clip, destination=destination, watermark=watermark, subtitles=subtitles)
+    )
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "[base][wm]overlay=" in graph
+    assert ";[v]subtitles=filename='../song.ass'[vout]" in graph
+    assert "[vout]" in argv
+
+
+def test_missing_subtitles_fails(tmp_path: Path) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    with pytest.raises(AssembleError, match="no existe"):
+        _ = FFmpegAssembler().assemble(
+            RenderSpec(
+                clip=clip,
+                destination=tmp_path / "out.mp4",
+                subtitles=tmp_path / "nope.ass",
+            )
+        )
 
 
 def _generate_clip(
@@ -392,7 +453,9 @@ def test_assembles_vertical_artifact(tmp_path: Path) -> None:
     assert _FFPROBE is not None
     clip = _generate_clip(tmp_path / "clip.mp4", width=320, height=240, duration=1.5)
     destination = tmp_path / "piece.mp4"
-    result = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
+    result = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
+        RenderSpec(clip=clip, destination=destination)
+    )
     assert result == destination
     info = FFprobeProbe(ffprobe=_FFPROBE).probe(destination)
     assert info.width == 1080
@@ -413,11 +476,9 @@ def test_watermark_visible_in_top_right_box(tmp_path: Path) -> None:
     watermark = _generate_watermark(tmp_path / "wm.png")
     plain = tmp_path / "plain.mp4"
     marked = tmp_path / "marked.mp4"
-    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=plain)
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(RenderSpec(clip=clip, destination=plain))
     _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
-        clip=clip,
-        destination=marked,
-        watermark=watermark,
+        RenderSpec(clip=clip, destination=marked, watermark=watermark)
     )
     # 64x64 escalado al 20% de 1080 = 216 px, arriba a la derecha con margen 20.
     box = {"width": 1080, "x0": 844, "y0": 20, "x1": 1060, "y1": 236}
@@ -445,7 +506,7 @@ def test_anamorphic_clip_preserves_display_aspect(tmp_path: Path) -> None:
         setsar="32/27",
     )
     destination = tmp_path / "piece.mp4"
-    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=destination)
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(RenderSpec(clip=clip, destination=destination))
     frame = _gray_frame(destination, width=1080, height=1920)
     assert _band_height(frame, width=1080, height=1920) == pytest.approx(608, abs=4)
 
@@ -462,8 +523,7 @@ def test_real_timeout_keeps_previous_artifact(tmp_path: Path) -> None:
     _ = destination.write_bytes(b"artefacto-previo")
     with pytest.raises(AssembleError, match="timeout"):
         _ = FFmpegAssembler(ffmpeg=_FFMPEG, timeout_s=0.5).assemble(
-            clip=clip,
-            destination=destination,
+            RenderSpec(clip=clip, destination=destination)
         )
     assert destination.read_bytes() == b"artefacto-previo"
     _no_partials(destination)

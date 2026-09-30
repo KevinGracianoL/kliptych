@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 import pytest
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, Watermark, WatermarkPosition
 from kliptych.gate import (
@@ -135,7 +135,9 @@ def _assemble(
     destination = tmp_path / f"{name}.mp4"
     assembler = FFmpegAssembler(ffmpeg=_FFMPEG)
     if opacity is None or position is None:
-        _ = assembler.assemble(clip=clip, destination=destination, width=540, height=960)
+        _ = assembler.assemble(
+            RenderSpec(clip=clip, destination=destination, width=540, height=960)
+        )
         return destination
     config = Watermark(
         required=True,
@@ -145,12 +147,14 @@ def _assemble(
         opacity=opacity,
     )
     _ = assembler.assemble(
-        clip=clip,
-        destination=destination,
-        watermark=tmp_path / "assets" / "wm.png",
-        watermark_config=config,
-        width=540,
-        height=960,
+        RenderSpec(
+            clip=clip,
+            destination=destination,
+            watermark=tmp_path / "assets" / "wm.png",
+            watermark_config=config,
+            width=540,
+            height=960,
+        )
     )
     return destination
 

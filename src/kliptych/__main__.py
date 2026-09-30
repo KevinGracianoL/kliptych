@@ -103,17 +103,26 @@ class _ChatSegmentModel:
 class _DefaultVideoOrchestrator:
     """Orquestador de video real para CampaignManager (sin inyección manual)."""
 
-    def __init__(self, *, work_dir: Path, model: _ChatSegmentModel, render: RenderConfig) -> None:
+    def __init__(
+        self,
+        *,
+        work_dir: Path,
+        model: _ChatSegmentModel,
+        render: RenderConfig,
+        assets: AssetRegistry | None = None,
+    ) -> None:
         """Configura el directorio de trabajo, el modelo y el render.
 
         Args:
             work_dir: Directorio donde el pipeline publica sus artefactos.
             model: Modelo de selección de segmentos sobre el backend LLM.
             render: Binario, timeout y NVENC compartidos por los renders.
+            assets: Registro de assets opcional del workspace.
         """
         self._work_dir: Path = work_dir
         self._model: _ChatSegmentModel = model
         self._render: RenderConfig = render
+        self._assets: AssetRegistry | None = assets
 
     def run_long_video(self, url: str, **kwargs: object) -> orchestrator.PipelineResult:
         """Renderiza un vídeo largo, con audio o repost según los flags.
@@ -126,12 +135,15 @@ class _DefaultVideoOrchestrator:
         Returns:
             El resultado del pipeline long_video.
         """
+        assets_in = kwargs.get("assets")
+        assets = assets_in if isinstance(assets_in, AssetRegistry) else self._assets
         config = self._pipeline_config(
             kwargs.get("contract"),
             audio_locked=kwargs.get("audio_locked") is True,
             repost_mode=_is_repost_mode(kwargs.get("repost_mode"), kwargs.get("mode")),
             audio_track_path=kwargs.get("audio_track_path"),
             audio_track_url=kwargs.get("audio_track_url"),
+            assets=assets,
         )
         resume = kwargs.get("resume") is True
         if config.repost_mode:
@@ -166,6 +178,7 @@ class _DefaultVideoOrchestrator:
         repost_mode: bool = False,
         audio_track_path: object = None,
         audio_track_url: object = None,
+        assets: AssetRegistry | None = None,
     ) -> orchestrator.PipelineConfig:
         """Construye la config del pipeline validando el contrato y la pista.
 
@@ -175,6 +188,7 @@ class _DefaultVideoOrchestrator:
             repost_mode: Si se usa el vídeo completo sin inteligencia.
             audio_track_path: Ruta local de la pista externa, o None.
             audio_track_url: URL de la pista externa, o None.
+            assets: Registro de assets del workspace.
 
         Returns:
             La configuración lista para el pipeline.
@@ -195,6 +209,7 @@ class _DefaultVideoOrchestrator:
             audio_track_path=track_path,
             audio_track_url=track_url,
             repost_mode=repost_mode,
+            assets=assets,
         )
 
 
@@ -836,7 +851,7 @@ def _make_default_campaign_manager(
         classifier=classifier,
         proposal_engine=ProposalEngine(provider=provider),
         video_orchestrator=_DefaultVideoOrchestrator(
-            work_dir=work_dir, model=segment_model, render=render
+            work_dir=work_dir, model=segment_model, render=render, assets=effective_assets
         ),
         slideshow_orchestrator=_DefaultSlideshowOrchestrator(work_dir=work_dir, render=render),
         gate=effective_gate,

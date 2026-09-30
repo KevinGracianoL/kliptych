@@ -54,16 +54,25 @@ Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
-from kliptych.assets import AssetError, AssetNotFoundError
-from kliptych.contract import AudioPolicy, AudioRule, Format
+from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
+from kliptych.contract import AudioPolicy, AudioRule, Contract, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
-from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
-from kliptych.gate.text import contains_phrase
+from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext, Piece, SubtitleSegment
+from kliptych.gate.text import contains_phrase, normalize_text
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
+from kliptych.lyrics import (
+    LrcEmptyWindowError,
+    LrcParseError,
+    LyricLine,
+    LyricsError,
+    cut_lyric_window,
+    parse_lrc,
+)
 
 __all__ = [
     "DEFAULT_VALIDATORS",
@@ -537,6 +546,433 @@ def check_first_line(context: GateContext) -> CheckOutcome:
     )
 
 
+def _extract_ordered_tokens(text: str) -> list[str]:
+    norm = normalize_text(text)
+    raw_tokens = re.split(r"[\s_]+", norm)
+    tokens: list[str] = []
+    for token in raw_tokens:
+        cleaned = re.sub(r"^[^\wñ]+|[^\wñ]+$", "", token)
+        if cleaned:
+            tokens.append(cleaned)
+    return tokens
+
+
+_ASS_DIALOGUE_PARTS: int = 10
+_ASS_SPLIT_MAX: int = 9
+_ASS_TIME_TOLERANCE_SEC = 0.02
+_ASS_TIME_RE = re.compile(r"^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$")
+_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_HOUR = 3600.0
+
+
+def _parse_ass_timestamp(token: str) -> float | None:
+    """Parsea una marca de tiempo ``H:MM:SS.cc`` de un evento Dialogue.
+
+    Args:
+        token: Marca tal como aparece en los campos Start/End del Dialogue.
+
+    Returns:
+        Los segundos como flotante, o ``None`` si el formato es inválido.
+    """
+    match = _ASS_TIME_RE.match(token.strip())
+    if match is None:
+        return None
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    if minutes >= _SECONDS_PER_MINUTE or seconds >= _SECONDS_PER_MINUTE:
+        return None
+    hours = int(match.group(1))
+    return float(hours) * _SECONDS_PER_HOUR + float(minutes) * _SECONDS_PER_MINUTE + seconds
+
+
+def _inferred_ass_sidecar(piece: Piece) -> Path | None:
+    """Busca el .ass junto al artefacto, sin sustituir un ass_path declarado.
+
+    Args:
+        piece: Pieza cuyo directorio de artefacto se inspecciona.
+
+    Returns:
+        El sidecar existente, o ``None`` si no hay ninguno verificable.
+    """
+    candidate_default = piece.artifact_path.parent / "subtitles.ass"
+    if candidate_default.is_file():
+        return candidate_default
+    candidate_stem = piece.artifact_path.with_suffix(".ass")
+    if candidate_stem.is_file():
+        return candidate_stem
+    return None
+
+
+def _resolve_ass_path(piece: Piece) -> tuple[Path | None, str | None]:
+    """Resuelve el .ass a verificar sin sustituciones silenciosas.
+
+    Un ``ass_path`` declarado que no exista (o no sea un archivo regular)
+    falla en cerrado: jamás se sustituye por un sidecar válido del mismo
+    directorio. Sin ``ass_path`` declarado solo se acepta un sidecar que
+    exista junto al artefacto; un lyric video sin .ass verificable falla.
+
+    Args:
+        piece: Pieza con el ``ass_path`` declarado y la ruta del artefacto.
+
+    Returns:
+        La ruta a verificar y ``None``, o ``None`` y el motivo del fallo.
+    """
+    if piece.ass_path is not None:
+        if piece.ass_path.is_file():
+            return piece.ass_path, None
+        return None, f"ass_path declarado no existe o no es un archivo: {piece.ass_path}"
+    sidecar = _inferred_ass_sidecar(piece)
+    if sidecar is None:
+        return None, (
+            "pieza lyric_video sin archivo .ass verificable junto al artefacto "
+            f"(se buscó {piece.artifact_path.parent / 'subtitles.ass'})"
+        )
+    return sidecar, None
+
+
+def _read_ass_dialogues(ass_path: Path) -> tuple[list[tuple[float, float, str]], str | None]:
+    """Lee los eventos Dialogue de un .ass como (inicio, fin, texto).
+
+    Args:
+        ass_path: Ruta del archivo .ass ya resuelto.
+
+    Returns:
+        La lista de eventos y ``None``, o la lista vacía y el motivo del
+        fallo cuando el archivo no se puede leer o trae eventos
+        inverificables (fail-closed).
+    """
+    try:
+        content = ass_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [], f"no se pudo leer el archivo .ass en {ass_path}: {error}"
+    events: list[tuple[float, float, str]] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("Dialogue:"):
+            continue
+        parts = stripped.split(",", _ASS_SPLIT_MAX)
+        if len(parts) < _ASS_DIALOGUE_PARTS:
+            return [], f"evento Dialogue malformado en {ass_path} (línea {lineno})"
+        start = _parse_ass_timestamp(parts[1])
+        end = _parse_ass_timestamp(parts[2])
+        if start is None or end is None or end <= start:
+            return [], f"marca de tiempo .ass inválida en {ass_path} (línea {lineno})"
+        events.append((start, end, parts[_ASS_SPLIT_MAX].strip()))
+    return events, None
+
+
+def _verify_ass_dialogue_events(piece: Piece, expected_lines: Sequence[LyricLine]) -> str | None:
+    """Verifica tiempos y textos de los eventos Dialogue contra la ventana esperada.
+
+    Exige el mismo número de eventos que de líneas recortadas por
+    ``cut_lyric_window`` y, por cada línea, tokens idénticos e intervalos
+    (inicio y fin) dentro de ``_ASS_TIME_TOLERANCE_SEC``. Cualquier
+    desplazamiento, compresión o extensión falla.
+
+    Args:
+        piece: Pieza con el ``ass_path`` declarado o inferible.
+        expected_lines: Líneas de la ventana temporal ya recortada y
+            desplazada a 0.0 s.
+
+    Returns:
+        ``None`` si cada evento concuerda en texto y tiempos; el motivo del
+        fallo en caso contrario.
+    """
+    ass_path, resolve_err = _resolve_ass_path(piece)
+    if resolve_err is not None or ass_path is None:
+        return resolve_err
+    events, read_err = _read_ass_dialogues(ass_path)
+    if read_err is not None:
+        return read_err
+    if len(events) != len(expected_lines):
+        return (
+            f"archivo .ass con {len(events)} eventos Dialogue, "
+            f"se esperaban {len(expected_lines)} líneas de la ventana .lrc"
+        )
+    for index, ((start, end, text), expected) in enumerate(
+        zip(events, expected_lines, strict=True)
+    ):
+        candidate = _LyricCandidate(
+            label="evento Dialogue", index=index, text=text, start=start, end=end
+        )
+        mismatch = _match_lyric_interval(candidate, expected)
+        if mismatch is not None:
+            return mismatch
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _LyricCandidate:
+    """Texto e intervalo declarados por la pieza para comparar contra el .lrc."""
+
+    label: str
+    index: int
+    text: str
+    start: float
+    end: float
+
+
+def _match_lyric_interval(candidate: _LyricCandidate, expected: LyricLine) -> str | None:
+    """Compara los tokens y el intervalo de una línea contra lo esperado.
+
+    Args:
+        candidate: Texto e intervalo declarados por la pieza.
+        expected: Línea recortada por ``cut_lyric_window``.
+
+    Returns:
+        ``None`` si tokens e intervalo coinciden dentro de
+        ``_ASS_TIME_TOLERANCE_SEC``; el motivo del fallo en caso contrario.
+    """
+    if _extract_ordered_tokens(candidate.text) != _extract_ordered_tokens(expected.text):
+        return (
+            f"{candidate.label} {candidate.index} no concuerda con .lrc "
+            f"(esperado {expected.text!r}, obtenido {candidate.text!r})"
+        )
+    if abs(candidate.start - expected.start_sec) > _ASS_TIME_TOLERANCE_SEC:
+        return (
+            f"{candidate.label} {candidate.index} desplazado en tiempo "
+            f"(esperado {expected.start_sec:.2f} s, obtenido {candidate.start:.2f} s)"
+        )
+    if (
+        expected.end_sec is not None
+        and abs(candidate.end - expected.end_sec) > _ASS_TIME_TOLERANCE_SEC
+    ):
+        return (
+            f"{candidate.label} {candidate.index} con fin desplazado "
+            f"(esperado {expected.end_sec:.2f} s, obtenido {candidate.end:.2f} s)"
+        )
+    return None
+
+
+def _verify_subtitle_segments_exact(
+    segments: Sequence[SubtitleSegment],
+    expected_lines: Sequence[LyricLine],
+) -> str | None:
+    """Exige una línea de letra por segmento, con tokens y tiempos exactos.
+
+    Args:
+        segments: Segmentos declarados por la pieza, relativos al clip.
+        expected_lines: Líneas de la ventana temporal ya recortada y
+            desplazada a 0.0 s.
+
+    Returns:
+        ``None`` si el conteo, los tokens y los intervalos coinciden dentro
+        de ``_ASS_TIME_TOLERANCE_SEC``; el motivo del fallo en caso contrario.
+    """
+    if len(segments) != len(expected_lines):
+        return (
+            f"pieza con {len(segments)} subtitle_segments, "
+            f"se esperaban {len(expected_lines)} líneas de la ventana .lrc"
+        )
+    for index, (segment, expected) in enumerate(zip(segments, expected_lines, strict=True)):
+        candidate = _LyricCandidate(
+            label="segmento",
+            index=index,
+            text=segment.text,
+            start=segment.start_s,
+            end=segment.end_s,
+        )
+        mismatch = _match_lyric_interval(candidate, expected)
+        if mismatch is not None:
+            return mismatch
+    return None
+
+
+def _verify_subtitle_segments_timing(
+    segments: Sequence[SubtitleSegment],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    for i, seg in enumerate(segments):
+        if seg.start_s >= seg.end_s:
+            return f"segmento {i} con start_s >= end_s ({seg.start_s} >= {seg.end_s})"
+        if i > 0 and seg.start_s < segments[i - 1].start_s:
+            prev_s = segments[i - 1].start_s
+            return f"segmento {i} con timestamp desordenado ({seg.start_s} < {prev_s})"
+        if seg.start_s < 0.0:
+            return f"segmento {i} con timestamp negativo ({seg.start_s})"
+        if start_sec is not None and end_sec is not None:
+            max_duration = end_sec - start_sec
+            if seg.end_s > max_duration + 0.1 and seg.end_s > end_sec + 0.1:
+                return f"segmento {i} excede la ventana temporal ({seg.end_s})"
+    return None
+
+
+def _resolve_expected_lrc_lines(
+    context: GateContext,
+    lrc_lines: Sequence[LyricLine],
+) -> tuple[tuple[LyricLine, ...] | None, str | None, float | None, float | None]:
+    start_sec = context.piece.start_sec
+    end_sec = context.piece.end_sec
+    if (start_sec is None or end_sec is None) and len(context.contract.segments) == 1:
+        start_sec = context.contract.segments[0].start_s
+        end_sec = context.contract.segments[0].end_s
+    if start_sec is not None and end_sec is not None:
+        try:
+            cut = cut_lyric_window(lrc_lines, start_sec=start_sec, end_sec=end_sec)
+        except (LrcEmptyWindowError, LrcParseError, ValueError) as err:
+            return None, str(err), start_sec, end_sec
+        else:
+            return cut, None, start_sec, end_sec
+    return tuple(lrc_lines), None, start_sec, end_sec
+
+
+def _load_verified_lrc_lines(
+    context: GateContext, lrc_id: str
+) -> tuple[tuple[LyricLine, ...] | None, str | None]:
+    try:
+        intact = context.assets.verify(lrc_id)
+    except (AssetError, OSError) as error:
+        return None, f"no se pudo verificar el asset .lrc de referencia: {error}"
+    if not intact:
+        return None, f"asset de letras '{lrc_id}' ausente o con integridad comprometida"
+    try:
+        path = context.assets.path_for(lrc_id)
+        content = path.read_text(encoding="utf-8")
+        return parse_lrc(content), None
+    except (AssetError, OSError, ValueError, LyricsError) as error:
+        return None, f"archivo .lrc de referencia inválido: {error}"
+
+
+def _is_lyric_multi_range(contract: Contract) -> bool:
+    """Indica si el contrato lyric_video declara más de un clip.
+
+    Args:
+        contract: Contrato de la campaña con sus rangos y segmentos.
+
+    Returns:
+        ``True`` cuando hay más de un rango temporal o segmento declarado.
+    """
+    return len(contract.timestamp_ranges) > 1 or len(contract.segments) > 1
+
+
+def _validate_unwindowed_segments(
+    segments: Sequence[SubtitleSegment],
+    expected_tokens: Sequence[str],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    """Valida segmentos sin ventana temporal exacta (contrato de un solo clip).
+
+    Args:
+        segments: Segmentos declarados por la pieza.
+        expected_tokens: Tokens esperados del .lrc completo.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        ``None`` si los tiempos son sanos y la concatenación concuerda;
+        el motivo del fallo en caso contrario.
+    """
+    timing_err = _verify_subtitle_segments_timing(segments, start_sec=start_sec, end_sec=end_sec)
+    if timing_err is not None:
+        return timing_err
+    seg_tokens = _extract_ordered_tokens(" ".join(seg.text for seg in segments))
+    if seg_tokens != list(expected_tokens):
+        return (
+            "concatenación de subtitle_segments no concuerda con .lrc "
+            f"(esperado {expected_tokens}, obtenido {seg_tokens})"
+        )
+    return None
+
+
+def _validate_lyric_concordance(
+    context: GateContext,
+    expected_lines: Sequence[LyricLine],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
+    if context.piece.subtitle_text is None:
+        return "pieza sin subtitle_text"
+    sub_tokens = _extract_ordered_tokens(context.piece.subtitle_text)
+    if sub_tokens != list(expected_tokens):
+        return (
+            "subtítulos no concuerdan en secuencia y multiplicidad exacta con .lrc "
+            f"(esperado {expected_tokens}, obtenido {sub_tokens})"
+        )
+
+    segments = context.piece.subtitle_segments
+    if not segments:
+        return "pieza sin subtitle_segments"
+    if start_sec is not None and end_sec is not None:
+        segments_err = _verify_subtitle_segments_exact(segments, expected_lines)
+    else:
+        segments_err = _validate_unwindowed_segments(
+            segments, expected_tokens, start_sec=start_sec, end_sec=end_sec
+        )
+    if segments_err is not None:
+        return segments_err
+
+    return _verify_ass_dialogue_events(context.piece, expected_lines)
+
+
+def _concordance_outcome(
+    context: GateContext,
+    expected_lines: Sequence[LyricLine],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> CheckOutcome | None:
+    """Evalúa la concordancia de la pieza contra la ventana .lrc esperada.
+
+    Args:
+        context: Contexto resuelto del gate.
+        expected_lines: Líneas de la ventana temporal ya recortada.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        El FAIL correspondiente, o ``None`` si la pieza concuerda.
+    """
+    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
+    if not expected_tokens:
+        return CheckOutcome(
+            status=CheckStatus.FAIL, evidence={"reason": "archivo .lrc sin tokens de letra"}
+        )
+    mismatch_reason = _validate_lyric_concordance(
+        context, expected_lines, start_sec=start_sec, end_sec=end_sec
+    )
+    if mismatch_reason is not None:
+        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": mismatch_reason})
+    return None
+
+
+def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
+    if (
+        context.contract.format is not Format.LYRIC_VIDEO
+        or not context.contract.lyric_video
+        or not context.contract.lyric_video.lrc_asset_id
+    ):
+        return None
+    lrc_id = context.contract.lyric_video.lrc_asset_id
+    lrc_lines, load_err = _load_verified_lrc_lines(context, lrc_id)
+    if load_err is not None or lrc_lines is None:
+        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": load_err})
+
+    expected_lines, window_err, start_sec, end_sec = _resolve_expected_lrc_lines(context, lrc_lines)
+    if window_err is not None or expected_lines is None:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={"reason": f"error en ventana temporal de letras: {window_err}"},
+        )
+    if (start_sec is None or end_sec is None) and _is_lyric_multi_range(context.contract):
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "reason": (
+                    "contrato lyric_video multi-rango sin start_sec/end_sec en la pieza: "
+                    "cada pieza debe declarar su ventana temporal, "
+                    "no se compara contra el .lrc completo"
+                )
+            },
+        )
+    return _concordance_outcome(context, expected_lines, start_sec=start_sec, end_sec=end_sec)
+
+
 def check_spelling_locks(context: GateContext) -> CheckOutcome:
     """Verifica el spelling exacto de los locks en los subtítulos.
 
@@ -545,24 +981,92 @@ def check_spelling_locks(context: GateContext) -> CheckOutcome:
 
     Returns:
         PASS si el contrato no declara locks o todos aparecen literalmente;
-        FAIL con los locks faltantes; UNSUPPORTED si hay locks declarados
-        pero la pieza no trae subtítulos que verificar.
+        FAIL con los locks faltantes o palabras alteradas; UNSUPPORTED si
+        hay locks declarados pero la pieza no trae subtítulos que verificar.
     """
-    if not context.contract.spelling_locks:
+    is_lyric_video = context.contract.format is Format.LYRIC_VIDEO
+    if is_lyric_video and (
+        context.piece.subtitle_text is None
+        or not context.piece.subtitle_text.strip()
+        or not context.piece.subtitle_segments
+    ):
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={"reason": "formato lyric_video sin subtítulos sincronizados verificados"},
+        )
+
+    if not context.contract.spelling_locks and not is_lyric_video:
         return _pass(reason="el contrato no declara spelling_locks")
     if context.piece.subtitle_text is None:
         return _unsupported("no hay subtítulos para verificar los spelling locks")
+
     missing = [
-        lock for lock in context.contract.spelling_locks if lock not in context.piece.subtitle_text
+        lock
+        for lock in context.contract.spelling_locks
+        if not contains_phrase(context.piece.subtitle_text, lock)
     ]
-    evidence: dict[str, object] = {
-        "locks": list(context.contract.spelling_locks),
-        "missing": missing,
-    }
+    if missing:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "locks": list(context.contract.spelling_locks),
+                "missing": missing,
+            },
+        )
+
+    ground_truth_outcome = _check_lyric_ground_truth(context)
+    if ground_truth_outcome is not None:
+        return ground_truth_outcome
+
     return CheckOutcome(
-        status=CheckStatus.FAIL if missing else CheckStatus.PASS,
-        evidence=evidence,
+        status=CheckStatus.PASS,
+        evidence={
+            "locks": list(context.contract.spelling_locks),
+            "missing": [],
+        },
     )
+
+
+def _inspect_asset(
+    asset_id: str,
+    assets: AssetRegistry,
+    *,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    try:
+        registered = assets.get(asset_id)
+        intact = assets.verify(asset_id)
+    except AssetNotFoundError:
+        return asset_id, None, None, None
+    except (AssetError, OSError) as error:
+        return None, None, None, f"{asset_id}: {error}"
+    if expected_sha256 is not None and (
+        registered.sha256 != expected_sha256 or registered.size_bytes != expected_size
+    ):
+        return None, asset_id, None, None
+    if not intact:
+        return None, None, asset_id, None
+    return None, None, None, None
+
+
+def _record_inspection(
+    *,
+    missing: list[str],
+    mismatched: list[str],
+    tampered: list[str],
+    unsafe: list[str],
+    inspection: tuple[str | None, str | None, str | None, str | None],
+) -> None:
+    miss, mism, tamp, uns = inspection
+    if miss is not None:
+        missing.append(miss)
+    if mism is not None:
+        mismatched.append(mism)
+    if tamp is not None:
+        tampered.append(tamp)
+    if uns is not None:
+        unsafe.append(uns)
 
 
 def check_required_assets(context: GateContext) -> CheckOutcome:
@@ -582,19 +1086,32 @@ def check_required_assets(context: GateContext) -> CheckOutcome:
     tampered: list[str] = []
     unsafe: list[str] = []
     for asset in context.contract.assets.required:
-        try:
-            registered = context.assets.get(asset.asset_id)
-            intact = context.assets.verify(asset.asset_id)
-        except AssetNotFoundError:
-            missing.append(asset.asset_id)
-            continue
-        except (AssetError, OSError) as error:
-            unsafe.append(f"{asset.asset_id}: {error}")
-            continue
-        if registered.sha256 != asset.sha256 or registered.size_bytes != asset.size_bytes:
-            mismatched.append(asset.asset_id)
-        elif not intact:
-            tampered.append(asset.asset_id)
+        res = _inspect_asset(
+            asset.asset_id,
+            context.assets,
+            expected_sha256=asset.sha256,
+            expected_size=asset.size_bytes,
+        )
+        _record_inspection(
+            missing=missing,
+            mismatched=mismatched,
+            tampered=tampered,
+            unsafe=unsafe,
+            inspection=res,
+        )
+
+    if context.contract.lyric_video is not None and context.contract.lyric_video.lrc_asset_id:
+        lrc_id = context.contract.lyric_video.lrc_asset_id
+        if not any(a.asset_id == lrc_id for a in context.contract.assets.required):
+            res = _inspect_asset(lrc_id, context.assets)
+            _record_inspection(
+                missing=missing,
+                mismatched=mismatched,
+                tampered=tampered,
+                unsafe=unsafe,
+                inspection=res,
+            )
+
     evidence: dict[str, object] = {
         "missing": missing,
         "mismatched": mismatched,

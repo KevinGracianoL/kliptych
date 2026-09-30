@@ -40,8 +40,10 @@ from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
+from kliptych.assets import AssetError, AssetRegistry
 from kliptych.contract import (
     Contract,
+    Format,
     Segment,
     TimestampRange,
     contract_digest,
@@ -57,6 +59,15 @@ from kliptych.encoding import (
     video_encoder_arguments,
 )
 from kliptych.hashing import sha256_canonical_json, sha256_file
+from kliptych.lyrics import (
+    LrcEmptyWindowError,
+    LyricLine,
+    LyricsError,
+    SyncedLyricsProvider,
+    cut_lyric_window,
+    lyric_lines_to_ass,
+    parse_lrc,
+)
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
@@ -114,6 +125,11 @@ class PipelineResult:
             en modo repost, que no genera subtítulos.
         final_video: Vídeo vertical final con subtítulos quemados.
         cleaning: Rutas de los temporales eliminados al terminar.
+        source_offset_sec: Inicio absoluto (en segundos del vídeo original) de
+            la ventana quirúrgica descargada; ``0.0`` sin
+            ``timestamp_ranges``. Los segmentos de la selección son relativos
+            a la descarga y el recorte del ``.lrc`` suma este desplazamiento
+            para usar coordenadas absolutas.
     """
 
     source: Path
@@ -125,6 +141,7 @@ class PipelineResult:
     final_video: Path
     cleaning: tuple[str, ...]
     final_videos: tuple[Path, ...] = ()
+    source_offset_sec: float = 0.0
 
     def __post_init__(self) -> None:
         """Inicializa final_videos con final_video si no se proporcionó."""
@@ -203,6 +220,9 @@ class PipelineConfig:
     audio_mix_ratio: float = 1.0
     repost_mode: bool = False
     watermark_path: Path | None = None
+    lrc_path: Path | None = None
+    synced_lyrics_provider: SyncedLyricsProvider | None = None
+    assets: AssetRegistry | None = None
 
     def __post_init__(self) -> None:
         """Valida la proporción de mezcla de la pista externa.
@@ -446,7 +466,50 @@ def compute_long_video_fingerprint(
         "repost_mode": config.repost_mode,
         "watermark": _watermark_signature(config),
     }
+    lyric_sig = _lyric_signature(config)
+    if lyric_sig is not None:
+        payload["lyric_video"] = lyric_sig
     return sha256_canonical_json(payload)
+
+
+def _lyric_signature(config: PipelineConfig) -> dict[str, object] | None:
+    """Firma el formato lyric_video, configuración y archivo .lrc para --resume.
+
+    Args:
+        config: Configuración de la corrida.
+
+    Returns:
+        Diccionario con la firma determinista de letras, o None si no aplica.
+    """
+    if config.contract.format is not Format.LYRIC_VIDEO and config.contract.lyric_video is None:
+        return None
+
+    lrc_file_path: Path | None = config.lrc_path
+    if (
+        lrc_file_path is None
+        and config.contract.lyric_video is not None
+        and config.contract.lyric_video.lrc_asset_id
+        and config.assets is not None
+    ):
+        try:
+            lrc_file_path = config.assets.path_for(config.contract.lyric_video.lrc_asset_id)
+        except (AssetError, OSError):
+            lrc_file_path = None
+
+    lrc_sha = None
+    if lrc_file_path is not None and lrc_file_path.is_file():
+        lrc_sha = sha256_file(lrc_file_path)
+
+    return {
+        "format": config.contract.format.value,
+        "config": (
+            config.contract.lyric_video.model_dump(mode="json")
+            if config.contract.lyric_video is not None
+            else None
+        ),
+        "lrc_file": _file_signature(lrc_file_path),
+        "lrc_sha256": lrc_sha,
+    }
 
 
 def _watermark_signature(config: PipelineConfig) -> dict[str, object]:
@@ -1627,6 +1690,39 @@ def _resolve_reframe_stage(
         return reframe, reframed
 
 
+def _resolve_subtitle_file(
+    *,
+    is_lyric: bool,
+    transcript: Transcript | None,
+    segment: Segment,
+    dependencies: _Dependencies,
+    config: PipelineConfig,
+    registry: _CleanupRegistry,
+    subtitles_name: str,
+    source_offset_sec: float = 0.0,
+) -> Path:
+    if is_lyric:
+        return _write_lyric_subtitles(
+            segment=segment,
+            config=config,
+            output_dir=config.output_dir,
+            registry=registry,
+            subtitles_name=subtitles_name,
+            source_offset_sec=source_offset_sec,
+        )
+    if transcript is None:
+        msg = "no hay transcripción para generar subtítulos"
+        raise PipelineError(msg)
+    return _write_subtitles(
+        transcript,
+        segment=segment,
+        renderer=dependencies.subtitle_renderer,
+        output_dir=config.output_dir,
+        registry=registry,
+        subtitles_name=subtitles_name,
+    )
+
+
 def _resolve_subtitles_and_burn_stage(
     video: Path,
     *,
@@ -1639,11 +1735,13 @@ def _resolve_subtitles_and_burn_stage(
     resume: bool = False,
     suffix: str = "",
     is_primary: bool = True,
+    source_offset_sec: float = 0.0,
 ) -> tuple[Path | None, Path]:
     final_name = f"final{suffix}.mp4"
     subtitles_name = f"subtitles{suffix}.ass"
     mute_audio = contract_mutes_audio(config.contract)
-    if transcript is None:
+    is_lyric = config.contract.format is Format.LYRIC_VIDEO
+    if transcript is None and not is_lyric:
         final_video = _publish(
             video,
             output_dir=config.output_dir,
@@ -1665,13 +1763,15 @@ def _resolve_subtitles_and_burn_stage(
         cached_subtitles = config.output_dir / subtitles_name
         return cached_subtitles, final_video
     try:
-        subtitles = _write_subtitles(
-            transcript,
+        subtitles = _resolve_subtitle_file(
+            is_lyric=is_lyric,
+            transcript=transcript,
             segment=segment,
-            renderer=dependencies.subtitle_renderer,
-            output_dir=config.output_dir,
+            dependencies=dependencies,
+            config=config,
             registry=registry,
             subtitles_name=subtitles_name,
+            source_offset_sec=source_offset_sec,
         )
         final = _burn(
             video,
@@ -1703,6 +1803,7 @@ def _render_segment(
     resume: bool,
     suffix: str,
     is_primary: bool,
+    source_offset_sec: float = 0.0,
 ) -> tuple[ReframeResult | None, Path | None, Path]:
     clip = _resolve_clip(
         source,
@@ -1745,6 +1846,7 @@ def _render_segment(
         resume=resume,
         suffix=suffix,
         is_primary=is_primary,
+        source_offset_sec=source_offset_sec,
     )
     return reframe, subtitles, final_video
 
@@ -1878,6 +1980,7 @@ def _render_all_segments(
     registry: _CleanupRegistry,
     state: PipelineStateManager,
     effective_resume: bool,
+    source_offset_sec: float = 0.0,
 ) -> tuple[ReframeResult | None, Path | None, tuple[Path, ...]]:
     _ = _primary_segment(selection)
     total_segments = len(selection.segments)
@@ -1906,6 +2009,7 @@ def _render_all_segments(
             resume=effective_resume and coords_match,
             suffix=suffix,
             is_primary=(idx == 0),
+            source_offset_sec=source_offset_sec,
         )
         if idx == 0:
             primary_reframe = reframe
@@ -1947,6 +2051,7 @@ def _run_stages(
     )
     _clean_leftover_segments(config.output_dir, len(selection.segments))
     _normalize_final_artifacts(config.output_dir, len(selection.segments))
+    source_offset_sec = _source_time_offset_sec(config)
     reframe, subtitles, final_videos = _render_all_segments(
         source,
         selection,
@@ -1956,6 +2061,7 @@ def _run_stages(
         registry=registry,
         state=state,
         effective_resume=effective_resume,
+        source_offset_sec=source_offset_sec,
     )
 
     return PipelineResult(
@@ -1968,6 +2074,7 @@ def _run_stages(
         final_video=final_videos[0],
         cleaning=(),
         final_videos=final_videos,
+        source_offset_sec=source_offset_sec,
     )
 
 
@@ -2586,6 +2693,112 @@ def _resolve_audio_track(
         return destination
     msg = "audio_locked requiere audio_track_path o audio_track_url"
     raise PipelineError(msg)
+
+
+def _fetch_lrclib_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
+    if not (config.contract.lyric_video and config.contract.lyric_video.lrclib_enabled):
+        msg = "no se encontraron letras sincronizadas (.lrc no configurado o lrclib deshabilitado)"
+        raise PipelineError(msg)
+    if config.synced_lyrics_provider is None:
+        msg = "no se encontraron letras sincronizadas (proveedor lrclib ausente)"
+        raise PipelineError(msg)
+    if not config.contract.lyric_video.track_name:
+        msg = "se requiere track_name para consultar letras en lrclib"
+        raise PipelineError(msg)
+    try:
+        content = config.synced_lyrics_provider.get_synced_lyrics(
+            track_name=config.contract.lyric_video.track_name,
+            artist_name=config.contract.lyric_video.artist_name,
+        )
+        return parse_lrc(content)
+    except LyricsError as error:
+        raise PipelineError(str(error)) from error
+
+
+def _resolve_pipeline_lyric_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
+    if config.lrc_path is not None:
+        if not config.lrc_path.is_file():
+            msg = f"el archivo .lrc especificado no existe: '{config.lrc_path}'"
+            raise PipelineError(msg)
+        try:
+            content = config.lrc_path.read_text(encoding="utf-8")
+            return parse_lrc(content)
+        except (OSError, ValueError) as error:
+            msg = f"no se pudo procesar el archivo .lrc en '{config.lrc_path}': {error}"
+            raise PipelineError(msg) from error
+
+    lyric_config = config.contract.lyric_video
+    if lyric_config is not None and lyric_config.lrc_asset_id:
+        if config.assets is None:
+            msg = (
+                f"no se puede resolver el asset de letras '{lyric_config.lrc_asset_id}': "
+                "no hay AssetRegistry configurado"
+            )
+            raise PipelineError(msg)
+        try:
+            intact = config.assets.verify(lyric_config.lrc_asset_id)
+        except (AssetError, OSError) as error:
+            msg = f"error al verificar el asset de letras '{lyric_config.lrc_asset_id}': {error}"
+            raise PipelineError(msg) from error
+        if not intact:
+            msg = (
+                f"asset de letras '{lyric_config.lrc_asset_id}' "
+                "ausente o con integridad comprometida"
+            )
+            raise PipelineError(msg)
+        try:
+            lrc_path = config.assets.path_for(lyric_config.lrc_asset_id)
+            content = lrc_path.read_text(encoding="utf-8")
+            return parse_lrc(content)
+        except (AssetError, OSError, ValueError) as error:
+            msg = f"no se pudo procesar el asset .lrc '{lyric_config.lrc_asset_id}': {error}"
+            raise PipelineError(msg) from error
+
+    if lyric_config is not None:
+        return _fetch_lrclib_lines(config)
+
+    msg = "formato lyric_video sin archivo ni configuración de letras .lrc"
+    raise PipelineError(msg)
+
+
+def _write_lyric_subtitles(
+    *,
+    segment: Segment,
+    config: PipelineConfig,
+    output_dir: Path,
+    registry: _CleanupRegistry,
+    subtitles_name: str = "subtitles.ass",
+    source_offset_sec: float = 0.0,
+) -> Path:
+    raw_lines = _resolve_pipeline_lyric_lines(config)
+    # El segmento es relativo a la descarga quirúrgica (que arranca en 0.0 s);
+    # el .lrc vive en coordenadas absolutas del vídeo original, así que el
+    # recorte suma el desplazamiento. cut_lyric_window desplaza el resultado
+    # a 0.0 s: el .ass quemado queda relativo al inicio del clip.
+    absolute_start = segment.start_s + source_offset_sec
+    absolute_end = segment.end_s + source_offset_sec
+    try:
+        window_lines = cut_lyric_window(
+            raw_lines,
+            start_sec=absolute_start,
+            end_sec=absolute_end,
+        )
+    except (LrcEmptyWindowError, ValueError) as err:
+        raise PipelineError(str(err)) from err
+
+    duration_s = segment.end_s - segment.start_s
+    ass_content = lyric_lines_to_ass(window_lines, duration_s=duration_s)
+    destination = registry.register(_temporary_path(output_dir / subtitles_name))
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = destination.write_text(ass_content, encoding="utf-8")
+        target = output_dir / subtitles_name
+        _ = destination.replace(target)
+    except OSError as error:
+        msg = f"no se pudo guardar el archivo .ass en {destination}: {error}"
+        raise PipelineError(msg) from error
+    else:
+        return target
 
 
 def _write_subtitles(

@@ -8,6 +8,7 @@ class Format(StrEnum):
 
     VIDEO = "video"
     SLIDESHOW = "slideshow"
+    LYRIC_VIDEO = "lyric_video"
 
 
 class Mode(StrEnum):

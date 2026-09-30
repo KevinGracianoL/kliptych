@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.contract import AudioPolicy, Contract, Platform, contract_digest
 from kliptych.encoding import RenderConfig
@@ -195,7 +195,7 @@ def _render_paths(tmp_path: Path) -> tuple[Path, Path]:
 def test_muted_assemble_preserves_audio_track_and_silences(tmp_path: Path) -> None:
     clip, destination = _render_paths(tmp_path)
     recipe = FFmpegAssembler().render_arguments(
-        clip=clip, destination=destination, watermark=None, mute_audio=True
+        RenderSpec(clip=clip, destination=destination, mute_audio=True)
     )
     assert "-af" in recipe
     assert "volume=0" in recipe
@@ -204,7 +204,7 @@ def test_muted_assemble_preserves_audio_track_and_silences(tmp_path: Path) -> No
 
 def test_assemble_without_mute_keeps_audible_argv(tmp_path: Path) -> None:
     clip, destination = _render_paths(tmp_path)
-    recipe = FFmpegAssembler().render_arguments(clip=clip, destination=destination, watermark=None)
+    recipe = FFmpegAssembler().render_arguments(RenderSpec(clip=clip, destination=destination))
     assert "-af" not in recipe
     assert "volume=0" not in recipe
 

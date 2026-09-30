@@ -6,6 +6,7 @@ el artefacto final y el exportador solo publica piezas que pasan: un caption
 sin la mención obligatoria queda rechazado y el paquete lo reporta.
 """
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,14 +16,14 @@ from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetNotFoundError, AssetRegistry
 from kliptych.config import Settings
 from kliptych.contract import (
     Contract,
     ContractDraft,
+    Format,
     Mode,
-    Watermark,
     contract_digest,
     contract_mutes_audio,
 )
@@ -36,6 +37,15 @@ from kliptych.gate.brand_safety import (
 )
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.hashing import brief_key, sha256_file
+from kliptych.lyrics import (
+    LyricLine,
+    LyricsError,
+    cut_lyric_window,
+    lyric_lines_to_ass,
+    lyric_lines_to_subtitle_segments,
+    lyric_lines_to_subtitle_text,
+    resolve_synced_lyrics,
+)
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
 from kliptych.resolver import (
     IssueCode,
@@ -88,27 +98,11 @@ class RunResult(BaseModel):
 class PieceAssembler(Protocol):
     """Ensambla el clip entregado en el artefacto final de la pieza."""
 
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        mute_audio: bool = False,
-    ) -> Path:
+    def assemble(self, spec: RenderSpec) -> Path:
         """Ensambla el clip y devuelve la ruta del artefacto."""
         ...
 
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
         """Devuelve la receta de render que se registra en el manifiesto."""
         ...
 
@@ -329,6 +323,248 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
     )
 
 
+def _clip_window(contract: Contract) -> tuple[float | None, float | None]:
+    """Ventana temporal única del contrato para las piezas given_clips.
+
+    Solo un rango unívoco puede mapearse a todas las piezas; con cero o
+    varios rangos no hay ventana asignable y el gate decide en cerrado.
+
+    Args:
+        contract: Contrato validado de la corrida.
+
+    Returns:
+        El par ``(start_sec, end_sec)``, o ``(None, None)`` sin rango único.
+    """
+    if len(contract.timestamp_ranges) == 1:
+        single = contract.timestamp_ranges[0]
+        return single.start_sec, single.end_sec
+    return None, None
+
+
+def _resolve_lyric_source_lines(
+    context: _RunContext, contract: Contract
+) -> tuple[LyricLine, ...] | None:
+    """Resuelve las líneas .lrc completas de una corrida lyric_video.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+
+    Returns:
+        Las líneas sincronizadas, o ``None`` si no es lyric_video o no se
+        pudieron resolver (el gate falla en cerrado en ese caso).
+    """
+    if contract.format is not Format.LYRIC_VIDEO:
+        return None
+    try:
+        return resolve_synced_lyrics(contract=contract, registry=context.registry)
+    except (LyricsError, OSError):
+        return None
+
+
+def _cut_lyric_window_lines(
+    lines: Sequence[LyricLine], *, start_sec: float | None, end_sec: float | None
+) -> tuple[LyricLine, ...] | None:
+    """Recorta las líneas .lrc a la ventana del clip.
+
+    Args:
+        lines: Líneas sincronizadas completas del tema.
+        start_sec: Inicio de la ventana, o ``None`` sin recorte.
+        end_sec: Fin de la ventana, o ``None`` sin recorte.
+
+    Returns:
+        Las líneas de la ventana (o completas sin recorte), o ``None``
+        cuando la ventana queda vacía.
+    """
+    if start_sec is None or end_sec is None:
+        return tuple(lines)
+    try:
+        return cut_lyric_window(lines, start_sec=start_sec, end_sec=end_sec)
+    except (LyricsError, ValueError):
+        return None
+
+
+def _write_lyric_sidecar(
+    artifact: Path, lines: tuple[LyricLine, ...] | None, *, duration_s: float | None
+) -> Path | None:
+    """Escribe el .ass de la pieza junto al artefacto para el gate y el quemado.
+
+    En formato lyric_video se escribe ANTES del ensamblado y se pasa al
+    ensamblador como dependencia obligatoria del render.
+
+    Args:
+        artifact: Ruta del MP4 final de la pieza.
+        lines: Líneas de la ventana del clip, o ``None`` sin letras.
+        duration_s: Duración del clip para acotar los eventos, o ``None``.
+
+    Returns:
+        La ruta del .ass escrito, o ``None`` sin líneas o si no se pudo
+        escribir (el gate falla en cerrado en ambos casos).
+    """
+    if lines is None:
+        return None
+    sidecar = artifact.with_suffix(".ass")
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        _ = sidecar.write_text(lyric_lines_to_ass(lines, duration_s=duration_s), encoding="utf-8")
+    except OSError:
+        return None
+    return sidecar
+
+
+def _resolve_piece_subtitles(
+    context: _RunContext,
+    asset_id: str,
+    *,
+    lyric_window: tuple[LyricLine, ...] | None,
+) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    """Deriva el texto y los segmentos de subtítulos de una pieza.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        asset_id: Identificador del clip en el registro de assets.
+        lyric_window: Líneas .lrc de la ventana del clip, o ``None`` sin
+            letras (los valores inyectados en la petición mandan sobre ellas).
+
+    Returns:
+        El texto y los segmentos de la pieza.
+    """
+    subtitle_texts = context.request.subtitle_texts or {}
+    subtitle_segments = context.request.subtitle_segments or {}
+    sub_segments = tuple(subtitle_segments.get(asset_id, ()))
+    sub_text = subtitle_texts.get(asset_id)
+    if lyric_window is not None:
+        if not sub_segments:
+            sub_segments = lyric_lines_to_subtitle_segments(lyric_window)
+        if sub_text is None:
+            sub_text = lyric_lines_to_subtitle_text(lyric_window)
+    if not sub_segments:
+        sub_segments = hydrate_piece_subtitle_segments(
+            transcript=None,
+            segment=None,
+            work_dir=context.run_dir,
+        )
+    if sub_text is None:
+        sub_text = hydrate_piece_subtitle_text(
+            transcript=None,
+            segment=None,
+            work_dir=context.run_dir,
+        )
+    return sub_text, sub_segments
+
+
+@dataclass(frozen=True, slots=True)
+class _LyricClipState:
+    """Ventana de letra del clip para subtítulos, .ass y tiempos de la pieza."""
+
+    start_sec: float | None
+    end_sec: float | None
+    lines: tuple[LyricLine, ...] | None
+
+    @property
+    def duration_s(self) -> float | None:
+        """Duración de la ventana, o ``None`` sin recorte asignable."""
+        if self.start_sec is None or self.end_sec is None:
+            return None
+        return self.end_sec - self.start_sec
+
+
+def _prepare_lyric_clip(
+    context: _RunContext, contract: Contract, *, source_offset_sec: float = 0.0
+) -> _LyricClipState:
+    """Resuelve y recorta una sola vez la letra del clip given_clips.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+        source_offset_sec: Desplazamiento absoluto de la descarga quirúrgica;
+            en given_clips los clips llegan ya cortados y siempre es ``0.0``.
+
+    Returns:
+        La ventana temporal absoluta y las líneas recortadas (o ``None`` sin
+        letras, con el gate fallando en cerrado).
+    """
+    start_sec, end_sec = _clip_window(contract)
+    source_lines = _resolve_lyric_source_lines(context, contract)
+    if start_sec is not None and end_sec is not None:
+        absolute_start = start_sec + source_offset_sec
+        absolute_end = end_sec + source_offset_sec
+    else:
+        absolute_start, absolute_end = start_sec, end_sec
+    lines = (
+        _cut_lyric_window_lines(source_lines, start_sec=absolute_start, end_sec=absolute_end)
+        if source_lines is not None
+        else None
+    )
+    return _LyricClipState(start_sec=absolute_start, end_sec=absolute_end, lines=lines)
+
+
+def _builder_supports_subtitles(builder: PieceAssembler) -> bool:
+    """Indica si el ensamblador acepta el .ass para quemar subtítulos.
+
+    Args:
+        builder: Ensamblador inyectado de la corrida.
+
+    Returns:
+        True si su firma de ``assemble`` declara ``spec`` (RenderSpec, que
+        incluye subtítulos) o el parámetro ``subtitles`` legacy.
+    """
+    try:
+        parameters = inspect.signature(builder.assemble).parameters
+    except (TypeError, ValueError):
+        return False
+    if "spec" in parameters:
+        return True
+    return "subtitles" in parameters
+
+
+def _resolve_assemble_subtitles(
+    context: _RunContext,
+    contract: Contract,
+    lyric: _LyricClipState,
+    artifact: Path,
+) -> Path | None:
+    """Resuelve el .ass obligatorio previo al render para LYRIC_VIDEO.
+
+    En formato lyric_video el .ass se escribe ANTES del ensamblado y se pasa
+    al ensamblador como dependencia obligatoria del render: el MP4 final
+    siempre lleva las letras quemadas y el gate nunca dictamina sobre un
+    sidecar que el vídeo no muestra.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+        lyric: Ventana de letra del clip con sus líneas recortadas.
+        artifact: Ruta del MP4 final de la pieza (el sidecar es su hermano
+            con sufijo ``.ass``).
+
+    Returns:
+        La ruta del .ass para quemar, o ``None`` fuera de lyric_video.
+
+    Raises:
+        PipelineError: Si el formato exige letras y no hay ventana verificada
+            o el sidecar no se pudo escribir.
+        NotImplementedError: Si el ensamblador inyectado no sabe quemar
+            subtítulos (su ``assemble`` no declara ``subtitles``).
+    """
+    if contract.format is not Format.LYRIC_VIDEO:
+        return None
+    if lyric.lines is None:
+        msg = "formato lyric_video sin letras sincronizadas verificadas para quemar"
+        raise PipelineError(msg)
+    if not _builder_supports_subtitles(context.builder):
+        msg = (
+            "el ensamblador inyectado no soporta el quemado de subtítulos "
+            "(su firma de assemble no declara el parámetro 'subtitles')"
+        )
+        raise NotImplementedError(msg)
+    ass_path = _write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s)
+    if ass_path is None:
+        msg = f"no se pudo escribir el sidecar de letras para {artifact}"
+        raise PipelineError(msg)
+    return ass_path
+
+
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
@@ -338,40 +574,32 @@ def _assemble_pieces(
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
     watermark_config = contract.watermark if watermark is not None else None
-    subtitle_texts = context.request.subtitle_texts or {}
-    subtitle_segments = context.request.subtitle_segments or {}
     mute_audio = contract_mutes_audio(contract)
+    # given_clips no hace descarga quirúrgica: los clips llegan ya cortados y
+    # la ventana del contrato ya está en coordenadas del clip (offset 0.0).
+    lyric = _prepare_lyric_clip(context, contract, source_offset_sec=0.0)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
             if asset.kind != _VIDEO_KIND:
                 continue
             clip = context.registry.path_for(asset.asset_id)
             artifact = context.run_dir / "artifacts" / platform.value / f"{asset.asset_id}.mp4"
-            _ = context.builder.assemble(
+            spec = RenderSpec(
                 clip=clip,
                 destination=artifact,
                 watermark=watermark,
                 watermark_config=watermark_config,
+                subtitles=_resolve_assemble_subtitles(context, contract, lyric, artifact),
                 mute_audio=mute_audio,
             )
+            _ = context.builder.assemble(spec)
             caption = context.model.write_caption(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
             )
-            sub_segments = tuple(subtitle_segments.get(asset.asset_id, ()))
-            if not sub_segments:
-                sub_segments = hydrate_piece_subtitle_segments(
-                    transcript=None,
-                    segment=None,
-                    work_dir=context.run_dir,
-                )
-            sub_text = subtitle_texts.get(asset.asset_id)
-            if sub_text is None:
-                sub_text = hydrate_piece_subtitle_text(
-                    transcript=None,
-                    segment=None,
-                    work_dir=context.run_dir,
-                )
+            sub_text, sub_segments = _resolve_piece_subtitles(
+                context, asset.asset_id, lyric_window=lyric.lines
+            )
             piece = Piece(
                 piece_id=asset.asset_id,
                 platform=platform,
@@ -380,6 +608,9 @@ def _assemble_pieces(
                 subtitle_text=sub_text,
                 subtitle_segments=sub_segments,
                 artifact_path=artifact,
+                start_sec=lyric.start_sec,
+                end_sec=lyric.end_sec,
+                ass_path=spec.subtitles,
             )
             pieces.append(piece)
             gates.append(
@@ -390,13 +621,7 @@ def _assemble_pieces(
                     path=artifact.relative_to(context.run_dir).as_posix(),
                     sha256=sha256_file(artifact),
                     size_bytes=artifact.stat().st_size,
-                    render_arguments=context.builder.render_arguments(
-                        clip=clip,
-                        destination=artifact,
-                        watermark=watermark,
-                        watermark_config=watermark_config,
-                        mute_audio=mute_audio,
-                    ),
+                    render_arguments=context.builder.render_arguments(spec),
                 )
             )
     return pieces, gates, outputs

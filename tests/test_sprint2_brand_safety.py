@@ -12,6 +12,7 @@ from typing import cast, override
 
 import pytest
 
+from kliptych.assembler import RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager
 from kliptych.campaign_types import Campaign, CampaignStatus
@@ -290,24 +291,14 @@ class _ChatCampaignModel(CampaignModel):
 class _StubAssembler:
     """Ensamblador falso para tests sin ffmpeg."""
 
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None = None,
-        watermark_config: object = None,
-        width: int = 1080,
-        height: int = 1920,
-        mute_audio: bool = False,
-    ) -> Path:
-        _ = (self, clip, watermark, watermark_config, width, height, mute_audio)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _ = destination.write_bytes(b"assembled")
-        return destination
+    def assemble(self, spec: RenderSpec) -> Path:
+        _ = (self, spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = spec.destination.write_bytes(b"assembled")
+        return spec.destination
 
-    def render_arguments(self, **kwargs: object) -> tuple[str, ...]:
-        _ = (self, kwargs)
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
+        _ = (self, spec)
         return ("ffmpeg", "assembled")
 
 

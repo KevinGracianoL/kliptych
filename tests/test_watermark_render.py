@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.contract import Watermark, WatermarkPosition
 from kliptych.gate.probe import FFprobeProbe
 
@@ -60,10 +60,7 @@ def _graph(tmp_path: Path, config: Watermark) -> str:
     watermark = _file(tmp_path, "wm.png")
     destination = tmp_path / "piece.mp4"
     recipe = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
-        clip=clip,
-        destination=destination,
-        watermark=watermark,
-        watermark_config=config,
+        RenderSpec(clip=clip, destination=destination, watermark=watermark, watermark_config=config)
     )
     return recipe[recipe.index("-filter_complex") + 1]
 
@@ -95,10 +92,12 @@ def test_watermark_uses_explicit_inputs_never_movie(tmp_path: Path) -> None:
     watermark = _file(tmp_path, "wm.png")
     destination = tmp_path / "piece.mp4"
     recipe = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
-        clip=clip,
-        destination=destination,
-        watermark=watermark,
-        watermark_config=_config(WatermarkPosition.BOTTOM_RIGHT),
+        RenderSpec(
+            clip=clip,
+            destination=destination,
+            watermark=watermark,
+            watermark_config=_config(WatermarkPosition.BOTTOM_RIGHT),
+        )
     )
     inputs = [recipe[index + 1] for index, arg in enumerate(recipe) if arg == "-i"]
     assert inputs == [str(clip), str(watermark)]
@@ -111,7 +110,7 @@ def test_default_config_matches_legacy_top_right(tmp_path: Path) -> None:
     watermark = _file(tmp_path, "wm.png")
     destination = tmp_path / "piece.mp4"
     recipe = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
-        clip=clip, destination=destination, watermark=watermark
+        RenderSpec(clip=clip, destination=destination, watermark=watermark)
     )
     graph = recipe[recipe.index("-filter_complex") + 1]
     assert f"overlay=W-w-{_MARGIN}:{_MARGIN}[v]" in graph
@@ -122,11 +121,13 @@ def test_watermark_coexists_with_mute(tmp_path: Path) -> None:
     watermark = _file(tmp_path, "wm.png")
     destination = tmp_path / "piece.mp4"
     recipe = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
-        clip=clip,
-        destination=destination,
-        watermark=watermark,
-        watermark_config=_config(WatermarkPosition.CENTER_BOTTOM),
-        mute_audio=True,
+        RenderSpec(
+            clip=clip,
+            destination=destination,
+            watermark=watermark,
+            watermark_config=_config(WatermarkPosition.CENTER_BOTTOM),
+            mute_audio=True,
+        )
     )
     assert "-filter_complex" in recipe
     assert "-af" in recipe
@@ -223,12 +224,14 @@ def test_renders_scaled_watermark_at_center_bottom(tmp_path: Path) -> None:
     watermark = _generate_watermark(tmp_path / "wm.png")
     plain = tmp_path / "plain.mp4"
     marked = tmp_path / "marked.mp4"
-    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(clip=clip, destination=plain)
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(RenderSpec(clip=clip, destination=plain))
     _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
-        clip=clip,
-        destination=marked,
-        watermark=watermark,
-        watermark_config=_config(WatermarkPosition.CENTER_BOTTOM),
+        RenderSpec(
+            clip=clip,
+            destination=marked,
+            watermark=watermark,
+            watermark_config=_config(WatermarkPosition.CENTER_BOTTOM),
+        )
     )
     # 64x64 escalado al 20% de 1080 = 216 px, centrado abajo con margen 20.
     box = {"width": 1080, "x0": 432, "y0": 1684, "x1": 648, "y1": 1900}
