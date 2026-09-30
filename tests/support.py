@@ -292,6 +292,9 @@ def make_piece(
     subtitle_segments: Sequence[SubtitleSegment] = (),
     screen_text_segments: Sequence[SubtitleSegment] = (),
     platform: Platform = Platform.TIKTOK,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+    ass_path: Path | None = None,
 ) -> Piece:
     return Piece(
         piece_id="piece-01",
@@ -302,6 +305,9 @@ def make_piece(
         subtitle_segments=tuple(subtitle_segments),
         screen_text_segments=tuple(screen_text_segments),
         artifact_path=artifact,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        ass_path=ass_path,
     )
 
 

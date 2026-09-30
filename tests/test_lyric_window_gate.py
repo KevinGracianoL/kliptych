@@ -218,7 +218,7 @@ def test_gate_spelling_lock_ground_truth_lrc_asset_detects_altered_word(tmp_path
     good_piece = make_piece(
         tmp_path / "clip.mp4",
         subtitle_text="palabra exacta del tema",
-        subtitle_segments=[SubtitleSegment(text="palabra exacta", start_s=0.0, end_s=2.0)],
+        subtitle_segments=[SubtitleSegment(text="palabra exacta del tema", start_s=0.0, end_s=2.0)],
     )
     ctx_good = GateContext(
         contract=contract,
@@ -230,3 +230,201 @@ def test_gate_spelling_lock_ground_truth_lrc_asset_detects_altered_word(tmp_path
     )
     outcome_good = check_spelling_locks(ctx_good)
     assert outcome_good.status is CheckStatus.PASS
+
+
+def test_gate_spelling_lock_ground_truth_reordered_words_fails(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello world\n", encoding="utf-8")
+
+    registry = AssetRegistry(tmp_path)
+    ref = registry.register(
+        asset_id="song_lrc",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song_lrc"),
+        required_assets=[ref],
+    )
+    platform = next(iter(contract.platforms.keys()))
+
+    # 1. Exact match -> PASS
+    pass_piece = make_piece(
+        tmp_path / "clip.mp4",
+        subtitle_text="hello world",
+        subtitle_segments=[SubtitleSegment(text="hello world", start_s=0.0, end_s=2.0)],
+    )
+    ctx_pass = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=pass_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_pass).status is CheckStatus.PASS
+
+    # 2. Reordered: 'world hello' -> FAIL
+    reordered_piece = make_piece(
+        tmp_path / "clip.mp4",
+        subtitle_text="world hello",
+        subtitle_segments=[SubtitleSegment(text="world hello", start_s=0.0, end_s=2.0)],
+    )
+    ctx_reordered = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=reordered_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_reordered).status is CheckStatus.FAIL
+
+    # 3. Omission: 'hello' -> FAIL
+    omission_piece = make_piece(
+        tmp_path / "clip.mp4",
+        subtitle_text="hello",
+        subtitle_segments=[SubtitleSegment(text="hello", start_s=0.0, end_s=2.0)],
+    )
+    ctx_omission = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=omission_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_omission).status is CheckStatus.FAIL
+
+    # 4. Duplication: 'world world' -> FAIL
+    dup_piece = make_piece(
+        tmp_path / "clip.mp4",
+        subtitle_text="world world",
+        subtitle_segments=[SubtitleSegment(text="world world", start_s=0.0, end_s=2.0)],
+    )
+    ctx_dup = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=dup_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_dup).status is CheckStatus.FAIL
+
+
+def test_gate_spelling_lock_partial_window_clip(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    content = (
+        "[00:00.00]intro line zero\n"
+        "[00:10.00]verse line ten\n"
+        "[00:15.00]chorus line fifteen\n"
+        "[00:25.00]outro line twenty five\n"
+    )
+    _ = lrc_file.write_text(content, encoding="utf-8")
+
+    registry = AssetRegistry(tmp_path)
+    ref = registry.register(
+        asset_id="song_lrc",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song_lrc"),
+        required_assets=[ref],
+    )
+    platform = next(iter(contract.platforms.keys()))
+
+    # Piece cut at 10s..20s matching 10s..20s sequence -> PASS
+    good_piece = make_piece(
+        tmp_path / "clip.mp4",
+        start_sec=10.0,
+        end_sec=20.0,
+        subtitle_text="verse line ten chorus line fifteen",
+        subtitle_segments=[
+            SubtitleSegment(text="verse line ten", start_s=0.0, end_s=5.0),
+            SubtitleSegment(text="chorus line fifteen", start_s=5.0, end_s=10.0),
+        ],
+    )
+    ctx_good = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=good_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(duration_s=10.0),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_good).status is CheckStatus.PASS
+
+    # Piece with verses outside window (e.g. intro included) -> FAIL
+    bad_piece = make_piece(
+        tmp_path / "clip.mp4",
+        start_sec=10.0,
+        end_sec=20.0,
+        subtitle_text="intro line zero verse line ten chorus line fifteen",
+        subtitle_segments=[
+            SubtitleSegment(text="intro line zero verse line ten", start_s=0.0, end_s=5.0),
+            SubtitleSegment(text="chorus line fifteen", start_s=5.0, end_s=10.0),
+        ],
+    )
+    ctx_bad = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=bad_piece,
+        artifact_sha256="f" * 64,
+        media=make_media(duration_s=10.0),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx_bad).status is CheckStatus.FAIL
+
+
+def test_gate_spelling_lock_ass_concordance_failure(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello world\n", encoding="utf-8")
+
+    registry = AssetRegistry(tmp_path)
+    ref = registry.register(
+        asset_id="song_lrc",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song_lrc"),
+        required_assets=[ref],
+    )
+    platform = next(iter(contract.platforms.keys()))
+
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.touch()
+    ass_path = tmp_path / "subtitles.ass"
+    ass_content = (
+        "[Script Info]\nTitle: Test\n\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,hello discordant world\n"
+    )
+    _ = ass_path.write_text(ass_content, encoding="utf-8")
+
+    piece = make_piece(
+        clip_path,
+        subtitle_text="hello world",
+        subtitle_segments=[SubtitleSegment(text="hello world", start_s=0.0, end_s=2.0)],
+        ass_path=ass_path,
+    )
+    ctx = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+    assert check_spelling_locks(ctx).status is CheckStatus.FAIL

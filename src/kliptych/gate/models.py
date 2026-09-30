@@ -119,6 +119,9 @@ class Piece(_GateBase):
     subtitle_segments: tuple[SubtitleSegment, ...] = ()
     screen_text_segments: tuple[SubtitleSegment, ...] = ()
     artifact_path: Path
+    start_sec: float | None = None
+    end_sec: float | None = None
+    ass_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

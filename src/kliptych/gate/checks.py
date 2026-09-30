@@ -54,17 +54,24 @@ Reglas declaradas sin validador registrado jamás pasan: el motor las marca
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError
 from kliptych.contract import AudioPolicy, AudioRule, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
-from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
+from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext, Piece, SubtitleSegment
 from kliptych.gate.text import contains_phrase, normalize_text
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
-from kliptych.lyrics import parse_lrc
+from kliptych.lyrics import (
+    LrcEmptyWindowError,
+    LrcParseError,
+    LyricLine,
+    LyricsError,
+    cut_lyric_window,
+    parse_lrc,
+)
 
 __all__ = [
     "DEFAULT_VALIDATORS",
@@ -538,6 +545,146 @@ def check_first_line(context: GateContext) -> CheckOutcome:
     )
 
 
+def _extract_ordered_tokens(text: str) -> list[str]:
+    norm = normalize_text(text)
+    raw_tokens = re.split(r"[\s_]+", norm)
+    tokens: list[str] = []
+    for token in raw_tokens:
+        cleaned = re.sub(r"^[^\wñ]+|[^\wñ]+$", "", token)
+        if cleaned:
+            tokens.append(cleaned)
+    return tokens
+
+
+_ASS_DIALOGUE_PARTS: int = 10
+_ASS_SPLIT_MAX: int = 9
+
+
+def _find_ass_path(piece: Piece) -> Path | None:
+    if piece.ass_path is not None and piece.ass_path.is_file():
+        return piece.ass_path
+    candidate_default = piece.artifact_path.parent / "subtitles.ass"
+    if candidate_default.is_file():
+        return candidate_default
+    candidate_stem = piece.artifact_path.with_suffix(".ass")
+    if candidate_stem.is_file():
+        return candidate_stem
+    return None
+
+
+def _verify_ass_dialogue_tokens(piece: Piece, expected_tokens: Sequence[str]) -> str | None:
+    ass_path = _find_ass_path(piece)
+    if ass_path is None:
+        return None
+    try:
+        content = ass_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return f"no se pudo leer el archivo .ass en {ass_path}: {error}"
+    dialogues: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Dialogue:"):
+            parts = stripped.split(",", _ASS_SPLIT_MAX)
+            if len(parts) >= _ASS_DIALOGUE_PARTS:
+                dialogues.append(parts[_ASS_SPLIT_MAX].strip())
+    ass_tokens = _extract_ordered_tokens(" ".join(dialogues))
+    if ass_tokens != list(expected_tokens):
+        return (
+            "eventos Dialogue en .ass no concuerdan con .lrc "
+            f"(esperado {expected_tokens}, obtenido {ass_tokens})"
+        )
+    return None
+
+
+def _verify_subtitle_segments_timing(
+    segments: Sequence[SubtitleSegment],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    for i, seg in enumerate(segments):
+        if seg.start_s >= seg.end_s:
+            return f"segmento {i} con start_s >= end_s ({seg.start_s} >= {seg.end_s})"
+        if i > 0 and seg.start_s < segments[i - 1].start_s:
+            prev_s = segments[i - 1].start_s
+            return f"segmento {i} con timestamp desordenado ({seg.start_s} < {prev_s})"
+        if seg.start_s < 0.0:
+            return f"segmento {i} con timestamp negativo ({seg.start_s})"
+        if start_sec is not None and end_sec is not None:
+            max_duration = end_sec - start_sec
+            if seg.end_s > max_duration + 0.1 and seg.end_s > end_sec + 0.1:
+                return f"segmento {i} excede la ventana temporal ({seg.end_s})"
+    return None
+
+
+def _resolve_expected_lrc_lines(
+    context: GateContext,
+    lrc_lines: Sequence[LyricLine],
+) -> tuple[tuple[LyricLine, ...] | None, str | None, float | None, float | None]:
+    start_sec = context.piece.start_sec
+    end_sec = context.piece.end_sec
+    if (start_sec is None or end_sec is None) and len(context.contract.segments) == 1:
+        start_sec = context.contract.segments[0].start_s
+        end_sec = context.contract.segments[0].end_s
+    if start_sec is not None and end_sec is not None:
+        try:
+            cut = cut_lyric_window(lrc_lines, start_sec=start_sec, end_sec=end_sec)
+        except (LrcEmptyWindowError, LrcParseError, ValueError) as err:
+            return None, str(err), start_sec, end_sec
+        else:
+            return cut, None, start_sec, end_sec
+    return tuple(lrc_lines), None, start_sec, end_sec
+
+
+def _load_verified_lrc_lines(
+    context: GateContext, lrc_id: str
+) -> tuple[tuple[LyricLine, ...] | None, str | None]:
+    try:
+        intact = context.assets.verify(lrc_id)
+    except (AssetError, OSError) as error:
+        return None, f"no se pudo verificar el asset .lrc de referencia: {error}"
+    if not intact:
+        return None, f"asset de letras '{lrc_id}' ausente o con integridad comprometida"
+    try:
+        path = context.assets.path_for(lrc_id)
+        content = path.read_text(encoding="utf-8")
+        return parse_lrc(content), None
+    except (AssetError, OSError, ValueError, LyricsError) as error:
+        return None, f"archivo .lrc de referencia inválido: {error}"
+
+
+def _validate_lyric_concordance(
+    context: GateContext,
+    expected_tokens: Sequence[str],
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> str | None:
+    if context.piece.subtitle_text is None:
+        return "pieza sin subtitle_text"
+    sub_tokens = _extract_ordered_tokens(context.piece.subtitle_text)
+    if sub_tokens != list(expected_tokens):
+        return (
+            "subtítulos no concuerdan en secuencia y multiplicidad exacta con .lrc "
+            f"(esperado {expected_tokens}, obtenido {sub_tokens})"
+        )
+
+    segments = context.piece.subtitle_segments
+    if not segments:
+        return "pieza sin subtitle_segments"
+    timing_err = _verify_subtitle_segments_timing(segments, start_sec=start_sec, end_sec=end_sec)
+    if timing_err is not None:
+        return timing_err
+    seg_tokens = _extract_ordered_tokens(" ".join(seg.text for seg in segments))
+    if seg_tokens != list(expected_tokens):
+        return (
+            "concatenación de subtitle_segments no concuerda con .lrc "
+            f"(esperado {expected_tokens}, obtenido {seg_tokens})"
+        )
+
+    return _verify_ass_dialogue_tokens(context.piece, expected_tokens)
+
+
 def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
     if (
         context.contract.format is not Format.LYRIC_VIDEO
@@ -545,34 +692,30 @@ def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
         or not context.contract.lyric_video.lrc_asset_id
     ):
         return None
-    try:
-        path = context.assets.path_for(context.contract.lyric_video.lrc_asset_id)
-        content = path.read_text(encoding="utf-8")
-    except (AssetError, OSError) as error:
+    lrc_id = context.contract.lyric_video.lrc_asset_id
+    lrc_lines, load_err = _load_verified_lrc_lines(context, lrc_id)
+    if load_err is not None or lrc_lines is None:
+        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": load_err})
+
+    expected_lines, window_err, start_sec, end_sec = _resolve_expected_lrc_lines(context, lrc_lines)
+    if window_err is not None or expected_lines is None:
         return CheckOutcome(
             status=CheckStatus.FAIL,
-            evidence={"reason": f"no se pudo verificar el asset .lrc de referencia: {error}"},
+            evidence={"reason": f"error en ventana temporal de letras: {window_err}"},
         )
-    try:
-        lrc_lines = parse_lrc(content)
-    except ValueError as error:
+
+    expected_tokens = _extract_ordered_tokens(" ".join(line.text for line in expected_lines))
+    if not expected_tokens:
         return CheckOutcome(
-            status=CheckStatus.FAIL,
-            evidence={"reason": f"archivo .lrc de referencia inválido: {error}"},
+            status=CheckStatus.FAIL, evidence={"reason": "archivo .lrc sin tokens de letra"}
         )
-    lrc_full_norm = normalize_text(" ".join(line.text for line in lrc_lines))
-    lrc_words = set(re.split(r"[\s_]+", lrc_full_norm))
-    sub_norm = normalize_text(context.piece.subtitle_text or "")
-    sub_words = [w for w in re.split(r"[\s_]+", sub_norm) if w]
-    altered = [w for w in sub_words if w not in lrc_words]
-    if altered:
-        return CheckOutcome(
-            status=CheckStatus.FAIL,
-            evidence={
-                "reason": "subtítulos contienen palabras alteradas no presentes en .lrc",
-                "altered": altered,
-            },
-        )
+
+    mismatch_reason = _validate_lyric_concordance(
+        context, expected_tokens, start_sec=start_sec, end_sec=end_sec
+    )
+    if mismatch_reason is not None:
+        return CheckOutcome(status=CheckStatus.FAIL, evidence={"reason": mismatch_reason})
+
     return None
 
 
