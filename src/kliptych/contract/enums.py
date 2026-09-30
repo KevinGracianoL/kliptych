@@ -73,3 +73,10 @@ class RuleStrength(StrEnum):
     HARD = "hard"
     RECOMMENDED = "recommended"
     MANUAL_REVIEW = "manual_review"
+
+
+class Layout(StrEnum):
+    """Disposición de los paneles en el lienzo vertical."""
+
+    SINGLE = "single"
+    SPLIT_SCREEN = "split_screen"

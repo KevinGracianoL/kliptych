@@ -158,6 +158,72 @@ class Watermark(ContractBase):
 WatermarkConfig = Watermark
 
 
+_SPLIT_ASPECT_W = 9
+_SPLIT_ASPECT_H = 16
+_SPLIT_EVEN_PX = 2
+_SPLIT_MIN_PANEL_PX = 2
+
+
+class SplitScreenConfig(ContractBase):
+    """Composición vertical en dos paneles (superior + inferior).
+
+    El lienzo de salida es vertical 9:16 (por defecto 1080x1920) dividido
+    en dos paneles horizontales: ``panel_ratio`` es la fracción del alto
+    útil (alto menos ``gap``) que ocupa el panel superior; ``gap`` es la
+    franja negra entre paneles, en píxeles pares. ``top_source`` y
+    ``bottom_source`` son los asset_id de cada panel (video o imagen).
+    """
+
+    top_source: str = Field(min_length=1)
+    bottom_source: str = Field(min_length=1)
+    gap: int = Field(default=0, ge=0)
+    panel_ratio: float = Field(default=0.5, gt=0, lt=1)
+    width: int = Field(default=1080, gt=0)
+    height: int = Field(default=1920, gt=0)
+
+    @field_validator("top_source", "bottom_source")
+    @classmethod
+    def _source_is_safe(cls, source: str) -> str:
+        if not is_safe_segment(source):
+            msg = "split source no es un segmento de ruta seguro"
+            raise ValueError(msg)
+        return source
+
+    def panel_heights(self) -> tuple[int, int]:
+        """Devuelve el alto de cada panel, en píxeles pares.
+
+        El panel superior se redondea hacia abajo al par más cercano y el
+        inferior absorbe el resto del alto útil: la suma siempre cubre el
+        lienzo menos el ``gap`` y ambos quedan aptos para yuv420p.
+
+        Returns:
+            El par ``(alto_superior, alto_inferior)`` en píxeles.
+        """
+        available = self.height - self.gap
+        top = int(math.floor(available * self.panel_ratio / _SPLIT_EVEN_PX) * _SPLIT_EVEN_PX)
+        return (top, available - top)
+
+    @model_validator(mode="after")
+    def _canvas_and_panels_are_viable(self) -> Self:
+        if self.width % _SPLIT_EVEN_PX != 0 or self.height % _SPLIT_EVEN_PX != 0:
+            msg = f"el lienzo split_screen exige dimensiones pares, no {self.width}x{self.height}"
+            raise ValueError(msg)
+        if self.width * _SPLIT_ASPECT_H != self.height * _SPLIT_ASPECT_W:
+            msg = f"el lienzo split_screen exige aspecto 9:16, no {self.width}x{self.height}"
+            raise ValueError(msg)
+        if self.gap % _SPLIT_EVEN_PX != 0:
+            msg = f"el gap split_screen exige píxeles pares, no {self.gap}"
+            raise ValueError(msg)
+        if not self.gap < self.height:
+            msg = f"el gap ({self.gap}) no puede cubrir el alto ({self.height})"
+            raise ValueError(msg)
+        top, bottom = self.panel_heights()
+        if top < _SPLIT_MIN_PANEL_PX or bottom < _SPLIT_MIN_PANEL_PX:
+            msg = f"los paneles split_screen son inviables: superior={top} px, inferior={bottom} px"
+            raise ValueError(msg)
+        return self
+
+
 class LyricConfig(ContractBase):
     """Configuración de video de letras (format lyric_video)."""
 
@@ -372,6 +438,7 @@ class Contract(ContractBase):
     unmapped: tuple[UnmappedRule, ...] = ()
     timestamp_ranges: tuple[TimestampRange, ...] = ()
     lyric_video: LyricConfig | None = None
+    split_screen: SplitScreenConfig | None = None
     rules: RuleSet
     assets: AssetBundle
     segments: tuple[Segment, ...] = ()
@@ -604,21 +671,33 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         _ = dump.pop("brand_safety_citation", None)
     if not contract.timestamp_ranges:
         _ = dump.pop("timestamp_ranges", None)
-    if contract.lyric_video is None:
-        _ = dump.pop("lyric_video", None)
+    _prune_unset_media_options(contract, dump)
     _prune_default_watermark_options(dump)
 
 
 _DEFAULT_WATERMARK_JSON: dict[str, object] = Watermark(
     required=False, visible_full_video=False
 ).model_dump(mode="json")
-
 _WATERMARK_TUNABLE_KEYS: tuple[str, ...] = (
     "position",
     "scale_ratio",
     "opacity",
     "min_width_ratio",
 )
+
+
+def _prune_unset_media_options(contract: Contract, dump: dict[str, object]) -> None:
+    """Elimina del dump los bloques multimedia no declarados.
+
+    Args:
+        contract: Contrato validado que indica los opcionales declarados.
+        dump: Volcado JSON del contrato cuyo digest se va a calcular; se
+            modifica en sitio.
+    """
+    if contract.lyric_video is None:
+        _ = dump.pop("lyric_video", None)
+    if contract.split_screen is None:
+        _ = dump.pop("split_screen", None)
 
 
 def _prune_default_watermark_options(dump: dict[str, object]) -> None:
