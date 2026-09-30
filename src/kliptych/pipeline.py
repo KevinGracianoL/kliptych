@@ -21,6 +21,7 @@ from kliptych.config import Settings
 from kliptych.contract import (
     Contract,
     ContractDraft,
+    Format,
     Mode,
     Watermark,
     contract_digest,
@@ -36,6 +37,12 @@ from kliptych.gate.brand_safety import (
 )
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.hashing import brief_key, sha256_file
+from kliptych.lyrics import (
+    LyricsError,
+    lyric_lines_to_subtitle_segments,
+    lyric_lines_to_subtitle_text,
+    resolve_synced_lyrics,
+)
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
 from kliptych.resolver import (
     IssueCode,
@@ -329,6 +336,39 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
     )
 
 
+def _resolve_piece_subtitles(
+    context: _RunContext,
+    contract: Contract,
+    asset_id: str,
+) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    subtitle_texts = context.request.subtitle_texts or {}
+    subtitle_segments = context.request.subtitle_segments or {}
+    sub_segments = tuple(subtitle_segments.get(asset_id, ()))
+    sub_text = subtitle_texts.get(asset_id)
+    if contract.format is Format.LYRIC_VIDEO:
+        try:
+            lines = resolve_synced_lyrics(contract=contract, registry=context.registry)
+            if not sub_segments:
+                sub_segments = lyric_lines_to_subtitle_segments(lines)
+            if sub_text is None:
+                sub_text = lyric_lines_to_subtitle_text(lines)
+        except (LyricsError, OSError):
+            pass
+    if not sub_segments:
+        sub_segments = hydrate_piece_subtitle_segments(
+            transcript=None,
+            segment=None,
+            work_dir=context.run_dir,
+        )
+    if sub_text is None:
+        sub_text = hydrate_piece_subtitle_text(
+            transcript=None,
+            segment=None,
+            work_dir=context.run_dir,
+        )
+    return sub_text, sub_segments
+
+
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
@@ -338,8 +378,6 @@ def _assemble_pieces(
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
     watermark_config = contract.watermark if watermark is not None else None
-    subtitle_texts = context.request.subtitle_texts or {}
-    subtitle_segments = context.request.subtitle_segments or {}
     mute_audio = contract_mutes_audio(contract)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
@@ -358,20 +396,7 @@ def _assemble_pieces(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
             )
-            sub_segments = tuple(subtitle_segments.get(asset.asset_id, ()))
-            if not sub_segments:
-                sub_segments = hydrate_piece_subtitle_segments(
-                    transcript=None,
-                    segment=None,
-                    work_dir=context.run_dir,
-                )
-            sub_text = subtitle_texts.get(asset.asset_id)
-            if sub_text is None:
-                sub_text = hydrate_piece_subtitle_text(
-                    transcript=None,
-                    segment=None,
-                    work_dir=context.run_dir,
-                )
+            sub_text, sub_segments = _resolve_piece_subtitles(context, contract, asset.asset_id)
             piece = Piece(
                 piece_id=asset.asset_id,
                 platform=platform,

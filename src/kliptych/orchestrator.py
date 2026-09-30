@@ -40,6 +40,7 @@ from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
+from kliptych.assets import AssetError, AssetRegistry
 from kliptych.contract import (
     Contract,
     Format,
@@ -215,6 +216,7 @@ class PipelineConfig:
     watermark_path: Path | None = None
     lrc_path: Path | None = None
     synced_lyrics_provider: SyncedLyricsProvider | None = None
+    assets: AssetRegistry | None = None
 
     def __post_init__(self) -> None:
         """Valida la proporción de mezcla de la pista externa.
@@ -476,9 +478,21 @@ def _lyric_signature(config: PipelineConfig) -> dict[str, object] | None:
     if config.contract.format is not Format.LYRIC_VIDEO and config.contract.lyric_video is None:
         return None
 
+    lrc_file_path: Path | None = config.lrc_path
+    if (
+        lrc_file_path is None
+        and config.contract.lyric_video is not None
+        and config.contract.lyric_video.lrc_asset_id
+        and config.assets is not None
+    ):
+        try:
+            lrc_file_path = config.assets.path_for(config.contract.lyric_video.lrc_asset_id)
+        except (AssetError, OSError):
+            lrc_file_path = None
+
     lrc_sha = None
-    if config.lrc_path is not None and config.lrc_path.is_file():
-        lrc_sha = sha256_file(config.lrc_path)
+    if lrc_file_path is not None and lrc_file_path.is_file():
+        lrc_sha = sha256_file(lrc_file_path)
 
     return {
         "format": config.contract.format.value,
@@ -487,7 +501,7 @@ def _lyric_signature(config: PipelineConfig) -> dict[str, object] | None:
             if config.contract.lyric_video is not None
             else None
         ),
-        "lrc_file": _file_signature(config.lrc_path),
+        "lrc_file": _file_signature(lrc_file_path),
         "lrc_sha256": lrc_sha,
     }
 
@@ -2685,7 +2699,10 @@ def _fetch_lrclib_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
 
 
 def _resolve_pipeline_lyric_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
-    if config.lrc_path is not None and config.lrc_path.is_file():
+    if config.lrc_path is not None:
+        if not config.lrc_path.is_file():
+            msg = f"el archivo .lrc especificado no existe: '{config.lrc_path}'"
+            raise PipelineError(msg)
         try:
             content = config.lrc_path.read_text(encoding="utf-8")
             return parse_lrc(content)
@@ -2693,7 +2710,34 @@ def _resolve_pipeline_lyric_lines(config: PipelineConfig) -> tuple[LyricLine, ..
             msg = f"no se pudo procesar el archivo .lrc en '{config.lrc_path}': {error}"
             raise PipelineError(msg) from error
 
-    if config.contract.lyric_video is not None:
+    lyric_config = config.contract.lyric_video
+    if lyric_config is not None and lyric_config.lrc_asset_id:
+        if config.assets is None:
+            msg = (
+                f"no se puede resolver el asset de letras '{lyric_config.lrc_asset_id}': "
+                "no hay AssetRegistry configurado"
+            )
+            raise PipelineError(msg)
+        try:
+            intact = config.assets.verify(lyric_config.lrc_asset_id)
+        except (AssetError, OSError) as error:
+            msg = f"error al verificar el asset de letras '{lyric_config.lrc_asset_id}': {error}"
+            raise PipelineError(msg) from error
+        if not intact:
+            msg = (
+                f"asset de letras '{lyric_config.lrc_asset_id}' "
+                "ausente o con integridad comprometida"
+            )
+            raise PipelineError(msg)
+        try:
+            lrc_path = config.assets.path_for(lyric_config.lrc_asset_id)
+            content = lrc_path.read_text(encoding="utf-8")
+            return parse_lrc(content)
+        except (AssetError, OSError, ValueError) as error:
+            msg = f"no se pudo procesar el asset .lrc '{lyric_config.lrc_asset_id}': {error}"
+            raise PipelineError(msg) from error
+
+    if lyric_config is not None:
         return _fetch_lrclib_lines(config)
 
     msg = "formato lyric_video sin archivo ni configuración de letras .lrc"

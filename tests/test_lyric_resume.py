@@ -11,6 +11,7 @@ Valida:
 
 from pathlib import Path
 
+from kliptych.assets import AssetRegistry
 from kliptych.contract import Format, LyricConfig
 from kliptych.encoding import RenderConfig
 from kliptych.gate.models import SubtitleSegment
@@ -112,3 +113,34 @@ def test_resume_hydrates_subtitle_segments_and_text_from_persisted_ass(tmp_path:
     assert len(segments) == 2
     assert segments[0] == SubtitleSegment(text="Primera línea", start_s=1.0, end_s=4.0)
     assert segments[1] == SubtitleSegment(text="Segunda línea", start_s=4.0, end_s=8.0)
+
+
+def test_lrc_asset_id_content_change_invalidates_fingerprint(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    lrc_file = workspace / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello world\n", encoding="utf-8")
+
+    registry = AssetRegistry(workspace)
+    _ = registry.register(
+        asset_id="song",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song"),
+    )
+    config_before = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=contract,
+        render=RenderConfig(),
+        assets=registry,
+    )
+    fp_before = compute_long_video_fingerprint(_URL, config=config_before)
+
+    _ = lrc_file.write_text("[00:00.00]hello modified world\n", encoding="utf-8")
+    fp_after = compute_long_video_fingerprint(_URL, config=config_before)
+
+    assert fp_before != fp_after

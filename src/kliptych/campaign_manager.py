@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from kliptych.campaign_types import CampaignStatus
+from kliptych.contract.enums import Format
 from kliptych.gate.brand_safety import (
     ChatJsonModel,
     make_brand_safety_validator,
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from kliptych.campaign_types import Campaign
     from kliptych.contract import Contract, Platform, PlatformRules
     from kliptych.exporter import DeliveryReport
-    from kliptych.gate import Gate, Piece
+    from kliptych.gate import Gate, Piece, SubtitleSegment
     from kliptych.git_proposals import ProposalEngine, PullRequest
     from kliptych.intelligence import ArchetypeClassification, CampaignClassifier
     from kliptych.orchestrator import PipelineResult, SlideshowResult
@@ -393,6 +394,7 @@ class CampaignManager:
             subtitle_sources=(
                 _subtitle_sources(pipeline_result) if pipeline_result is not None else None
             ),
+            assets=reg,
         )
         delivery_report = export_delivery(
             contract=contract,
@@ -473,6 +475,7 @@ class CampaignManager:
             repost_mode=repost_mode,
             audio_track_path=audio_track_path,
             audio_track_url=audio_track_url,
+            assets=self._assets,
         )
 
     def _run_slideshow(
@@ -554,6 +557,26 @@ def _subtitle_sources(result: PipelineResult) -> PieceSubtitleSources:
     )
 
 
+def _resolve_lyric_subtitles(
+    contract: Contract,
+    assets: AssetRegistry | None,
+) -> tuple[str | None, tuple[SubtitleSegment, ...]]:
+    if contract.format is not Format.LYRIC_VIDEO or assets is None:
+        return None, ()
+    from kliptych.lyrics import (
+        LyricsError,
+        lyric_lines_to_subtitle_segments,
+        lyric_lines_to_subtitle_text,
+        resolve_synced_lyrics,
+    )
+
+    try:
+        lines = resolve_synced_lyrics(contract=contract, registry=assets)
+        return lyric_lines_to_subtitle_text(lines), lyric_lines_to_subtitle_segments(lines)
+    except (LyricsError, OSError):
+        return None, ()
+
+
 def _build_pieces(
     *,
     campaign: Campaign,
@@ -564,6 +587,7 @@ def _build_pieces(
     hashtags: Sequence[str],
     platform: Platform | None,
     subtitle_sources: PieceSubtitleSources | None = None,
+    assets: AssetRegistry | None = None,
 ) -> list[Piece]:
     from kliptych.gate.models import Piece
 
@@ -579,12 +603,17 @@ def _build_pieces(
     multiple_platforms = len(platforms) > 1
     multiple_videos = len(videos) > 1
     pieces: list[Piece] = []
+    lyric_text, lyric_segs = _resolve_lyric_subtitles(contract, assets)
     for vid_idx, video in enumerate(videos):
         index_for_id = vid_idx if multiple_videos else None
         subtitle_text = piece_subtitle_text(subtitle_sources, index=vid_idx, total=len(videos))
+        if subtitle_text is None:
+            subtitle_text = lyric_text
         subtitle_segments = piece_subtitle_segments(
             subtitle_sources, index=vid_idx, total=len(videos)
         )
+        if not subtitle_segments:
+            subtitle_segments = lyric_segs
         for plat in platforms:
             plat_rules = contract.platforms[plat]
             piece_caption = _piece_caption(campaign.brief, plat_rules, caption)

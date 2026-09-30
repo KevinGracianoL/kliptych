@@ -15,11 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from kliptych.assets import AssetRegistry
 from kliptych.contract import Format, LyricConfig, Segment
 from kliptych.encoding import RenderConfig
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.orchestrator import (
     PipelineConfig,
+    PipelineError,
     run_long_video,
 )
 from tests.support import make_contract
@@ -166,3 +168,116 @@ def test_lyric_video_renders_and_resumes_with_ffmpeg(
     # Verificar que el nuevo .ass contiene la nueva letra
     new_ass = (out_dir / "subtitles.ass").read_text(encoding="utf-8")
     assert "Letra cambiada completamente" in new_ass
+
+
+def test_lyric_video_resolves_lrc_from_asset_id_and_burns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _generate_synthetic_video(tmp_path / "source.mp4", duration=2)
+    _install_fixture_downloader(monkeypatch, source)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    song_file = workspace / "song.lrc"
+    _ = song_file.write_text("[00:00.00]hello world\n", encoding="utf-8")
+
+    registry = AssetRegistry(workspace)
+    _ = registry.register(
+        asset_id="song",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    out_dir = tmp_path / "out"
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song"),
+    )
+    contract = contract.model_copy(update={"segments": (Segment(start_s=0.0, end_s=2.0),)})
+
+    class _FailIfCalledLrclib:
+        @staticmethod
+        def get_synced_lyrics(
+            *,
+            track_name: str,
+            artist_name: str | None = None,
+            album_name: str | None = None,
+            duration_s: float | None = None,
+        ) -> str:
+            _ = (track_name, artist_name, album_name, duration_s)
+            msg = "lrclib provider no debe ser invocado"
+            raise RuntimeError(msg)
+
+    render = RenderConfig(nvenc_available=False)
+    config = PipelineConfig(
+        output_dir=out_dir,
+        contract=contract,
+        render=render,
+        repost_mode=True,
+        synced_lyrics_provider=_FailIfCalledLrclib(),
+        assets=registry,
+    )
+
+    result = run_long_video(
+        _VIDEO_URL,
+        model=_DummyModel(),
+        config=config,
+    )
+    assert (out_dir / "final.mp4").is_file()
+    assert (out_dir / "subtitles.ass").is_file()
+    assert result.subtitles is not None
+    ass_text = result.subtitles.read_text(encoding="utf-8")
+    assert "hello world" in ass_text
+
+
+def test_lyric_video_missing_lrc_asset_raises_pipeline_error_without_fallback_to_lrclib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _generate_synthetic_video(tmp_path / "source.mp4", duration=2)
+    _install_fixture_downloader(monkeypatch, source)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = AssetRegistry(workspace)
+
+    out_dir = tmp_path / "out"
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(
+            lrc_asset_id="missing_song",
+            track_name="Some Track",
+            lrclib_enabled=True,
+        ),
+    )
+    contract = contract.model_copy(update={"segments": (Segment(start_s=0.0, end_s=2.0),)})
+
+    class _FailIfCalledLrclib:
+        @staticmethod
+        def get_synced_lyrics(
+            *,
+            track_name: str,
+            artist_name: str | None = None,
+            album_name: str | None = None,
+            duration_s: float | None = None,
+        ) -> str:
+            _ = (track_name, artist_name, album_name, duration_s)
+            msg = "lrclib provider no debe ser invocado cuando lrc_asset_id está ausente"
+            raise RuntimeError(msg)
+
+    render = RenderConfig(nvenc_available=False)
+    config = PipelineConfig(
+        output_dir=out_dir,
+        contract=contract,
+        render=render,
+        repost_mode=True,
+        synced_lyrics_provider=_FailIfCalledLrclib(),
+        assets=registry,
+    )
+
+    with pytest.raises(PipelineError):
+        _ = run_long_video(
+            _VIDEO_URL,
+            model=_DummyModel(),
+            config=config,
+        )
