@@ -125,6 +125,11 @@ class PipelineResult:
             en modo repost, que no genera subtítulos.
         final_video: Vídeo vertical final con subtítulos quemados.
         cleaning: Rutas de los temporales eliminados al terminar.
+        source_offset_sec: Inicio absoluto (en segundos del vídeo original) de
+            la ventana quirúrgica descargada; ``0.0`` sin
+            ``timestamp_ranges``. Los segmentos de la selección son relativos
+            a la descarga y el recorte del ``.lrc`` suma este desplazamiento
+            para usar coordenadas absolutas.
     """
 
     source: Path
@@ -136,6 +141,7 @@ class PipelineResult:
     final_video: Path
     cleaning: tuple[str, ...]
     final_videos: tuple[Path, ...] = ()
+    source_offset_sec: float = 0.0
 
     def __post_init__(self) -> None:
         """Inicializa final_videos con final_video si no se proporcionó."""
@@ -1693,6 +1699,7 @@ def _resolve_subtitle_file(
     config: PipelineConfig,
     registry: _CleanupRegistry,
     subtitles_name: str,
+    source_offset_sec: float = 0.0,
 ) -> Path:
     if is_lyric:
         return _write_lyric_subtitles(
@@ -1701,6 +1708,7 @@ def _resolve_subtitle_file(
             output_dir=config.output_dir,
             registry=registry,
             subtitles_name=subtitles_name,
+            source_offset_sec=source_offset_sec,
         )
     if transcript is None:
         msg = "no hay transcripción para generar subtítulos"
@@ -1727,6 +1735,7 @@ def _resolve_subtitles_and_burn_stage(
     resume: bool = False,
     suffix: str = "",
     is_primary: bool = True,
+    source_offset_sec: float = 0.0,
 ) -> tuple[Path | None, Path]:
     final_name = f"final{suffix}.mp4"
     subtitles_name = f"subtitles{suffix}.ass"
@@ -1762,6 +1771,7 @@ def _resolve_subtitles_and_burn_stage(
             config=config,
             registry=registry,
             subtitles_name=subtitles_name,
+            source_offset_sec=source_offset_sec,
         )
         final = _burn(
             video,
@@ -1793,6 +1803,7 @@ def _render_segment(
     resume: bool,
     suffix: str,
     is_primary: bool,
+    source_offset_sec: float = 0.0,
 ) -> tuple[ReframeResult | None, Path | None, Path]:
     clip = _resolve_clip(
         source,
@@ -1835,6 +1846,7 @@ def _render_segment(
         resume=resume,
         suffix=suffix,
         is_primary=is_primary,
+        source_offset_sec=source_offset_sec,
     )
     return reframe, subtitles, final_video
 
@@ -1968,6 +1980,7 @@ def _render_all_segments(
     registry: _CleanupRegistry,
     state: PipelineStateManager,
     effective_resume: bool,
+    source_offset_sec: float = 0.0,
 ) -> tuple[ReframeResult | None, Path | None, tuple[Path, ...]]:
     _ = _primary_segment(selection)
     total_segments = len(selection.segments)
@@ -1996,6 +2009,7 @@ def _render_all_segments(
             resume=effective_resume and coords_match,
             suffix=suffix,
             is_primary=(idx == 0),
+            source_offset_sec=source_offset_sec,
         )
         if idx == 0:
             primary_reframe = reframe
@@ -2037,6 +2051,7 @@ def _run_stages(
     )
     _clean_leftover_segments(config.output_dir, len(selection.segments))
     _normalize_final_artifacts(config.output_dir, len(selection.segments))
+    source_offset_sec = _source_time_offset_sec(config)
     reframe, subtitles, final_videos = _render_all_segments(
         source,
         selection,
@@ -2046,6 +2061,7 @@ def _run_stages(
         registry=registry,
         state=state,
         effective_resume=effective_resume,
+        source_offset_sec=source_offset_sec,
     )
 
     return PipelineResult(
@@ -2058,6 +2074,7 @@ def _run_stages(
         final_video=final_videos[0],
         cleaning=(),
         final_videos=final_videos,
+        source_offset_sec=source_offset_sec,
     )
 
 
@@ -2751,13 +2768,20 @@ def _write_lyric_subtitles(
     output_dir: Path,
     registry: _CleanupRegistry,
     subtitles_name: str = "subtitles.ass",
+    source_offset_sec: float = 0.0,
 ) -> Path:
     raw_lines = _resolve_pipeline_lyric_lines(config)
+    # El segmento es relativo a la descarga quirúrgica (que arranca en 0.0 s);
+    # el .lrc vive en coordenadas absolutas del vídeo original, así que el
+    # recorte suma el desplazamiento. cut_lyric_window desplaza el resultado
+    # a 0.0 s: el .ass quemado queda relativo al inicio del clip.
+    absolute_start = segment.start_s + source_offset_sec
+    absolute_end = segment.end_s + source_offset_sec
     try:
         window_lines = cut_lyric_window(
             raw_lines,
-            start_sec=segment.start_s,
-            end_sec=segment.end_s,
+            start_sec=absolute_start,
+            end_sec=absolute_end,
         )
     except (LrcEmptyWindowError, ValueError) as err:
         raise PipelineError(str(err)) from err

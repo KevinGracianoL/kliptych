@@ -481,25 +481,36 @@ class _LyricClipState:
         return self.end_sec - self.start_sec
 
 
-def _prepare_lyric_clip(context: _RunContext, contract: Contract) -> _LyricClipState:
+def _prepare_lyric_clip(
+    context: _RunContext, contract: Contract, *, source_offset_sec: float = 0.0
+) -> _LyricClipState:
     """Resuelve y recorta una sola vez la letra del clip given_clips.
 
     Args:
         context: Estado y dependencias de la corrida ya preparada.
         contract: Contrato validado de la corrida.
+        source_offset_sec: Desplazamiento absoluto de la descarga quirúrgica;
+            en given_clips los clips llegan ya cortados y siempre es ``0.0``.
 
     Returns:
-        La ventana temporal y las líneas recortadas (o ``None`` sin letras,
-        con el gate fallando en cerrado).
+        La ventana temporal absoluta y las líneas recortadas (o ``None`` sin
+        letras, con el gate fallando en cerrado).
     """
     start_sec, end_sec = _clip_window(contract)
     source_lines = _resolve_lyric_source_lines(context, contract)
+    if start_sec is not None and end_sec is not None:
+        absolute_start = start_sec + source_offset_sec
+        absolute_end = end_sec + source_offset_sec
+    else:
+        absolute_start, absolute_end = start_sec, end_sec
     lines = (
-        _cut_lyric_window_lines(source_lines, start_sec=start_sec, end_sec=end_sec)
+        _cut_lyric_window_lines(
+            source_lines, start_sec=absolute_start, end_sec=absolute_end
+        )
         if source_lines is not None
         else None
     )
-    return _LyricClipState(start_sec=start_sec, end_sec=end_sec, lines=lines)
+    return _LyricClipState(start_sec=absolute_start, end_sec=absolute_end, lines=lines)
 
 
 def _assemble_pieces(
@@ -512,7 +523,9 @@ def _assemble_pieces(
     watermark = _watermark_path(contract, context.registry)
     watermark_config = contract.watermark if watermark is not None else None
     mute_audio = contract_mutes_audio(contract)
-    lyric = _prepare_lyric_clip(context, contract)
+    # given_clips no hace descarga quirúrgica: los clips llegan ya cortados y
+    # la ventana del contrato ya está en coordenadas del clip (offset 0.0).
+    lyric = _prepare_lyric_clip(context, contract, source_offset_sec=0.0)
     for platform in sorted(contract.platforms, key=lambda item: item.value):
         for asset in contract.assets.required:
             if asset.kind != _VIDEO_KIND:

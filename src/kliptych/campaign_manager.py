@@ -556,6 +556,7 @@ def _subtitle_sources(result: PipelineResult) -> PieceSubtitleSources:
         segments=tuple(result.selection.segments),
         subtitles_path=result.subtitles,
         work_dir=result.source.parent,
+        source_offset_sec=result.source_offset_sec,
     )
 
 
@@ -565,11 +566,14 @@ def _piece_window(
     *,
     index: int,
 ) -> tuple[float | None, float | None]:
-    """Deriva la ventana temporal de la pieza i-ésima de un lote.
+    """Deriva la ventana temporal absoluta de la pieza i-ésima de un lote.
 
-    El segmento de la selección manda (es lo que se renderizó); con un único
-    rango temporal declarado se usa ese; sin ventana asignable se devuelve
-    ``(None, None)`` y el gate decide en cerrado.
+    El segmento de la selección manda (es lo que se renderizó); con descarga
+    quirúrgica los segmentos son relativos a la descarga (que arranca en
+    0.0 s) y la ventana suma ``source_offset_sec`` para quedar en coordenadas
+    absolutas del vídeo original, que es lo que el gate usa para recortar el
+    ``.lrc``. Con un único rango temporal declarado se usa ese; sin ventana
+    asignable se devuelve ``(None, None)`` y el gate decide en cerrado.
 
     Args:
         contract: Contrato de la campaña con sus rangos temporales.
@@ -577,11 +581,12 @@ def _piece_window(
         index: Índice del video final dentro del lote.
 
     Returns:
-        El par ``(start_sec, end_sec)`` de la pieza, o ``(None, None)``.
+        El par ``(start_sec, end_sec)`` absoluto de la pieza, o ``(None, None)``.
     """
     if sources is not None and 0 <= index < len(sources.segments):
         segment = sources.segments[index]
-        return segment.start_s, segment.end_s
+        offset = sources.source_offset_sec
+        return segment.start_s + offset, segment.end_s + offset
     if len(contract.timestamp_ranges) == 1:
         single = contract.timestamp_ranges[0]
         return single.start_sec, single.end_sec

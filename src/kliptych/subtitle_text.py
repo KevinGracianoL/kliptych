@@ -44,12 +44,17 @@ class PieceSubtitleSources:
         subtitles_path: ``.ass`` primario del pipeline (``None`` si no existe).
         work_dir: Directorio de trabajo con ``transcript.json`` y
             ``subtitles[.ass|_NN.ass]`` persistidos para ``--resume``.
+        source_offset_sec: Inicio absoluto (en segundos del vídeo original)
+            de la ventana quirúrgica descargada; los segmentos son relativos
+            a la descarga y la ventana de la pieza suma este desplazamiento
+            para recortar el ``.lrc`` en coordenadas absolutas.
     """
 
     transcript: Transcript | None = None
     segments: tuple[Segment, ...] = ()
     subtitles_path: Path | None = None
     work_dir: Path | None = None
+    source_offset_sec: float = 0.0
 
 
 def segment_subtitle_text(transcript: Transcript, segment: Segment) -> str | None:
