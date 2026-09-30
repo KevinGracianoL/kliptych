@@ -212,10 +212,6 @@ ignore = [
     # run_given_clips delega el ensamblado y la exportación; PipelineError se
     # lanza en el helper _resolved y la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
-    # PieceAssembler.assemble/render_arguments exponen la superficie de render
-    # (watermark, subtitles, mute_audio) como keyword-only; igual que
-    # FFmpegAssembler en src/kliptych/assembler.py.
-    "too-many-arguments",
 ]
 "src/kliptych/runtime/openai_compatible.py" = [
     # extract_contract/write_caption delegan en _complete, que es quien lanza

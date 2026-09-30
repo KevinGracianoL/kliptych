@@ -11,10 +11,10 @@ from typing import cast, override
 import pytest
 
 from kliptych.__main__ import main
-from kliptych.assembler import AssembleError, FFmpegAssembler
+from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft, Watermark
+from kliptych.contract import Contract, ContractDraft
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportError, ExportStatus
 from kliptych.gate import Gate
@@ -157,37 +157,18 @@ class _StubAssembler(PieceAssembler):
         self.subtitles: list[Path | None] = []
 
     @override
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> Path:
-        _ = clip
-        self.watermarks.append(watermark)
-        self.mutes.append(mute_audio)
-        self.subtitles.append(subtitles)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _ = destination.write_bytes(b"video")
-        return destination
+    def assemble(self, spec: RenderSpec) -> Path:
+        self.watermarks.append(spec.watermark)
+        self.mutes.append(spec.mute_audio)
+        self.subtitles.append(spec.subtitles)
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = spec.destination.write_bytes(b"video")
+        return spec.destination
 
     @override
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
-        _ = (watermark, watermark_config, subtitles, mute_audio)
-        return ("ffmpeg", str(clip), str(destination))
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
+        _ = (spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)
+        return ("ffmpeg", str(spec.clip), str(spec.destination))
 
 
 def _caption() -> Caption:
@@ -263,9 +244,10 @@ def test_pipeline_exports_pass_package(tmp_path: Path) -> None:
     outputs = cast("list[dict[str, object]]", manifest["outputs"])
     assert outputs[0]["sha256"] == metadata["artifact_sha256"]
     recipe = FFmpegAssembler().render_arguments(
-        clip=tmp_path / "assets" / "samples" / "given-clips-sample.mp4",
-        destination=Path(result.manifest_path).parent / "artifacts" / "tiktok" / "clip-01.mp4",
-        watermark=None,
+        RenderSpec(
+            clip=tmp_path / "assets" / "samples" / "given-clips-sample.mp4",
+            destination=Path(result.manifest_path).parent / "artifacts" / "tiktok" / "clip-01.mp4",
+        )
     )
     assert outputs[0]["render_arguments"] == list(recipe)
 

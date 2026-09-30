@@ -12,7 +12,8 @@ from typing import cast, override
 import pytest
 
 from kliptych.__main__ import main
-from kliptych.contract import Contract, Watermark
+from kliptych.assembler import RenderSpec
+from kliptych.contract import Contract
 from kliptych.contract.draft import ContractDraft
 from kliptych.gate import Gate
 from kliptych.pipeline import PieceAssembler
@@ -44,33 +45,15 @@ class _CopyAssembler(PieceAssembler):
     """Ensamblador que copia los bytes del clip al artefacto."""
 
     @override
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> Path:
-        _ = (watermark, watermark_config, subtitles, mute_audio)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _ = destination.write_bytes(clip.read_bytes())
-        return destination
+    def assemble(self, spec: RenderSpec) -> Path:
+        _ = (spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = spec.destination.write_bytes(spec.clip.read_bytes())
+        return spec.destination
 
     @override
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
-        _ = (clip, destination, watermark, watermark_config, subtitles, mute_audio)
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
+        _ = spec
         return ("cp",)
 
 

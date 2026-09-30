@@ -16,7 +16,7 @@ from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kliptych.assembler import FFmpegAssembler
+from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetNotFoundError, AssetRegistry
 from kliptych.config import Settings
 from kliptych.contract import (
@@ -24,7 +24,6 @@ from kliptych.contract import (
     ContractDraft,
     Format,
     Mode,
-    Watermark,
     contract_digest,
     contract_mutes_audio,
 )
@@ -99,29 +98,11 @@ class RunResult(BaseModel):
 class PieceAssembler(Protocol):
     """Ensambla el clip entregado en el artefacto final de la pieza."""
 
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> Path:
+    def assemble(self, spec: RenderSpec) -> Path:
         """Ensambla el clip y devuelve la ruta del artefacto."""
         ...
 
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
         """Devuelve la receta de render que se registra en el manifiesto."""
         ...
 
@@ -525,12 +506,15 @@ def _builder_supports_subtitles(builder: PieceAssembler) -> bool:
         builder: Ensamblador inyectado de la corrida.
 
     Returns:
-        True si su firma de ``assemble`` declara el parámetro ``subtitles``.
+        True si su firma de ``assemble`` declara ``spec`` (RenderSpec, que
+        incluye subtítulos) o el parámetro ``subtitles`` legacy.
     """
     try:
         parameters = inspect.signature(builder.assemble).parameters
     except (TypeError, ValueError):
         return False
+    if "spec" in parameters:
+        return True
     return "subtitles" in parameters
 
 
@@ -600,15 +584,15 @@ def _assemble_pieces(
                 continue
             clip = context.registry.path_for(asset.asset_id)
             artifact = context.run_dir / "artifacts" / platform.value / f"{asset.asset_id}.mp4"
-            subtitles_path = _resolve_assemble_subtitles(context, contract, lyric, artifact)
-            _ = context.builder.assemble(
+            spec = RenderSpec(
                 clip=clip,
                 destination=artifact,
                 watermark=watermark,
                 watermark_config=watermark_config,
-                subtitles=subtitles_path,
+                subtitles=_resolve_assemble_subtitles(context, contract, lyric, artifact),
                 mute_audio=mute_audio,
             )
+            _ = context.builder.assemble(spec)
             caption = context.model.write_caption(
                 contract,
                 PieceContext(piece_id=asset.asset_id, platform=platform),
@@ -626,7 +610,7 @@ def _assemble_pieces(
                 artifact_path=artifact,
                 start_sec=lyric.start_sec,
                 end_sec=lyric.end_sec,
-                ass_path=subtitles_path,
+                ass_path=spec.subtitles,
             )
             pieces.append(piece)
             gates.append(
@@ -637,14 +621,7 @@ def _assemble_pieces(
                     path=artifact.relative_to(context.run_dir).as_posix(),
                     sha256=sha256_file(artifact),
                     size_bytes=artifact.stat().st_size,
-                    render_arguments=context.builder.render_arguments(
-                        clip=clip,
-                        destination=artifact,
-                        watermark=watermark,
-                        watermark_config=watermark_config,
-                        subtitles=subtitles_path,
-                        mute_audio=mute_audio,
-                    ),
+                    render_arguments=context.builder.render_arguments(spec),
                 )
             )
     return pieces, gates, outputs

@@ -14,11 +14,12 @@ from typing import NoReturn, cast, override
 
 import pytest
 
+from kliptych.assembler import RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft, Segment, Watermark
+from kliptych.contract import Contract, ContractDraft, Segment
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportStatus
 from kliptych.gate import (
@@ -269,35 +270,17 @@ class _StubAssembler:
         self.assembled: list[Path] = []
         self.rendered: list[Path] = []
 
-    def assemble(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> Path:
-        _ = (clip, watermark, watermark_config, subtitles, mute_audio)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _ = destination.write_bytes(b"video")
-        self.assembled.append(destination)
-        return destination
+    def assemble(self, spec: RenderSpec) -> Path:
+        _ = (spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = spec.destination.write_bytes(b"video")
+        self.assembled.append(spec.destination)
+        return spec.destination
 
-    def render_arguments(
-        self,
-        *,
-        clip: Path,
-        destination: Path,
-        watermark: Path | None,
-        watermark_config: Watermark | None = None,
-        subtitles: Path | None = None,
-        mute_audio: bool = False,
-    ) -> tuple[str, ...]:
-        _ = (clip, watermark, watermark_config, subtitles, mute_audio)
-        self.rendered.append(destination)
-        return ("ffmpeg", str(destination))
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
+        _ = (spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)
+        self.rendered.append(spec.destination)
+        return ("ffmpeg", str(spec.destination))
 
 
 def _caption() -> Caption:
