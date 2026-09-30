@@ -65,6 +65,7 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    SplitScreenConfig,
     TimestampRange,
     UnmappedRule,
     Watermark,
@@ -138,6 +139,7 @@ class _RuleContext:
     global_restrictions: GlobalRestrictions
     format_: Format
     brief_text: str | None = None
+    split_screen: SplitScreenConfig | None = None
 
 
 class _ConfidenceCarrier(Protocol):
@@ -1464,6 +1466,8 @@ def _base_rules(context: _RuleContext) -> list[str]:
             if context.global_restrictions.watermark_visible_full_video
             else "watermark.present"
         )
+    if context.split_screen is not None:
+        rules.append("layout.geometry")
     return rules
 
 

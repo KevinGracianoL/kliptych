@@ -405,6 +405,7 @@ KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
         "duration.max",
         "duration.min",
         "hook.keyword",
+        "layout.geometry",
         "subtitles.spelling_lock",
         "watermark.full_video",
         "watermark.present",

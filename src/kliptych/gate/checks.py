@@ -59,10 +59,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import AudioPolicy, AudioRule, Contract, Format
+from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, SplitScreenConfig
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
-from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext, Piece, SubtitleSegment
+from kliptych.gate.models import (
+    CheckOutcome,
+    CheckStatus,
+    GateContext,
+    MediaInfo,
+    Piece,
+    SubtitleSegment,
+)
 from kliptych.gate.text import contains_phrase, normalize_text
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
 from kliptych.lyrics import (
@@ -93,12 +100,15 @@ __all__ = [
     "check_required_hashtags",
     "check_required_mentions",
     "check_spelling_locks",
+    "check_split_screen_geometry",
     "check_video_stream",
     "check_watermark_full_video",
     "check_watermark_present",
 ]
 
 _SILENCE_THRESHOLD_DB = -80.0
+_SPLIT_ASPECT_W = 9
+_SPLIT_ASPECT_H = 16
 _VOLUMEDETECT_TIMEOUT_S = 60.0
 _FFPROBE_TIMEOUT_S = 30.0
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
@@ -414,6 +424,68 @@ def check_video_stream(context: GateContext) -> CheckOutcome:
     if context.media.has_video:
         return _pass(width=context.media.width, height=context.media.height)
     return _fail(has_video=False)
+
+
+def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
+    """Verifica la geometría del lienzo split_screen contra el artefacto.
+
+    El ``MediaInfo`` del contexto sale de la inspección con ffprobe del MP4
+    final: el gate nunca confía en los parámetros del render. Fail-closed:
+    sin configuración declarada, sin probe, sin pista de video o con
+    dimensiones distintas a las del contrato, el resultado es ``fail``.
+
+    Args:
+        context: Contexto resuelto del gate.
+
+    Returns:
+        PASS con las dimensiones y el aspecto 9:16 cuando el artefacto
+        coincide con el ``split_screen`` del contrato; FAIL en cerrado en
+        cualquier otro caso.
+    """
+    split = context.contract.split_screen
+    if split is None:
+        return _fail(reason="la regla 'layout.geometry' exige split_screen en el contrato")
+    media = context.media
+    if media is None:
+        return _fail(reason="no se pudo inspeccionar el artefacto; la geometría no es verificable")
+    if not media.has_video:
+        return _fail(has_video=False, reason="el artefacto no tiene pista de video")
+    return _geometry_outcome(media, split)
+
+
+def _geometry_outcome(media: MediaInfo, split: SplitScreenConfig) -> CheckOutcome:
+    """Compara las dimensiones del artefacto contra el split declarado.
+
+    Args:
+        media: Metadatos del artefacto inspeccionado con ffprobe.
+        split: Geometría del lienzo declarado en el contrato.
+
+    Returns:
+        PASS con las dimensiones y el aspecto 9:16; FAIL en cerrado ante
+        dimensiones ausentes, distintas o fuera del aspecto exigido.
+    """
+    width, height = media.width, media.height
+    if width is None or height is None:
+        return _fail(
+            expected_width=split.width,
+            expected_height=split.height,
+            reason="ffprobe no reportó las dimensiones del video",
+        )
+    if width != split.width or height != split.height:
+        return _fail(
+            expected_width=split.width,
+            expected_height=split.height,
+            width=width,
+            height=height,
+            reason="las dimensiones del artefacto no coinciden con el split_screen",
+        )
+    if width * _SPLIT_ASPECT_H != height * _SPLIT_ASPECT_W:
+        return _fail(
+            width=width,
+            height=height,
+            reason="el lienzo split_screen exige aspecto 9:16",
+        )
+    return _pass(width=width, height=height, aspect_ratio="9:16")
 
 
 def check_required_mentions(context: GateContext) -> CheckOutcome:
@@ -1140,6 +1212,7 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "duration.max": check_duration_max,
     "duration.min": check_duration_min,
     "hook.keyword": check_hook_keyword,
+    "layout.geometry": check_split_screen_geometry,
     "subtitles.spelling_lock": check_spelling_locks,
     "watermark.full_video": check_watermark_full_video,
     "watermark.present": check_watermark_present,

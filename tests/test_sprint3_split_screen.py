@@ -25,8 +25,12 @@ import pytest
 from pydantic import ValidationError
 
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
-from kliptych.contract import Layout, SplitScreenConfig
+from kliptych.assets import AssetRegistry
+from kliptych.contract import Layout, Platform, SplitScreenConfig
+from kliptych.gate import CheckStatus, Gate, GateContext
+from kliptych.gate.checks import check_split_screen_geometry
 from kliptych.gate.probe import FFprobeProbe
+from tests.support import make_contract, make_media, make_piece
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -248,3 +252,150 @@ def test_split_screen_renders_video_plus_image(tmp_path: Path) -> None:
     )
     media = FFprobeProbe(ffprobe=_FFPROBE).probe(destination)
     assert (media.width, media.height) == (1080, 1920)
+
+
+def _split_payload() -> dict[str, object]:
+    return {
+        "top_source": "clip-top",
+        "bottom_source": "clip-bottom",
+        "gap": 0,
+        "panel_ratio": 0.5,
+        "width": 1080,
+        "height": 1920,
+    }
+
+
+def _geometry_context(
+    tmp_path: Path,
+    video: Path,
+    *,
+    width: int | None = 1080,
+    height: int | None = 1920,
+    has_video: bool = True,
+    with_probe: bool = True,
+    with_config: bool = True,
+) -> GateContext:
+    contract = make_contract(
+        hard=["artifact.integrity", "artifact.video_stream"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        split_screen=_split_payload() if with_config else None,
+    )
+    return GateContext(
+        contract=contract,
+        rules=contract.platforms[Platform.TIKTOK],
+        piece=make_piece(video),
+        artifact_sha256="a" * 64,
+        media=make_media(width=width, height=height, has_video=has_video) if with_probe else None,
+        assets=AssetRegistry(tmp_path),
+    )
+
+
+def test_geometry_passes_on_expected_dims(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(_geometry_context(tmp_path, video))
+    assert outcome.status is CheckStatus.PASS
+    assert outcome.evidence["width"] == 1080
+    assert outcome.evidence["height"] == 1920
+
+
+def test_geometry_fails_on_wrong_dims(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=720, height=1280)
+    )
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_geometry_fails_on_square_canvas(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=1080, height=1080)
+    )
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_geometry_fails_without_video(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, has_video=False))
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_geometry_fails_without_probe(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, with_probe=False))
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_geometry_fails_without_config(tmp_path: Path) -> None:
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, with_config=False))
+    assert outcome.status is CheckStatus.FAIL
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_geometry_gate_passes_on_split_artifact(tmp_path: Path) -> None:
+    assert _FFMPEG is not None
+    assert _FFPROBE is not None
+    top = _synth_clip(tmp_path / "top.mp4", "testsrc=s=640x480:r=30")
+    bottom = _synth_clip(tmp_path / "bottom.mp4", "smptebars=s=640x480:r=30")
+    config = SplitScreenConfig(top_source="clip-top", bottom_source="clip-bottom")
+    destination = tmp_path / "split.mp4"
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
+        RenderSpec(
+            clip=top,
+            destination=destination,
+            layout=Layout.SPLIT_SCREEN,
+            split_screen=config,
+            top_clip=top,
+            bottom_clip=bottom,
+        )
+    )
+    contract = make_contract(
+        hard=["artifact.integrity", "artifact.video_stream", "layout.geometry"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        split_screen=_split_payload(),
+    )
+    result = Gate(FFprobeProbe(ffprobe=_FFPROBE)).run(
+        contract=contract,
+        piece=make_piece(destination),
+        assets=AssetRegistry(tmp_path),
+    )
+    outcome = next(check for check in result.checks if check.id == "layout.geometry")
+    assert outcome.status is CheckStatus.PASS
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_geometry_gate_rejects_single_clip_artifact(tmp_path: Path) -> None:
+    assert _FFMPEG is not None
+    assert _FFPROBE is not None
+    clip = _synth_clip(tmp_path / "clip.mp4", "testsrc=s=640x480:r=30")
+    destination = tmp_path / "single.mp4"
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
+        RenderSpec(clip=clip, destination=destination, width=540, height=960)
+    )
+    contract = make_contract(
+        hard=["artifact.integrity", "artifact.video_stream", "layout.geometry"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        split_screen=_split_payload(),
+    )
+    result = Gate(FFprobeProbe(ffprobe=_FFPROBE)).run(
+        contract=contract,
+        piece=make_piece(destination),
+        assets=AssetRegistry(tmp_path),
+    )
+    outcome = next(check for check in result.checks if check.id == "layout.geometry")
+    assert outcome.status is CheckStatus.FAIL

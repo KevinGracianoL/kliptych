@@ -16,6 +16,7 @@ from kliptych.contract import (
     Format,
     LyricConfig,
     Platform,
+    SplitScreenConfig,
     TimestampRange,
 )
 from kliptych.gate import MediaInfo, Piece, ProbeError, SubtitleSegment
@@ -176,6 +177,7 @@ def make_contract(
     brand_safety_citation: str | None = None,
     unmapped: Sequence[tuple[str, str]] = (),
     timestamp_ranges: Sequence[TimestampRange | tuple[float, float] | list[float]] = (),
+    split_screen: dict[str, object] | SplitScreenConfig | None = None,
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
@@ -219,6 +221,9 @@ def make_contract(
     if format_val == "lyric_video" and "subtitles.spelling_lock" not in classified:
         plan.append("subtitles.spelling_lock")
         classified.add("subtitles.spelling_lock")
+    if split_screen is not None and "layout.geometry" not in classified:
+        plan.append("layout.geometry")
+        classified.add("layout.geometry")
     return Contract.model_validate(
         {
             "schema_version": "1.1",
@@ -270,6 +275,11 @@ def make_contract(
                 if isinstance(lyric_video, LyricConfig)
                 else lyric_video
             ),
+            "split_screen": (
+                split_screen.model_dump(mode="json")
+                if isinstance(split_screen, SplitScreenConfig)
+                else split_screen
+            ),
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),
@@ -316,14 +326,16 @@ def make_media(
     duration_s: float | None = 12.0,
     has_video: bool = True,
     has_audio: bool = True,
+    width: int | None = 1080,
+    height: int | None = 1920,
 ) -> MediaInfo:
     return MediaInfo(
         format_name="mov,mp4,m4a",
         duration_s=duration_s,
         has_video=has_video,
         has_audio=has_audio,
-        width=1080,
-        height=1920,
+        width=width,
+        height=height,
     )
 
 
