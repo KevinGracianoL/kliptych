@@ -51,9 +51,10 @@ class _CopyAssembler(PieceAssembler):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (watermark, watermark_config, mute_audio)
+        _ = (watermark, watermark_config, subtitles, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(clip.read_bytes())
         return destination
@@ -66,9 +67,10 @@ class _CopyAssembler(PieceAssembler):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, destination, watermark, watermark_config, mute_audio)
+        _ = (clip, destination, watermark, watermark_config, subtitles, mute_audio)
         return ("cp",)
 
 

@@ -299,9 +299,10 @@ class _StubAssembler:
         watermark_config: object = None,
         width: int = 1080,
         height: int = 1920,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (self, clip, watermark, watermark_config, width, height, mute_audio)
+        _ = (self, clip, watermark, watermark_config, width, height, subtitles, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"assembled")
         return destination

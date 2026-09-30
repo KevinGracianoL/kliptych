@@ -13,6 +13,7 @@ render exitoso reemplaza el destino; un fallo deja intacto el artefacto previo.
 
 import contextlib
 import math
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -59,6 +60,7 @@ class FFmpegAssembler:
         watermark_config: Watermark | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
         """Ensambla un clip entregado en una pieza vertical para el gate.
@@ -77,6 +79,8 @@ class FFmpegAssembler:
                 valor se usa el defecto del contrato (arriba a la derecha).
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
+            subtitles: Archivo ``.ass`` opcional que se quema en el vídeo
+                durante el render (ruta given_clips de lyric_video).
             mute_audio: Si es True, silencia la pista sin eliminarla
                 (``audio_policy=internal_official_sound``).
 
@@ -91,6 +95,8 @@ class FFmpegAssembler:
         _require_file(clip, what="clip")
         if watermark is not None:
             _require_file(watermark, what="watermark")
+        if subtitles is not None:
+            _require_file(subtitles, what="subtítulos")
         if width <= 0 or height <= 0:
             msg = f"dimensiones de lienzo inválidas: {width}x{height}"
             raise AssembleError(msg)
@@ -107,15 +113,30 @@ class FFmpegAssembler:
             watermark_config=watermark_config,
             width=width,
             height=height,
+            subtitles=subtitles,
             mute_audio=mute_audio,
         )
         try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
-                check=False,
+            # Sin subtítulos el contrato de invocación no lleva `cwd`; con
+            # subtítulos ffmpeg corre en el directorio de salida para que el
+            # filtro `subtitles` acepte la ruta relativa del .ass en Windows.
+            completed = (
+                subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_s,
+                    check=False,
+                )
+                if subtitles is None
+                else subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_s,
+                    check=False,
+                    cwd=temporary.parent,
+                )
             )
         except FileNotFoundError as error:
             _remove_quietly(temporary)
@@ -249,6 +270,7 @@ class FFmpegAssembler:
         watermark_config: Watermark | None = None,
         width: int = _DEFAULT_WIDTH,
         height: int = _DEFAULT_HEIGHT,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
         """Devuelve el argv de ffmpeg que se usaría para este ensamblado.
@@ -263,6 +285,7 @@ class FFmpegAssembler:
             watermark_config: Posición, tamaño y opacidad del watermark.
             width: Ancho del lienzo vertical.
             height: Alto del lienzo vertical.
+            subtitles: Archivo ``.ass`` opcional que se quema en el vídeo.
             mute_audio: Si es True, la receta incluye el silenciado de audio.
 
         Returns:
@@ -276,6 +299,7 @@ class FFmpegAssembler:
                 watermark_config=watermark_config,
                 width=width,
                 height=height,
+                subtitles=subtitles,
                 mute_audio=mute_audio,
             )
         )
@@ -289,12 +313,28 @@ class FFmpegAssembler:
         watermark_config: Watermark | None,
         width: int,
         height: int,
+        subtitles: Path | None,
         mute_audio: bool,
     ) -> list[str]:
         square = "scale=trunc(iw*sar/2)*2:ih,setsar=1"
         scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease"
         pad = f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
         base = f"{square},{scale},{pad},setsar=1"
+        if subtitles is None:
+            clip_arg = str(clip)
+            watermark_arg = str(watermark) if watermark is not None else None
+            destination_arg = str(destination)
+            subtitles_suffix = ""
+        else:
+            # ffmpeg corre con cwd en el directorio de salida: las entradas
+            # viajan absolutas y el .ass en ruta relativa, que es lo único
+            # que el parser del filtro `subtitles` acepta en Windows.
+            clip_arg = str(clip.resolve())
+            watermark_arg = str(watermark.resolve()) if watermark is not None else None
+            destination_arg = str(destination.resolve())
+            subtitles_suffix = (
+                f",subtitles=filename='{_subtitles_filter_value(subtitles, destination)}'"
+            )
         argv = [
             self._ffmpeg,
             "-hide_banner",
@@ -303,23 +343,31 @@ class FFmpegAssembler:
             "error",
             "-y",
             "-i",
-            str(clip),
+            clip_arg,
         ]
         if watermark is None:
-            argv += ["-vf", base, "-map", "0:v:0", "-map", "0:a?"]
+            argv += ["-vf", f"{base}{subtitles_suffix}", "-map", "0:v:0", "-map", "0:a?"]
         else:
             config = (
                 watermark_config
                 if watermark_config is not None
                 else Watermark(required=True, visible_full_video=True)
             )
+            graph = _watermark_filter(base, config, canvas_width=width)
+            video_label = "[v]"
+            if subtitles is not None:
+                graph += (
+                    f";{video_label}subtitles=filename='"
+                    f"{_subtitles_filter_value(subtitles, destination)}'[vout]"
+                )
+                video_label = "[vout]"
             argv += [
                 "-i",
-                str(watermark),
+                str(watermark_arg),
                 "-filter_complex",
-                _watermark_filter(base, config, canvas_width=width),
+                graph,
                 "-map",
-                "[v]",
+                video_label,
                 "-map",
                 "0:a?",
             ]
@@ -340,9 +388,31 @@ class FFmpegAssembler:
             "192k",
             "-movflags",
             "+faststart",
-            str(destination),
+            destination_arg,
         ]
         return argv
+
+
+def _subtitles_filter_value(subtitles: Path, output: Path) -> str:
+    """Devuelve la ruta del .ass para el filtro ``subtitles`` de ffmpeg.
+
+    ffmpeg corre con ``cwd`` en el directorio de salida, así que una ruta
+    relativa funciona en Windows donde una absoluta rompe el parser del
+    filtro (misma estrategia que el quemado de ``SubtitleRenderer``).
+
+    Args:
+        subtitles: Ruta del archivo ``.ass`` a quemar.
+        output: Ruta del artefacto de salida (su padre es el cwd de ffmpeg).
+
+    Returns:
+        La ruta relativa en formato POSIX, o la absoluta con ``:`` escapado
+        cuando no se puede relativizar.
+    """
+    try:
+        rel = os.path.relpath(subtitles, start=output.parent)
+    except (ValueError, OSError):
+        return subtitles.as_posix().replace(":", "\\:")
+    return Path(rel).as_posix()
 
 
 def _watermark_filter(base: str, config: Watermark, *, canvas_width: int) -> str:

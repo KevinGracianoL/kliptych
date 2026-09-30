@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+import inspect
 from pathlib import Path
 from typing import ClassVar, Protocol
 
@@ -105,6 +106,7 @@ class PieceAssembler(Protocol):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
         """Ensambla el clip y devuelve la ruta del artefacto."""
@@ -117,6 +119,7 @@ class PieceAssembler(Protocol):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
         """Devuelve la receta de render que se registra en el manifiesto."""
@@ -403,7 +406,10 @@ def _cut_lyric_window_lines(
 def _write_lyric_sidecar(
     artifact: Path, lines: tuple[LyricLine, ...] | None, *, duration_s: float | None
 ) -> Path | None:
-    """Escribe el .ass de la pieza junto al artefacto para el gate.
+    """Escribe el .ass de la pieza junto al artefacto para el gate y el quemado.
+
+    En formato lyric_video se escribe ANTES del ensamblado y se pasa al
+    ensamblador como dependencia obligatoria del render.
 
     Args:
         artifact: Ruta del MP4 final de la pieza.
@@ -418,6 +424,7 @@ def _write_lyric_sidecar(
         return None
     sidecar = artifact.with_suffix(".ass")
     try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         _ = sidecar.write_text(lyric_lines_to_ass(lines, duration_s=duration_s), encoding="utf-8")
     except OSError:
         return None
@@ -513,6 +520,69 @@ def _prepare_lyric_clip(
     return _LyricClipState(start_sec=absolute_start, end_sec=absolute_end, lines=lines)
 
 
+def _builder_supports_subtitles(builder: PieceAssembler) -> bool:
+    """Indica si el ensamblador acepta el .ass para quemar subtítulos.
+
+    Args:
+        builder: Ensamblador inyectado de la corrida.
+
+    Returns:
+        True si su firma de ``assemble`` declara el parámetro ``subtitles``.
+    """
+    try:
+        parameters = inspect.signature(builder.assemble).parameters
+    except (TypeError, ValueError):
+        return False
+    return "subtitles" in parameters
+
+
+def _resolve_assemble_subtitles(
+    context: _RunContext,
+    contract: Contract,
+    lyric: _LyricClipState,
+    artifact: Path,
+) -> Path | None:
+    """Resuelve el .ass obligatorio previo al render para LYRIC_VIDEO.
+
+    En formato lyric_video el .ass se escribe ANTES del ensamblado y se pasa
+    al ensamblador como dependencia obligatoria del render: el MP4 final
+    siempre lleva las letras quemadas y el gate nunca dictamina sobre un
+    sidecar que el vídeo no muestra.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+        lyric: Ventana de letra del clip con sus líneas recortadas.
+        artifact: Ruta del MP4 final de la pieza (el sidecar es su hermano
+            con sufijo ``.ass``).
+
+    Returns:
+        La ruta del .ass para quemar, o ``None`` fuera de lyric_video.
+
+    Raises:
+        PipelineError: Si el formato exige letras y no hay ventana verificada
+            o el sidecar no se pudo escribir.
+        NotImplementedError: Si el ensamblador inyectado no sabe quemar
+            subtítulos (su ``assemble`` no declara ``subtitles``).
+    """
+    if contract.format is not Format.LYRIC_VIDEO:
+        return None
+    if lyric.lines is None:
+        msg = "formato lyric_video sin letras sincronizadas verificadas para quemar"
+        raise PipelineError(msg)
+    if not _builder_supports_subtitles(context.builder):
+        msg = (
+            "el ensamblador inyectado no soporta el quemado de subtítulos "
+            "(su firma de assemble no declara el parámetro 'subtitles')"
+        )
+        raise NotImplementedError(msg)
+    ass_path = _write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s)
+    if ass_path is None:
+        msg = f"no se pudo escribir el sidecar de letras para {artifact}"
+        raise PipelineError(msg)
+    return ass_path
+
+
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
@@ -532,11 +602,13 @@ def _assemble_pieces(
                 continue
             clip = context.registry.path_for(asset.asset_id)
             artifact = context.run_dir / "artifacts" / platform.value / f"{asset.asset_id}.mp4"
+            subtitles_path = _resolve_assemble_subtitles(context, contract, lyric, artifact)
             _ = context.builder.assemble(
                 clip=clip,
                 destination=artifact,
                 watermark=watermark,
                 watermark_config=watermark_config,
+                subtitles=subtitles_path,
                 mute_audio=mute_audio,
             )
             caption = context.model.write_caption(
@@ -556,7 +628,7 @@ def _assemble_pieces(
                 artifact_path=artifact,
                 start_sec=lyric.start_sec,
                 end_sec=lyric.end_sec,
-                ass_path=_write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s),
+                ass_path=subtitles_path,
             )
             pieces.append(piece)
             gates.append(
@@ -572,6 +644,7 @@ def _assemble_pieces(
                         destination=artifact,
                         watermark=watermark,
                         watermark_config=watermark_config,
+                        subtitles=subtitles_path,
                         mute_audio=mute_audio,
                     ),
                 )

@@ -154,6 +154,7 @@ class _StubAssembler(PieceAssembler):
     def __init__(self) -> None:
         self.watermarks: list[Path | None] = []
         self.mutes: list[bool] = []
+        self.subtitles: list[Path | None] = []
 
     @override
     def assemble(
@@ -163,11 +164,13 @@ class _StubAssembler(PieceAssembler):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
         _ = clip
         self.watermarks.append(watermark)
         self.mutes.append(mute_audio)
+        self.subtitles.append(subtitles)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         return destination
@@ -180,9 +183,10 @@ class _StubAssembler(PieceAssembler):
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (watermark, watermark_config, mute_audio)
+        _ = (watermark, watermark_config, subtitles, mute_audio)
         return ("ffmpeg", str(clip), str(destination))
 
 

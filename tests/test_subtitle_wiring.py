@@ -276,9 +276,10 @@ class _StubAssembler:
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> Path:
-        _ = (clip, watermark, watermark_config, mute_audio)
+        _ = (clip, watermark, watermark_config, subtitles, mute_audio)
         destination.parent.mkdir(parents=True, exist_ok=True)
         _ = destination.write_bytes(b"video")
         self.assembled.append(destination)
@@ -291,9 +292,10 @@ class _StubAssembler:
         destination: Path,
         watermark: Path | None,
         watermark_config: Watermark | None = None,
+        subtitles: Path | None = None,
         mute_audio: bool = False,
     ) -> tuple[str, ...]:
-        _ = (clip, watermark, watermark_config, mute_audio)
+        _ = (clip, watermark, watermark_config, subtitles, mute_audio)
         self.rendered.append(destination)
         return ("ffmpeg", str(destination))
 

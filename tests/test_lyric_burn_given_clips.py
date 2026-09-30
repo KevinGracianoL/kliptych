@@ -20,12 +20,13 @@ import pytest
 from kliptych.assets import AssetRegistry
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, Watermark
-from kliptych.contract.draft import LyricConfigDraft
+from kliptych.contract.draft import LyricConfigDraft, TimestampRangeDraft
 from kliptych.environment import EnvironmentReport
 from kliptych.gate import Gate
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.pipeline import (
     PieceAssembler,
+    PipelineError,
     RunRequest,
     run_given_clips,
 )
@@ -37,7 +38,7 @@ from kliptych.runtime import (
     Caption,
     PieceContext,
 )
-from tests.support import candidate, make_asset_draft, make_draft
+from tests.support import FakeProbe, candidate, make_asset_draft, make_draft, make_media
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -116,7 +117,20 @@ def _lyric_platform_draft() -> dict[str, object]:
     }
 
 
-def _lyric_draft() -> object:
+def _cand_at(value: object, quote: str, start: int) -> dict[str, object]:
+    return {
+        "value": value,
+        "evidence": {
+            "quote": quote,
+            "start": start,
+            "end": start + len(quote),
+            "location": "brief.md#l1",
+        },
+        "confidence": "explicit",
+    }
+
+
+def _lyric_draft(*, timestamp_ranges: list[TimestampRangeDraft] | None = None) -> ContractDraft:
     return make_draft(
         format=candidate("lyric_video"),
         mode=candidate("given_clips"),
@@ -125,6 +139,7 @@ def _lyric_draft() -> object:
             lrc_asset_id=candidate("song_lrc"),
             lrclib_enabled=candidate(False),
         ),
+        timestamp_ranges=timestamp_ranges or [],
         assets={
             "required": [
                 make_asset_draft(asset_id="clip-01", uri="clip.mp4"),
@@ -259,3 +274,34 @@ def test_p42_5_assembler_without_subtitle_support_fails_closed(tmp_path: Path) -
             settings=Settings.from_root(tmp_path),
             request=request,
         )
+
+
+def test_p42_5_empty_lyric_window_fails_closed_before_render(tmp_path: Path) -> None:
+    """Ventana sin letras: falla antes del render y no publica ningún MP4."""
+    registry = _register_lyric_assets(tmp_path)
+    brief = "cita del brief\nlyric video del segundo 50 al segundo 55 con clip negro"
+    ranges = [
+        TimestampRangeDraft(
+            start_sec=_cand_at(50.0, "50", brief.index("50")),
+            end_sec=_cand_at(55.0, "55", brief.index("55")),
+        )
+    ]
+    request = RunRequest(
+        brief=brief,
+        destination=tmp_path / "delivery",
+        environment=EnvironmentReport(),
+        model_version="static",
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        run_id="p42-5-empty",
+        assembler=cast("PieceAssembler", _LegacyAssembler()),
+        gate=Gate(FakeProbe(info=make_media())),
+        registry=registry,
+    )
+    with pytest.raises(PipelineError, match="letras"):
+        _ = run_given_clips(
+            model=_StaticModel(_lyric_draft(timestamp_ranges=ranges), _caption()),
+            settings=Settings.from_root(tmp_path),
+            request=request,
+        )
+    assert not (tmp_path / "runs" / "p42-5-empty" / "artifacts" / "tiktok" / "clip-01.mp4").exists()

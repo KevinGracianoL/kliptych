@@ -38,7 +38,13 @@ def _file(tmp_path: Path, name: str) -> Path:
     return path
 
 
-def _assert_invocation(kwargs: dict[str, object], *, timeout_s: float) -> None:
+def _assert_invocation(
+    kwargs: dict[str, object], *, timeout_s: float, expect_cwd: bool = False
+) -> None:
+    if expect_cwd:
+        cwd = kwargs.pop("cwd", None)
+        assert cwd is not None
+        assert Path(str(cwd)).is_dir()
     assert kwargs == {
         "capture_output": True,
         "text": True,
@@ -54,10 +60,11 @@ def _fake_run(
     returncode: int = 0,
     stderr: str = "",
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    expect_cwd: bool = False,
 ) -> _FakeRun:
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
-        _assert_invocation(kwargs, timeout_s=timeout_s)
+        _assert_invocation(dict(kwargs), timeout_s=timeout_s, expect_cwd=expect_cwd)
         _ = Path(argv[-1]).write_bytes(payload)
         return _completed(returncode=returncode, stderr=stderr)
 
@@ -284,6 +291,54 @@ def test_render_arguments_match_executed_argv(
     assert list(recipe[:-1]) == executed[:-1]
     assert recipe[-1] == str(destination)
     assert executed[-1] != str(destination)
+
+
+def test_assemble_with_subtitles_burns_ass_relative_to_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[_Call] = []
+    monkeypatch.setattr(
+        "kliptych.assembler.subprocess.run", _fake_run(calls, expect_cwd=True)
+    )
+    clip = _file(tmp_path, "clip.mp4")
+    subtitles = _file(tmp_path, "song.ass")
+    destination = tmp_path / "run" / "piece.mp4"
+    result = FFmpegAssembler(ffmpeg="ffmpeg").assemble(
+        clip=clip, destination=destination, subtitles=subtitles
+    )
+    assert result == destination
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert kwargs["cwd"] == Path(argv[-1]).parent
+    assert Path(argv[-1]).is_absolute()
+    vf = argv[argv.index("-vf") + 1]
+    assert vf == _SCALE + ",subtitles=filename='../song.ass'"
+
+
+def test_render_arguments_with_watermark_and_subtitles_chain_burn_after_overlay(
+    tmp_path: Path,
+) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    watermark = _file(tmp_path, "mark.png")
+    subtitles = _file(tmp_path, "song.ass")
+    destination = tmp_path / "run" / "piece.mp4"
+    argv = FFmpegAssembler(ffmpeg="ffmpeg").render_arguments(
+        clip=clip, destination=destination, watermark=watermark, subtitles=subtitles
+    )
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "[base][wm]overlay=" in graph
+    assert ";[v]subtitles=filename='../song.ass'[vout]" in graph
+    assert "[vout]" in argv
+
+
+def test_missing_subtitles_fails(tmp_path: Path) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    with pytest.raises(AssembleError, match="no existe"):
+        _ = FFmpegAssembler().assemble(
+            clip=clip,
+            destination=tmp_path / "out.mp4",
+            subtitles=tmp_path / "nope.ass",
+        )
 
 
 def _generate_clip(
