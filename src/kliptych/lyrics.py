@@ -568,11 +568,22 @@ def resolve_synced_lyrics(
     """
     lyric_config = contract.lyric_video
     if lyric_config is not None and lyric_config.lrc_asset_id:
-        path = registry.path_for(lyric_config.lrc_asset_id)
+        from kliptych.assets import AssetError
+
+        lrc_id = lyric_config.lrc_asset_id
         try:
+            intact = registry.verify(lrc_id)
+        except (AssetError, OSError) as error:
+            msg = f"error al verificar el asset .lrc '{lrc_id}': {error}"
+            raise LyricsError(msg) from error
+        if not intact:
+            msg = f"el asset .lrc '{lrc_id}' no existe o fue modificado (hash inválido)"
+            raise LyricsError(msg)
+        try:
+            path = registry.path_for(lrc_id)
             content = path.read_text(encoding="utf-8")
-        except OSError as error:
-            msg = f"no se pudo leer el archivo .lrc local '{path}': {error}"
+        except (AssetError, OSError) as error:
+            msg = f"no se pudo leer el archivo .lrc local: {error}"
             raise LyricsError(msg) from error
         return parse_lrc(content)
 

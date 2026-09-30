@@ -57,7 +57,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from kliptych.assets import AssetError, AssetNotFoundError
+from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
 from kliptych.contract import AudioPolicy, AudioRule, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
@@ -773,6 +773,48 @@ def check_spelling_locks(context: GateContext) -> CheckOutcome:
     )
 
 
+def _inspect_asset(
+    asset_id: str,
+    assets: AssetRegistry,
+    *,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    try:
+        registered = assets.get(asset_id)
+        intact = assets.verify(asset_id)
+    except AssetNotFoundError:
+        return asset_id, None, None, None
+    except (AssetError, OSError) as error:
+        return None, None, None, f"{asset_id}: {error}"
+    if expected_sha256 is not None and (
+        registered.sha256 != expected_sha256 or registered.size_bytes != expected_size
+    ):
+        return None, asset_id, None, None
+    if not intact:
+        return None, None, asset_id, None
+    return None, None, None, None
+
+
+def _record_inspection(
+    *,
+    missing: list[str],
+    mismatched: list[str],
+    tampered: list[str],
+    unsafe: list[str],
+    inspection: tuple[str | None, str | None, str | None, str | None],
+) -> None:
+    miss, mism, tamp, uns = inspection
+    if miss is not None:
+        missing.append(miss)
+    if mism is not None:
+        mismatched.append(mism)
+    if tamp is not None:
+        tampered.append(tamp)
+    if uns is not None:
+        unsafe.append(uns)
+
+
 def check_required_assets(context: GateContext) -> CheckOutcome:
     """Verifica los assets obligatorios contra el registro y el contrato.
 
@@ -790,19 +832,32 @@ def check_required_assets(context: GateContext) -> CheckOutcome:
     tampered: list[str] = []
     unsafe: list[str] = []
     for asset in context.contract.assets.required:
-        try:
-            registered = context.assets.get(asset.asset_id)
-            intact = context.assets.verify(asset.asset_id)
-        except AssetNotFoundError:
-            missing.append(asset.asset_id)
-            continue
-        except (AssetError, OSError) as error:
-            unsafe.append(f"{asset.asset_id}: {error}")
-            continue
-        if registered.sha256 != asset.sha256 or registered.size_bytes != asset.size_bytes:
-            mismatched.append(asset.asset_id)
-        elif not intact:
-            tampered.append(asset.asset_id)
+        res = _inspect_asset(
+            asset.asset_id,
+            context.assets,
+            expected_sha256=asset.sha256,
+            expected_size=asset.size_bytes,
+        )
+        _record_inspection(
+            missing=missing,
+            mismatched=mismatched,
+            tampered=tampered,
+            unsafe=unsafe,
+            inspection=res,
+        )
+
+    if context.contract.lyric_video is not None and context.contract.lyric_video.lrc_asset_id:
+        lrc_id = context.contract.lyric_video.lrc_asset_id
+        if not any(a.asset_id == lrc_id for a in context.contract.assets.required):
+            res = _inspect_asset(lrc_id, context.assets)
+            _record_inspection(
+                missing=missing,
+                mismatched=mismatched,
+                tampered=tampered,
+                unsafe=unsafe,
+                inspection=res,
+            )
+
     evidence: dict[str, object] = {
         "missing": missing,
         "mismatched": mismatched,

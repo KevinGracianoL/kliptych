@@ -245,3 +245,52 @@ def test_resolver_fallback_does_not_activate_without_mention(tmp_path: Path) -> 
         issue.field == "format" and issue.code == IssueCode.MISSING_REQUIRED
         for issue in result.issues
     )
+
+
+def test_resolver_auto_includes_lrc_asset_in_contract_required_assets(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello\n", encoding="utf-8")
+    registry = AssetRegistry(tmp_path)
+    ref = registry.register(
+        asset_id="song",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    brief = "cita del brief. usar letras song en lyric video."
+    draft = make_draft(
+        format=candidate("lyric_video"),
+        lyric_video=LyricConfigDraft(
+            lrc_asset_id=_cand_at("song", "song", brief.index("song")),
+        ),
+    )
+    result = resolve_contract(draft, registry=registry, brief_text=brief)
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.contract is not None
+    assert any(asset.asset_id == ref.asset_id for asset in result.contract.assets.required)
+
+
+def test_resolver_rejects_tampered_lrc_asset(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello\n", encoding="utf-8")
+    registry = AssetRegistry(tmp_path)
+    _ = registry.register(
+        asset_id="song",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+    # Tamper file
+    _ = lrc_file.write_text("[00:00.00]tampered\n", encoding="utf-8")
+
+    brief = "cita del brief. usar letras song en lyric video."
+    draft = make_draft(
+        format=candidate("lyric_video"),
+        lyric_video=LyricConfigDraft(
+            lrc_asset_id=_cand_at("song", "song", brief.index("song")),
+        ),
+    )
+    result = resolve_contract(draft, registry=registry, brief_text=brief)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert any(issue.code == IssueCode.UNRESOLVED_ASSET for issue in result.issues)

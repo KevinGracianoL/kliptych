@@ -18,8 +18,8 @@ import pytest
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Format, LyricConfig
-from kliptych.gate import CheckStatus, Piece, SubtitleSegment
-from kliptych.gate.checks import check_spelling_locks
+from kliptych.gate import CheckStatus, Gate, GateStatus, Piece, SubtitleSegment
+from kliptych.gate.checks import check_required_assets, check_spelling_locks
 from kliptych.gate.models import GateContext
 from kliptych.lyrics import (
     LrcEmptyWindowError,
@@ -30,7 +30,7 @@ from kliptych.lyrics import (
     lyric_lines_to_subtitle_text,
     parse_lrc,
 )
-from tests.support import make_contract, make_media, make_piece
+from tests.support import FakeProbe, make_contract, make_media, make_piece
 
 
 def test_cut_lyric_window_shifts_to_zero() -> None:
@@ -428,3 +428,55 @@ def test_gate_spelling_lock_ass_concordance_failure(tmp_path: Path) -> None:
         assets=registry,
     )
     assert check_spelling_locks(ctx).status is CheckStatus.FAIL
+
+
+def test_modified_lrc_asset_fails_both_spelling_locks_and_required_assets(tmp_path: Path) -> None:
+    lrc_file = tmp_path / "song.lrc"
+    _ = lrc_file.write_text("[00:00.00]hello world\n", encoding="utf-8")
+
+    registry = AssetRegistry(tmp_path)
+    _ = registry.register(
+        asset_id="song",
+        kind="lyrics",
+        uri="song.lrc",
+        origin="test",
+    )
+
+    # Modify file after registry so registry.verify('song') == False
+    _ = lrc_file.write_text("[00:00.00]hello tampered world\n", encoding="utf-8")
+    assert registry.verify("song") is False
+
+    contract = make_contract(
+        format_=Format.LYRIC_VIDEO,
+        lyric_video=LyricConfig(lrc_asset_id="song"),
+        required_assets=[],
+        hard=["assets.required", "subtitles.spelling_lock"],
+    )
+    platform = next(iter(contract.platforms.keys()))
+    clip_file = tmp_path / "clip.mp4"
+    clip_file.touch()
+    piece = make_piece(
+        clip_file,
+        subtitle_text="hello world",
+        subtitle_segments=[SubtitleSegment(text="hello world", start_s=0.0, end_s=2.0)],
+    )
+    ctx = GateContext(
+        contract=contract,
+        rules=contract.platforms[platform],
+        piece=piece,
+        artifact_sha256="f" * 64,
+        media=make_media(),
+        assets=registry,
+    )
+
+    # Both checks must FAIL
+    spelling_outcome = check_spelling_locks(ctx)
+    assert spelling_outcome.status is CheckStatus.FAIL
+
+    assets_outcome = check_required_assets(ctx)
+    assert assets_outcome.status is CheckStatus.FAIL
+
+    # Gate engine must reject
+    engine = Gate(FakeProbe(info=make_media()))
+    result = engine.run(contract=contract, piece=piece, assets=registry)
+    assert result.status is GateStatus.REJECTED

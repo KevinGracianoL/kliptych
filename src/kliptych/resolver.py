@@ -33,7 +33,7 @@ from typing import Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
-from kliptych.assets import AssetError, AssetRegistry
+from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
 from kliptych.contract import (
     AnalyticsProofRequired,
     AssetBundle,
@@ -712,10 +712,50 @@ def _extract_candidate_bool(candidate: object) -> bool | None:
     return None
 
 
+def _verify_lrc_asset_candidate(
+    lrc_asset_id: str | None,
+    registry: AssetRegistry,
+    issues: list[ResolutionIssue],
+) -> bool:
+    if not lrc_asset_id:
+        return True
+    try:
+        intact = registry.verify(lrc_asset_id)
+    except AssetNotFoundError:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.UNRESOLVED_ASSET,
+                field="lyric_video.lrc_asset_id",
+                detail=f"el asset de letras '{lrc_asset_id}' no existe en el registro",
+            )
+        )
+        return False
+    except (AssetError, OSError) as error:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.UNRESOLVED_ASSET,
+                field="lyric_video.lrc_asset_id",
+                detail=f"error al verificar el asset de letras '{lrc_asset_id}': {error}",
+            )
+        )
+        return False
+    if not intact:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.UNRESOLVED_ASSET,
+                field="lyric_video.lrc_asset_id",
+                detail=f"el asset de letras '{lrc_asset_id}' tiene integridad comprometida",
+            )
+        )
+        return False
+    return True
+
+
 def _resolve_lyric_video(
     draft: ContractDraft,
     format_: Format,
     brief_text: str | None,
+    registry: AssetRegistry,
     issues: list[ResolutionIssue],
 ) -> LyricConfig | None:
     lyric_draft = draft.lyric_video
@@ -742,6 +782,9 @@ def _resolve_lyric_video(
         return None
 
     lrc_asset_id = _extract_candidate_str(lyric_draft.lrc_asset_id)
+    if not _verify_lrc_asset_candidate(lrc_asset_id, registry, issues):
+        return None
+
     track_name = _extract_candidate_str(lyric_draft.track_name)
     artist_name = _extract_candidate_str(lyric_draft.artist_name)
     lrclib_enabled_raw = _extract_candidate_bool(lyric_draft.lrclib_enabled)
@@ -782,6 +825,7 @@ def _resolve_secondary_fields(
     *,
     format_: Format,
     brief_text: str | None,
+    registry: AssetRegistry,
     issues: list[ResolutionIssue],
 ) -> _ResolvedSecondary:
     return _ResolvedSecondary(
@@ -790,7 +834,7 @@ def _resolve_secondary_fields(
         segments=_resolve_segments(draft, mode, issues),
         geo_target=_resolve_geo_target(draft, issues),
         timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
-        lyric_video=_resolve_lyric_video(draft, format_, brief_text, issues),
+        lyric_video=_resolve_lyric_video(draft, format_, brief_text, registry, issues),
     )
 
 
@@ -820,8 +864,17 @@ def _build_contract(
         mode,
         format_=format_,
         brief_text=brief_text,
+        registry=registry,
         issues=issues,
     )
+    if secondary.lyric_video is not None and secondary.lyric_video.lrc_asset_id:
+        lrc_id = secondary.lyric_video.lrc_asset_id
+        if not any(a.asset_id == lrc_id for a in assets.required):
+            try:
+                ref = registry.get(lrc_id)
+                assets.required.append(ref)
+            except AssetNotFoundError:
+                pass
     rules = _resolve_rules(
         draft,
         context=_RuleContext(
