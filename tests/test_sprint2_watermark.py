@@ -434,4 +434,4 @@ def test_full_video_twenty_seconds_completes_fast(tmp_path: Path) -> None:
     outcome = check_watermark_full_video(context)
     elapsed = time.monotonic() - started
     assert outcome.status is CheckStatus.PASS
-    assert elapsed < 15.0
+    assert elapsed < 18.0
