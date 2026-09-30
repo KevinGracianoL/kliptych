@@ -20,19 +20,32 @@ e integración del pipeline given_clips.
 import shutil
 import subprocess
 from pathlib import Path
+from typing import override
 
 import pytest
 from pydantic import ValidationError
 
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Layout, Platform, SplitScreenConfig
-from kliptych.contract.draft import SplitScreenDraft
+from kliptych.config import Settings
+from kliptych.contract import Contract, Layout, Platform, SplitScreenConfig, contract_digest
+from kliptych.contract.draft import ContractDraft, SplitScreenDraft
+from kliptych.encoding import RenderConfig
+from kliptych.environment import EnvironmentReport
 from kliptych.gate import CheckStatus, Gate, GateContext
 from kliptych.gate.checks import check_split_screen_geometry
 from kliptych.gate.probe import FFprobeProbe
+from kliptych.orchestrator import PipelineConfig, compute_long_video_fingerprint
+from kliptych.pipeline import PieceAssembler, RunOutcome, RunRequest, run_given_clips
 from kliptych.resolver import ResolutionStatus, resolve_contract
-from tests.support import make_contract, make_draft, make_media, make_piece
+from kliptych.runtime import (
+    CAPTION_PROMPT_VERSION,
+    PROMPT_VERSION,
+    CampaignModel,
+    Caption,
+    PieceContext,
+)
+from tests.support import FakeProbe, candidate, make_contract, make_draft, make_media, make_piece
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -570,3 +583,230 @@ def test_resolver_rejects_split_missing_sources(tmp_path: Path) -> None:
     result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
     assert result.status == ResolutionStatus.MANUAL_REVIEW
     assert any(issue.field == "split_screen" for issue in result.issues)
+
+
+_RESUME_URL = "https://example.com/stream.mp4"
+
+
+def _resume_config(
+    tmp_path: Path,
+    *,
+    gap: int = 0,
+    panel_ratio: float = 0.5,
+    top: str = "clip-top",
+    bottom: str = "clip-bottom",
+    with_split: bool = True,
+) -> PipelineConfig:
+    payload: dict[str, object] | None = (
+        None
+        if not with_split
+        else {
+            "top_source": top,
+            "bottom_source": bottom,
+            "gap": gap,
+            "panel_ratio": panel_ratio,
+        }
+    )
+    return PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=make_contract(split_screen=payload),
+        render=RenderConfig(),
+    )
+
+
+def test_same_split_inputs_keep_fingerprint(tmp_path: Path) -> None:
+    first = _resume_config(tmp_path, gap=20)
+    second = _resume_config(tmp_path, gap=20)
+    assert compute_long_video_fingerprint(_RESUME_URL, config=first) == (
+        compute_long_video_fingerprint(_RESUME_URL, config=second)
+    )
+
+
+def test_split_gap_change_invalidates_fingerprint(tmp_path: Path) -> None:
+    before = _resume_config(tmp_path, gap=0)
+    after = _resume_config(tmp_path, gap=20)
+    assert compute_long_video_fingerprint(_RESUME_URL, config=before) != (
+        compute_long_video_fingerprint(_RESUME_URL, config=after)
+    )
+
+
+def test_split_ratio_change_invalidates_fingerprint(tmp_path: Path) -> None:
+    before = _resume_config(tmp_path, panel_ratio=0.5)
+    after = _resume_config(tmp_path, panel_ratio=0.3)
+    assert compute_long_video_fingerprint(_RESUME_URL, config=before) != (
+        compute_long_video_fingerprint(_RESUME_URL, config=after)
+    )
+
+
+def test_split_source_change_invalidates_fingerprint(tmp_path: Path) -> None:
+    before = _resume_config(tmp_path, bottom="clip-bottom")
+    after = _resume_config(tmp_path, bottom="clip-otro")
+    assert compute_long_video_fingerprint(_RESUME_URL, config=before) != (
+        compute_long_video_fingerprint(_RESUME_URL, config=after)
+    )
+
+
+def test_split_declaration_invalidates_fingerprint(tmp_path: Path) -> None:
+    before = _resume_config(tmp_path, with_split=False)
+    after = _resume_config(tmp_path, with_split=True)
+    assert compute_long_video_fingerprint(_RESUME_URL, config=before) != (
+        compute_long_video_fingerprint(_RESUME_URL, config=after)
+    )
+
+
+def test_contract_digest_stable_without_split() -> None:
+    assert contract_digest(make_contract()) == contract_digest(make_contract(split_screen=None))
+
+
+def test_contract_digest_changes_when_split_declared() -> None:
+    assert contract_digest(make_contract()) != contract_digest(
+        make_contract(split_screen=_split_payload())
+    )
+
+
+class _SplitStaticModel(CampaignModel):
+    """Modelo de prueba con draft split fijo y caption válida."""
+
+    model_version: str = "static-split"
+
+    def __init__(self, draft: ContractDraft) -> None:
+        self._draft: ContractDraft = draft
+
+    @override
+    def extract_contract(self, brief: str) -> ContractDraft:
+        _ = brief
+        return self._draft
+
+    @override
+    def write_caption(self, contract: Contract, piece: PieceContext) -> Caption:
+        _ = (contract, piece)
+        return Caption(caption="mira @marca #marca", hashtags=("#marca",))
+
+
+class _SplitStubAssembler(PieceAssembler):
+    """Ensamblador de prueba: registra los specs y escribe bytes."""
+
+    def __init__(self) -> None:
+        self.specs: list[RenderSpec] = []
+
+    @override
+    def assemble(self, spec: RenderSpec) -> Path:
+        self.specs.append(spec)
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = spec.destination.write_bytes(b"video")
+        return spec.destination
+
+    @override
+    def render_arguments(self, spec: RenderSpec) -> tuple[str, ...]:
+        return ("ffmpeg", str(spec.clip), str(spec.destination))
+
+
+def _split_asset_draft(asset_id: str, uri: str) -> dict[str, object]:
+    return {
+        "asset_id": candidate(asset_id),
+        "kind": candidate("video"),
+        "uri": candidate(uri),
+        "origin": candidate("brief"),
+    }
+
+
+def _split_workspace(root: Path) -> AssetRegistry:
+    assets = root / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    _ = (assets / "top.mp4").write_bytes(b"top")
+    _ = (assets / "bottom.mp4").write_bytes(b"bottom")
+    registry = AssetRegistry(root)
+    _ = registry.register(asset_id="clip-top", kind="video", uri="assets/top.mp4", origin="brief")
+    _ = registry.register(
+        asset_id="clip-bottom", kind="video", uri="assets/bottom.mp4", origin="brief"
+    )
+    return registry
+
+
+def test_pipeline_assembles_split_pieces(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    registry = _split_workspace(root)
+    draft = make_draft(
+        split_screen=_split_draft(),
+        assets={
+            "required": [
+                _split_asset_draft("clip-top", "assets/top.mp4"),
+                _split_asset_draft("clip-bottom", "assets/bottom.mp4"),
+            ]
+        },
+    )
+    stub = _SplitStubAssembler()
+    request = RunRequest(
+        brief=_SPLIT_BRIEF,
+        destination=root / "delivery",
+        environment=EnvironmentReport(),
+        model_version="static-split",
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        assembler=stub,
+        gate=Gate(FakeProbe(info=make_media())),
+        registry=registry,
+    )
+    result = run_given_clips(
+        model=_SplitStaticModel(draft),
+        settings=Settings.from_root(root),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.EXPORTED
+    assert len(stub.specs) == 1
+    spec = stub.specs[0]
+    assert spec.layout is Layout.SPLIT_SCREEN
+    assert spec.split_screen is not None
+    assert spec.split_screen.gap == 20
+    assert spec.top_clip == root / "assets" / "top.mp4"
+    assert spec.bottom_clip == root / "assets" / "bottom.mp4"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_pipeline_split_screen_end_to_end(tmp_path: Path) -> None:
+    assert _FFPROBE is not None
+    root = tmp_path / "ws"
+    assets = root / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    _ = _synth_clip(assets / "top.mp4", "testsrc=s=640x480:r=30")
+    _ = _synth_clip(assets / "bottom.mp4", "smptebars=s=640x480:r=30")
+    registry = AssetRegistry(root)
+    _ = registry.register(asset_id="clip-top", kind="video", uri="assets/top.mp4", origin="brief")
+    _ = registry.register(
+        asset_id="clip-bottom", kind="video", uri="assets/bottom.mp4", origin="brief"
+    )
+    draft = make_draft(
+        split_screen=_split_draft(),
+        assets={
+            "required": [
+                _split_asset_draft("clip-top", "assets/top.mp4"),
+                _split_asset_draft("clip-bottom", "assets/bottom.mp4"),
+            ]
+        },
+        platforms={
+            "tiktok": {
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+            }
+        },
+    )
+    request = RunRequest(
+        brief=_SPLIT_BRIEF,
+        destination=root / "delivery",
+        environment=EnvironmentReport(),
+        model_version="static-split",
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        registry=registry,
+    )
+    result = run_given_clips(
+        model=_SplitStaticModel(draft),
+        settings=Settings.from_root(root),
+        request=request,
+    )
+    assert result.outcome is RunOutcome.EXPORTED
+    artifacts = list((root / "runs").rglob("clip-top__clip-bottom.mp4"))
+    assert len(artifacts) == 1
+    media = FFprobeProbe(ffprobe=_FFPROBE).probe(artifacts[0])
+    assert (media.width, media.height) == (1080, 1920)

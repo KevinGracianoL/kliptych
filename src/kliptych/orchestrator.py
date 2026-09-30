@@ -469,6 +469,9 @@ def compute_long_video_fingerprint(
     lyric_sig = _lyric_signature(config)
     if lyric_sig is not None:
         payload["lyric_video"] = lyric_sig
+    split_sig = _split_screen_signature(config)
+    if split_sig is not None:
+        payload["split_screen"] = split_sig
     return sha256_canonical_json(payload)
 
 
@@ -532,6 +535,23 @@ def _watermark_signature(config: PipelineConfig) -> dict[str, object]:
     }
 
 
+def _split_screen_signature(config: PipelineConfig) -> dict[str, object] | None:
+    """Firma la geometría split_screen exacta para ``--resume``.
+
+    Los valores entran tal cual (fuentes, gap, ratio y lienzo): cualquier
+    cambio invalida el checkpoint aunque el resto del contrato no se mueva.
+
+    Args:
+        config: Configuración de la corrida.
+
+    Returns:
+        El bloque determinista del split, o ``None`` sin split declarado.
+    """
+    if config.contract.split_screen is None:
+        return None
+    return config.contract.split_screen.model_dump(mode="json")
+
+
 def compute_slideshow_fingerprint(
     images: Sequence[Path | str],
     *,
@@ -567,6 +587,9 @@ def compute_slideshow_fingerprint(
         },
         "watermark": _watermark_signature(config),
     }
+    split_sig = _split_screen_signature(config)
+    if split_sig is not None:
+        payload["split_screen"] = split_sig
     return sha256_canonical_json(payload)
 
 
