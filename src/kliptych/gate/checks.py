@@ -62,8 +62,9 @@ from kliptych.contract import AudioPolicy, AudioRule, Format
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import CheckOutcome, CheckStatus, GateContext
-from kliptych.gate.text import contains_phrase
+from kliptych.gate.text import contains_phrase, normalize_text
 from kliptych.gate.watermark import check_watermark_full_video, check_watermark_present
+from kliptych.lyrics import parse_lrc
 
 __all__ = [
     "DEFAULT_VALIDATORS",
@@ -537,6 +538,44 @@ def check_first_line(context: GateContext) -> CheckOutcome:
     )
 
 
+def _check_lyric_ground_truth(context: GateContext) -> CheckOutcome | None:
+    if (
+        context.contract.format is not Format.LYRIC_VIDEO
+        or not context.contract.lyric_video
+        or not context.contract.lyric_video.lrc_asset_id
+    ):
+        return None
+    try:
+        path = context.assets.path_for(context.contract.lyric_video.lrc_asset_id)
+        content = path.read_text(encoding="utf-8")
+    except (AssetError, OSError) as error:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={"reason": f"no se pudo verificar el asset .lrc de referencia: {error}"},
+        )
+    try:
+        lrc_lines = parse_lrc(content)
+    except ValueError as error:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={"reason": f"archivo .lrc de referencia inválido: {error}"},
+        )
+    lrc_full_norm = normalize_text(" ".join(line.text for line in lrc_lines))
+    lrc_words = set(re.split(r"[\s_]+", lrc_full_norm))
+    sub_norm = normalize_text(context.piece.subtitle_text or "")
+    sub_words = [w for w in re.split(r"[\s_]+", sub_norm) if w]
+    altered = [w for w in sub_words if w not in lrc_words]
+    if altered:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "reason": "subtítulos contienen palabras alteradas no presentes en .lrc",
+                "altered": altered,
+            },
+        )
+    return None
+
+
 def check_spelling_locks(context: GateContext) -> CheckOutcome:
     """Verifica el spelling exacto de los locks en los subtítulos.
 
@@ -545,23 +584,49 @@ def check_spelling_locks(context: GateContext) -> CheckOutcome:
 
     Returns:
         PASS si el contrato no declara locks o todos aparecen literalmente;
-        FAIL con los locks faltantes; UNSUPPORTED si hay locks declarados
-        pero la pieza no trae subtítulos que verificar.
+        FAIL con los locks faltantes o palabras alteradas; UNSUPPORTED si
+        hay locks declarados pero la pieza no trae subtítulos que verificar.
     """
-    if not context.contract.spelling_locks:
+    is_lyric_video = context.contract.format is Format.LYRIC_VIDEO
+    if is_lyric_video and (
+        context.piece.subtitle_text is None
+        or not context.piece.subtitle_text.strip()
+        or not context.piece.subtitle_segments
+    ):
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={"reason": "formato lyric_video sin subtítulos sincronizados verificados"},
+        )
+
+    if not context.contract.spelling_locks and not is_lyric_video:
         return _pass(reason="el contrato no declara spelling_locks")
     if context.piece.subtitle_text is None:
         return _unsupported("no hay subtítulos para verificar los spelling locks")
+
     missing = [
-        lock for lock in context.contract.spelling_locks if lock not in context.piece.subtitle_text
+        lock
+        for lock in context.contract.spelling_locks
+        if not contains_phrase(context.piece.subtitle_text, lock)
     ]
-    evidence: dict[str, object] = {
-        "locks": list(context.contract.spelling_locks),
-        "missing": missing,
-    }
+    if missing:
+        return CheckOutcome(
+            status=CheckStatus.FAIL,
+            evidence={
+                "locks": list(context.contract.spelling_locks),
+                "missing": missing,
+            },
+        )
+
+    ground_truth_outcome = _check_lyric_ground_truth(context)
+    if ground_truth_outcome is not None:
+        return ground_truth_outcome
+
     return CheckOutcome(
-        status=CheckStatus.FAIL if missing else CheckStatus.PASS,
-        evidence=evidence,
+        status=CheckStatus.PASS,
+        evidence={
+            "locks": list(context.contract.spelling_locks),
+            "missing": [],
+        },
     )
 
 

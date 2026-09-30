@@ -10,19 +10,27 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Protocol, Self, cast
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract
+from kliptych.gate.models import SubtitleSegment
+from kliptych.subtitles import SubtitleLayout, SubtitleStyle
 
 __all__ = [
+    "LrcEmptyWindowError",
     "LrcParseError",
     "LrclibClient",
     "LyricLine",
     "LyricsError",
     "LyricsNotFoundError",
     "SyncedLyricsProvider",
+    "cut_lyric_window",
+    "lyric_lines_to_ass",
+    "lyric_lines_to_subtitle_segments",
+    "lyric_lines_to_subtitle_text",
     "parse_lrc",
     "resolve_synced_lyrics",
 ]
@@ -40,6 +48,10 @@ _FRAC_BASE_1000 = 1000.0
 _MS_PER_SECOND = 1000.0
 _SECONDS_PER_MINUTE = 60.0
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
+_DEFAULT_LINE_DURATION_S = 4.0
+_CENTISECONDS_PER_HOUR = 360_000
+_CENTISECONDS_PER_MINUTE = 6_000
+_CENTISECONDS_PER_SECOND = 100
 
 
 class LrcParseError(ValueError):
@@ -54,12 +66,17 @@ class LyricsNotFoundError(LyricsError):
     """No se encontraron letras sincronizadas para la pista."""
 
 
+class LrcEmptyWindowError(LyricsError):
+    """No hay líneas de letra dentro de la ventana de recorte solicitada."""
+
+
 @dataclass(frozen=True, slots=True)
 class LyricLine:
-    """Línea de letra con su marca de inicio sincronizada."""
+    """Línea de letra con su marca de inicio sincronizada y cota final opcional."""
 
     start_sec: float
     text: str
+    end_sec: float | None = None
 
 
 class _HttpResponseProtocol(Protocol):
@@ -239,6 +256,179 @@ def parse_lrc(content: str) -> tuple[LyricLine, ...]:
 
     lines.sort(key=lambda line: line.start_sec)
     return tuple(lines)
+
+
+def cut_lyric_window(
+    lines: Sequence[LyricLine],
+    *,
+    start_sec: float,
+    end_sec: float,
+    default_line_duration_s: float = _DEFAULT_LINE_DURATION_S,
+) -> tuple[LyricLine, ...]:
+    """Filtra y desplaza las líneas de letra al rango temporal de la ventana.
+
+    Desplaza las marcas temporales restando start_sec (0.0s = inicio del clip final).
+
+    Args:
+        lines: Líneas de letra sincronizadas ordenadas cronológicamente.
+        start_sec: Inicio de la ventana en segundos.
+        end_sec: Fin de la ventana en segundos.
+        default_line_duration_s: Duración por defecto para la última línea.
+
+    Returns:
+        Tupla de líneas filtradas y desplazadas dentro de la ventana.
+
+    Raises:
+        LrcEmptyWindowError: Si la ventana queda sin líneas de letra.
+        LrcParseError: Si las cotas son inválidas.
+    """
+    if start_sec >= end_sec:
+        msg = f"start_sec ({start_sec}) debe ser menor que end_sec ({end_sec})"
+        raise LrcParseError(msg)
+
+    cut_lines: list[LyricLine] = []
+    total_lines = len(lines)
+    for i, line in enumerate(lines):
+        line_end = (
+            line.end_sec
+            if line.end_sec is not None
+            else (
+                lines[i + 1].start_sec
+                if i + 1 < total_lines
+                else line.start_sec + default_line_duration_s
+            )
+        )
+        if line_end <= start_sec or line.start_sec >= end_sec:
+            continue
+        shifted_start = max(0.0, line.start_sec - start_sec)
+        shifted_end = min(end_sec - start_sec, line_end - start_sec)
+        if shifted_end <= shifted_start:
+            continue
+        cut_lines.append(
+            LyricLine(
+                start_sec=shifted_start,
+                text=line.text,
+                end_sec=shifted_end,
+            )
+        )
+
+    if not cut_lines:
+        msg = f"no hay líneas de letra en el rango temporal [{start_sec}, {end_sec}]"
+        raise LrcEmptyWindowError(msg)
+
+    return tuple(cut_lines)
+
+
+def _format_ass_time(seconds: float) -> str:
+    total_centiseconds = max(0, round(seconds * _CENTISECONDS_PER_SECOND))
+    hours, remainder = divmod(total_centiseconds, _CENTISECONDS_PER_HOUR)
+    minutes, remainder = divmod(remainder, _CENTISECONDS_PER_MINUTE)
+    secs, centiseconds = divmod(remainder, _CENTISECONDS_PER_SECOND)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"
+
+
+def _escape_ass_text(text: str) -> str:
+    escaped = text.replace("\\", "\\\\")
+    escaped = escaped.replace("{", "\\{").replace("}", "\\}")
+    return escaped.replace("\r\n", "\\N").replace("\n", "\\N").replace("\r", "\\N")
+
+
+def lyric_lines_to_ass(
+    lines: Sequence[LyricLine],
+    *,
+    duration_s: float | None = None,
+    layout: SubtitleLayout | None = None,
+    style: SubtitleStyle | None = None,
+) -> str:
+    """Genera el contenido ASS para las líneas de letra especificadas.
+
+    Args:
+        lines: Líneas de letra dentro de la ventana del clip.
+        duration_s: Duración máxima del clip en segundos.
+        layout: Resolución lógica del lienzo.
+        style: Estilo ASS de los subtítulos.
+
+    Returns:
+        Texto en formato ASS con eventos Dialogue.
+    """
+    resolved_layout = layout or SubtitleLayout()
+    resolved_style = style or SubtitleStyle()
+    header = [
+        "[Script Info]",
+        "Title: Kliptych Lyrics",
+        "ScriptType: v4.00+",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        f"PlayResX: {resolved_layout.width}",
+        f"PlayResY: {resolved_layout.height}",
+        "",
+        "[V4+ Styles]",
+        (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
+        (
+            f"Style: Default,{resolved_style.fontname},{resolved_style.fontsize},"
+            f"{resolved_style.primary_colour},&H000000FF,"
+            f"{resolved_style.outline_colour},{resolved_style.back_colour},0,0,0,0,100,100,0,0,1,"
+            f"{resolved_style.outline},{resolved_style.shadow},"
+            f"{resolved_style.alignment},20,20,{resolved_style.margin_v},1"
+        ),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for line in lines:
+        start_str = _format_ass_time(line.start_sec)
+        end_val = (
+            line.end_sec if line.end_sec is not None else line.start_sec + _DEFAULT_LINE_DURATION_S
+        )
+        if duration_s is not None:
+            end_val = min(duration_s, end_val)
+        end_str = _format_ass_time(end_val)
+        escaped = _escape_ass_text(line.text)
+        header.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{escaped}")
+    return "\n".join(header) + "\n"
+
+
+def lyric_lines_to_subtitle_segments(
+    lines: Sequence[LyricLine],
+    *,
+    default_duration_s: float = _DEFAULT_LINE_DURATION_S,
+) -> tuple[SubtitleSegment, ...]:
+    """Convierte líneas de letra en SubtitleSegment relativos al clip.
+
+    Args:
+        lines: Líneas de letra dentro del clip.
+        default_duration_s: Duración por defecto si falta end_sec.
+
+    Returns:
+        Tupla de SubtitleSegment.
+    """
+    segments: list[SubtitleSegment] = []
+    for line in lines:
+        end_s = line.end_sec if line.end_sec is not None else line.start_sec + default_duration_s
+        segments.append(
+            SubtitleSegment(
+                text=line.text,
+                start_s=line.start_sec,
+                end_s=end_s,
+            )
+        )
+    return tuple(segments)
+
+
+def lyric_lines_to_subtitle_text(lines: Sequence[LyricLine]) -> str:
+    """Extrae el texto completo continuo de las líneas de letra.
+
+    Args:
+        lines: Líneas de letra del clip.
+
+    Returns:
+        Cadena con todas las líneas separadas por espacios.
+    """
+    return " ".join(line.text.strip() for line in lines if line.text.strip())
 
 
 class LrclibClient:
