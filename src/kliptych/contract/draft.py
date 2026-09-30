@@ -104,6 +104,15 @@ class TimestampRangeDraft(ContractBase):
     end_sec: FieldCandidate[float | str] | dict[str, object] | float | str | None = None
 
 
+class LyricConfigDraft(ContractBase):
+    """Configuración propuesta de video de letras con evidencia."""
+
+    lrc_asset_id: FieldCandidate[str] | dict[str, object] | str | None = None
+    track_name: FieldCandidate[str] | dict[str, object] | str | None = None
+    artist_name: FieldCandidate[str] | dict[str, object] | str | None = None
+    lrclib_enabled: FieldCandidate[bool] | dict[str, object] | bool | None = None
+
+
 class SegmentsDraft(ContractBase):
     """Segmentos propuestos para el modo long_video."""
 
@@ -170,6 +179,7 @@ class ContractDraft(ContractBase):
     brand_safety_citation: FieldCandidate[str] | None = None
     unmapped: list[UnmappedRuleDraft] = Field(default_factory=list)
     timestamp_ranges: list[TimestampRangeDraft] = Field(default_factory=list)
+    lyric_video: LyricConfigDraft | None = None
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

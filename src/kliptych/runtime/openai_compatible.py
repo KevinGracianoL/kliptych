@@ -59,6 +59,9 @@ _EXTRACT_SYSTEM_PROMPT = (
     'Extrae "timestamp_ranges": lista de rangos temporales obligatorios del video especificados '
     'en el brief, cada uno con "start_sec" y "end_sec" con su evidencia (admitiendo '
     'formatos "MM:SS", "HH:MM:SS" o segundos numéricos); sin rangos usa lista vacía. '
+    'Extrae "format" como "lyric_video" y "lyric_video" con su evidencia ("lrc_asset_id", '
+    '"track_name", "artist_name", "lrclib_enabled") cuando el brief pida un lyric video '
+    'o video con letra; sin cita textual usa "missing". '
     'Extrae "unmapped": lista de requisitos del brief sin validador mecánico '
     'asociado, cada uno con "rule" (nombre del requisito) y "quote" (cita textual).'
 )

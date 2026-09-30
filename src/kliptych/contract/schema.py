@@ -158,6 +158,23 @@ class Watermark(ContractBase):
 WatermarkConfig = Watermark
 
 
+class LyricConfig(ContractBase):
+    """Configuración de video de letras (format lyric_video)."""
+
+    lrc_asset_id: str | None = None
+    track_name: str | None = None
+    artist_name: str | None = None
+    lrclib_enabled: bool = True
+
+    @field_validator("lrc_asset_id")
+    @classmethod
+    def _asset_id_is_safe(cls, asset_id: str | None) -> str | None:
+        if asset_id is not None and not is_safe_segment(asset_id):
+            msg = "lrc_asset_id no es un segmento de ruta seguro"
+            raise ValueError(msg)
+        return asset_id
+
+
 class Segment(ContractBase):
     """Segmento temporal seleccionado de un vídeo fuente (modo long_video)."""
 
@@ -354,6 +371,7 @@ class Contract(ContractBase):
     brand_safety_citation: str | None = None
     unmapped: tuple[UnmappedRule, ...] = ()
     timestamp_ranges: tuple[TimestampRange, ...] = ()
+    lyric_video: LyricConfig | None = None
     rules: RuleSet
     assets: AssetBundle
     segments: tuple[Segment, ...] = ()
@@ -586,6 +604,8 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         _ = dump.pop("brand_safety_citation", None)
     if not contract.timestamp_ranges:
         _ = dump.pop("timestamp_ranges", None)
+    if contract.lyric_video is None:
+        _ = dump.pop("lyric_video", None)
     _prune_default_watermark_options(dump)
 
 

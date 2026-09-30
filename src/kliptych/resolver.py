@@ -55,6 +55,7 @@ from kliptych.contract import (
     GlobalRestrictions,
     Languages,
     LinkRules,
+    LyricConfig,
     MinViewsForPayout,
     Mode,
     OfficialAudio,
@@ -238,7 +239,14 @@ def resolve_contract(
     issues: list[ResolutionIssue] = _collect_conflicts(draft)
 
     mode = _required_value(draft.mode, "mode", issues)
-    format_ = _required_value(draft.format, "format", issues)
+    format_val = _value(draft.format)
+    if format_val is None:
+        if _brief_mentions_lyric_video(brief_text):
+            format_ = Format.LYRIC_VIDEO
+        else:
+            format_ = _required_value(draft.format, "format", issues)
+    else:
+        format_ = format_val
     if mode is None or format_ is None:
         status = (
             ResolutionStatus.MANUAL_REVIEW
@@ -451,14 +459,19 @@ def _extract_candidate_confidence(bound: object) -> object:
     return None
 
 
-def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -> bool:
+def _check_confidence_provenance(
+    bound: object,
+    issues: list[ResolutionIssue],
+    *,
+    field: str = "timestamp_ranges",
+) -> bool:
     conf = _extract_candidate_confidence(bound)
     if conf is None or (isinstance(conf, str) and not conf.strip()):
         issues.append(
             ResolutionIssue(
                 code=IssueCode.MISSING_REQUIRED,
-                field="timestamp_ranges",
-                detail="rango temporal sin confianza explícita",
+                field=field,
+                detail=f"campo '{field}' sin confianza explícita",
             )
         )
         return False
@@ -468,8 +481,8 @@ def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -
         issues.append(
             ResolutionIssue(
                 code=IssueCode.CONFLICT,
-                field="timestamp_ranges",
-                detail="rango temporal en conflicto",
+                field=field,
+                detail=f"campo '{field}' en conflicto",
             )
         )
         return False
@@ -477,8 +490,8 @@ def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -
         issues.append(
             ResolutionIssue(
                 code=IssueCode.MISSING_REQUIRED,
-                field="timestamp_ranges",
-                detail="rango temporal con confianza 'missing'",
+                field=field,
+                detail=f"campo '{field}' con confianza 'missing'",
             )
         )
         return False
@@ -486,8 +499,8 @@ def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -
         issues.append(
             ResolutionIssue(
                 code=IssueCode.INVALID_CONTRACT,
-                field="timestamp_ranges",
-                detail=f"rango temporal con confianza inválida: {conf!r}",
+                field=field,
+                detail=f"campo '{field}' con confianza inválida: {conf!r}",
             )
         )
         return False
@@ -498,14 +511,27 @@ def _check_evidence_provenance(
     bound: object,
     brief_text: str | None,
     issues: list[ResolutionIssue],
+    *,
+    field: str = "timestamp_ranges",
 ) -> bool:
-    quote = _extract_candidate_quote(bound)
+    if isinstance(bound, dict):
+        d = cast("dict[str, object]", bound)
+        if "citation" in d or "quote" in d:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field=field,
+                    detail=f"campo '{field}' usa alias prohibido ('citation' o 'quote') en la raíz",
+                )
+            )
+            return False
+    quote = _extract_candidate_quote(cast("object", bound))
     if quote is None or not quote.strip():
         issues.append(
             ResolutionIssue(
                 code=IssueCode.MISSING_REQUIRED,
-                field="timestamp_ranges",
-                detail="rango temporal sin evidencia textual obligatoria",
+                field=field,
+                detail=f"campo '{field}' sin evidencia textual obligatoria",
             )
         )
         return False
@@ -514,8 +540,8 @@ def _check_evidence_provenance(
         issues.append(
             ResolutionIssue(
                 code=IssueCode.INVALID_CONTRACT,
-                field="timestamp_ranges",
-                detail=f"cita del rango temporal no encontrada en el brief: {quote!r}",
+                field=field,
+                detail=f"cita de '{field}' no encontrada en el brief: {quote!r}",
             )
         )
         return False
@@ -526,9 +552,11 @@ def _check_candidate_provenance(
     bound: object,
     brief_text: str | None,
     issues: list[ResolutionIssue],
+    *,
+    field: str = "timestamp_ranges",
 ) -> bool:
-    conf_ok = _check_confidence_provenance(bound, issues)
-    ev_ok = _check_evidence_provenance(bound, brief_text, issues)
+    conf_ok = _check_confidence_provenance(bound, issues, field=field)
+    ev_ok = _check_evidence_provenance(bound, brief_text, issues, field=field)
     return conf_ok and ev_ok
 
 
@@ -658,6 +686,85 @@ def _resolve_timestamp_ranges(
     return tuple(ranges)
 
 
+def _extract_candidate_str(
+    candidate: FieldCandidate[str] | dict[str, object] | str | None,
+) -> str | None:
+    if isinstance(candidate, FieldCandidate):
+        return candidate.value
+    if isinstance(candidate, dict):
+        val = candidate.get("value")
+        return str(val) if isinstance(val, (str, int, float)) else None
+    if isinstance(candidate, str):
+        return candidate
+    return None
+
+
+def _extract_candidate_bool(candidate: object) -> bool | None:
+    if isinstance(candidate, FieldCandidate):
+        cand = cast("FieldCandidate[bool]", candidate)
+        return cand.value
+    if isinstance(candidate, dict):
+        d = cast("dict[str, object]", candidate)
+        val = d.get("value")
+        return bool(val) if isinstance(val, bool) else None
+    if isinstance(candidate, bool):
+        return candidate
+    return None
+
+
+def _resolve_lyric_video(
+    draft: ContractDraft,
+    format_: Format,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> LyricConfig | None:
+    lyric_draft = draft.lyric_video
+    if lyric_draft is None:
+        if format_ is Format.LYRIC_VIDEO:
+            return LyricConfig(lrclib_enabled=True)
+        return None
+
+    fields_to_check: list[tuple[str, object]] = [
+        ("lrc_asset_id", lyric_draft.lrc_asset_id),
+        ("track_name", lyric_draft.track_name),
+        ("artist_name", lyric_draft.artist_name),
+        ("lrclib_enabled", lyric_draft.lrclib_enabled),
+    ]
+
+    has_error = False
+    for _, candidate_bound in fields_to_check:
+        if candidate_bound is not None and not _check_candidate_provenance(
+            candidate_bound, brief_text, issues, field="lyric_video"
+        ):
+            has_error = True
+
+    if has_error:
+        return None
+
+    lrc_asset_id = _extract_candidate_str(lyric_draft.lrc_asset_id)
+    track_name = _extract_candidate_str(lyric_draft.track_name)
+    artist_name = _extract_candidate_str(lyric_draft.artist_name)
+    lrclib_enabled_raw = _extract_candidate_bool(lyric_draft.lrclib_enabled)
+    lrclib_enabled = True if lrclib_enabled_raw is None else lrclib_enabled_raw
+
+    try:
+        return LyricConfig(
+            lrc_asset_id=lrc_asset_id,
+            track_name=track_name,
+            artist_name=artist_name,
+            lrclib_enabled=lrclib_enabled,
+        )
+    except ValidationError as err:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="lyric_video",
+                detail=str(err),
+            )
+        )
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedSecondary:
     official_audio: OfficialAudio | None
@@ -665,12 +772,15 @@ class _ResolvedSecondary:
     segments: tuple[Segment, ...]
     geo_target: GeoTarget | None
     timestamp_ranges: tuple[TimestampRange, ...]
+    lyric_video: LyricConfig | None
 
 
 def _resolve_secondary_fields(
     draft: ContractDraft,
     platforms: dict[Platform, PlatformRules],
     mode: Mode,
+    *,
+    format_: Format,
     brief_text: str | None,
     issues: list[ResolutionIssue],
 ) -> _ResolvedSecondary:
@@ -680,6 +790,7 @@ def _resolve_secondary_fields(
         segments=_resolve_segments(draft, mode, issues),
         geo_target=_resolve_geo_target(draft, issues),
         timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
+        lyric_video=_resolve_lyric_video(draft, format_, brief_text, issues),
     )
 
 
@@ -703,7 +814,14 @@ def _build_contract(
         draft, brief_text, prohibitions
     )
     hook_keyword = _value(draft.hook_keyword)
-    secondary = _resolve_secondary_fields(draft, platforms, mode, brief_text, issues)
+    secondary = _resolve_secondary_fields(
+        draft,
+        platforms,
+        mode,
+        format_=format_,
+        brief_text=brief_text,
+        issues=issues,
+    )
     rules = _resolve_rules(
         draft,
         context=_RuleContext(
@@ -744,6 +862,7 @@ def _build_contract(
         brand_safety_citation=brand_safety_citation,
         unmapped=secondary.unmapped,
         timestamp_ranges=secondary.timestamp_ranges,
+        lyric_video=secondary.lyric_video,
         rules=rules,
         assets=assets,
         segments=secondary.segments,
@@ -1278,8 +1397,10 @@ def _resolve_segments(
 
 def _base_rules(context: _RuleContext) -> list[str]:
     rules = ["artifact.integrity"]
-    if context.format_ is Format.VIDEO:
+    if context.format_ in {Format.VIDEO, Format.LYRIC_VIDEO}:
         rules.append("artifact.video_stream")
+    if context.format_ is Format.LYRIC_VIDEO:
+        rules.append("subtitles.spelling_lock")
     if any(platform.audio_rule is not AudioRule.ANY for platform in context.platforms.values()):
         rules.append("audio.present")
     if context.global_restrictions.has_required_assets:
@@ -1442,6 +1563,14 @@ _OFFICIAL_SOUND_MENTIONS: tuple[str, ...] = (
     "audio oficial",
 )
 
+_LYRIC_VIDEO_MENTIONS: tuple[str, ...] = (
+    "lyric video",
+    "video con letra",
+    "letra official",
+    "letra oficial",
+    ".lrc",
+)
+
 
 def _normalize_mention_text(text: str) -> str:
     """Normaliza el brief para detectar menciones de sonido oficial.
@@ -1475,6 +1604,21 @@ def _brief_mentions_official_sound(brief_text: str | None) -> bool:
         return False
     normalized = _normalize_mention_text(brief_text)
     return any(mention in normalized for mention in _OFFICIAL_SOUND_MENTIONS)
+
+
+def _brief_mentions_lyric_video(brief_text: str | None) -> bool:
+    """Indica si el brief menciona explícitamente formato lyric video.
+
+    Args:
+        brief_text: Texto crudo del brief original, o ``None``.
+
+    Returns:
+        True si alguna mención canónica aparece en el texto normalizado.
+    """
+    if not brief_text:
+        return False
+    normalized = _normalize_mention_text(brief_text)
+    return any(mention in normalized for mention in _LYRIC_VIDEO_MENTIONS)
 
 
 def _brief_indicates_brand_safety(
