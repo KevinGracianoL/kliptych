@@ -5,19 +5,24 @@ estricta de marcas de tiempo ASCII, soporte de offset, descarte de metadatos,
 clasificación cronológica y el cliente inyectable para lrclib.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Protocol, Self, cast
+from typing import TYPE_CHECKING, ClassVar, Protocol, Self, cast
 
-from kliptych.assets import AssetRegistry
-from kliptych.contract import Contract
-from kliptych.gate.models import SubtitleSegment
 from kliptych.subtitles import SubtitleLayout, SubtitleStyle
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from kliptych.assets import AssetRegistry
+    from kliptych.contract import Contract
+    from kliptych.gate.models import SubtitleSegment
 
 __all__ = [
     "LrcEmptyWindowError",
@@ -406,6 +411,8 @@ def lyric_lines_to_subtitle_segments(
     Returns:
         Tupla de SubtitleSegment.
     """
+    from kliptych.gate.models import SubtitleSegment
+
     segments: list[SubtitleSegment] = []
     for line in lines:
         end_s = line.end_sec if line.end_sec is not None else line.start_sec + default_duration_s

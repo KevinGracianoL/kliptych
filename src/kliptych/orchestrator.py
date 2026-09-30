@@ -42,6 +42,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from kliptych.contract import (
     Contract,
+    Format,
     Segment,
     TimestampRange,
     contract_digest,
@@ -57,6 +58,15 @@ from kliptych.encoding import (
     video_encoder_arguments,
 )
 from kliptych.hashing import sha256_canonical_json, sha256_file
+from kliptych.lyrics import (
+    LrcEmptyWindowError,
+    LyricLine,
+    LyricsError,
+    SyncedLyricsProvider,
+    cut_lyric_window,
+    lyric_lines_to_ass,
+    parse_lrc,
+)
 from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
@@ -203,6 +213,8 @@ class PipelineConfig:
     audio_mix_ratio: float = 1.0
     repost_mode: bool = False
     watermark_path: Path | None = None
+    lrc_path: Path | None = None
+    synced_lyrics_provider: SyncedLyricsProvider | None = None
 
     def __post_init__(self) -> None:
         """Valida la proporción de mezcla de la pista externa.
@@ -446,7 +458,38 @@ def compute_long_video_fingerprint(
         "repost_mode": config.repost_mode,
         "watermark": _watermark_signature(config),
     }
+    lyric_sig = _lyric_signature(config)
+    if lyric_sig is not None:
+        payload["lyric_video"] = lyric_sig
     return sha256_canonical_json(payload)
+
+
+def _lyric_signature(config: PipelineConfig) -> dict[str, object] | None:
+    """Firma el formato lyric_video, configuración y archivo .lrc para --resume.
+
+    Args:
+        config: Configuración de la corrida.
+
+    Returns:
+        Diccionario con la firma determinista de letras, o None si no aplica.
+    """
+    if config.contract.format is not Format.LYRIC_VIDEO and config.contract.lyric_video is None:
+        return None
+
+    lrc_sha = None
+    if config.lrc_path is not None and config.lrc_path.is_file():
+        lrc_sha = sha256_file(config.lrc_path)
+
+    return {
+        "format": config.contract.format.value,
+        "config": (
+            config.contract.lyric_video.model_dump(mode="json")
+            if config.contract.lyric_video is not None
+            else None
+        ),
+        "lrc_file": _file_signature(config.lrc_path),
+        "lrc_sha256": lrc_sha,
+    }
 
 
 def _watermark_signature(config: PipelineConfig) -> dict[str, object]:
@@ -1627,6 +1670,37 @@ def _resolve_reframe_stage(
         return reframe, reframed
 
 
+def _resolve_subtitle_file(
+    *,
+    is_lyric: bool,
+    transcript: Transcript | None,
+    segment: Segment,
+    dependencies: _Dependencies,
+    config: PipelineConfig,
+    registry: _CleanupRegistry,
+    subtitles_name: str,
+) -> Path:
+    if is_lyric:
+        return _write_lyric_subtitles(
+            segment=segment,
+            config=config,
+            output_dir=config.output_dir,
+            registry=registry,
+            subtitles_name=subtitles_name,
+        )
+    if transcript is None:
+        msg = "no hay transcripción para generar subtítulos"
+        raise PipelineError(msg)
+    return _write_subtitles(
+        transcript,
+        segment=segment,
+        renderer=dependencies.subtitle_renderer,
+        output_dir=config.output_dir,
+        registry=registry,
+        subtitles_name=subtitles_name,
+    )
+
+
 def _resolve_subtitles_and_burn_stage(
     video: Path,
     *,
@@ -1643,7 +1717,8 @@ def _resolve_subtitles_and_burn_stage(
     final_name = f"final{suffix}.mp4"
     subtitles_name = f"subtitles{suffix}.ass"
     mute_audio = contract_mutes_audio(config.contract)
-    if transcript is None:
+    is_lyric = config.contract.format is Format.LYRIC_VIDEO
+    if transcript is None and not is_lyric:
         final_video = _publish(
             video,
             output_dir=config.output_dir,
@@ -1665,11 +1740,12 @@ def _resolve_subtitles_and_burn_stage(
         cached_subtitles = config.output_dir / subtitles_name
         return cached_subtitles, final_video
     try:
-        subtitles = _write_subtitles(
-            transcript,
+        subtitles = _resolve_subtitle_file(
+            is_lyric=is_lyric,
+            transcript=transcript,
             segment=segment,
-            renderer=dependencies.subtitle_renderer,
-            output_dir=config.output_dir,
+            dependencies=dependencies,
+            config=config,
             registry=registry,
             subtitles_name=subtitles_name,
         )
@@ -2586,6 +2662,75 @@ def _resolve_audio_track(
         return destination
     msg = "audio_locked requiere audio_track_path o audio_track_url"
     raise PipelineError(msg)
+
+
+def _fetch_lrclib_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
+    if not (config.contract.lyric_video and config.contract.lyric_video.lrclib_enabled):
+        msg = "no se encontraron letras sincronizadas (.lrc no configurado o lrclib deshabilitado)"
+        raise PipelineError(msg)
+    if config.synced_lyrics_provider is None:
+        msg = "no se encontraron letras sincronizadas (proveedor lrclib ausente)"
+        raise PipelineError(msg)
+    if not config.contract.lyric_video.track_name:
+        msg = "se requiere track_name para consultar letras en lrclib"
+        raise PipelineError(msg)
+    try:
+        content = config.synced_lyrics_provider.get_synced_lyrics(
+            track_name=config.contract.lyric_video.track_name,
+            artist_name=config.contract.lyric_video.artist_name,
+        )
+        return parse_lrc(content)
+    except LyricsError as error:
+        raise PipelineError(str(error)) from error
+
+
+def _resolve_pipeline_lyric_lines(config: PipelineConfig) -> tuple[LyricLine, ...]:
+    if config.lrc_path is not None and config.lrc_path.is_file():
+        try:
+            content = config.lrc_path.read_text(encoding="utf-8")
+            return parse_lrc(content)
+        except (OSError, ValueError) as error:
+            msg = f"no se pudo procesar el archivo .lrc en '{config.lrc_path}': {error}"
+            raise PipelineError(msg) from error
+
+    if config.contract.lyric_video is not None:
+        return _fetch_lrclib_lines(config)
+
+    msg = "formato lyric_video sin archivo ni configuración de letras .lrc"
+    raise PipelineError(msg)
+
+
+def _write_lyric_subtitles(
+    *,
+    segment: Segment,
+    config: PipelineConfig,
+    output_dir: Path,
+    registry: _CleanupRegistry,
+    subtitles_name: str = "subtitles.ass",
+) -> Path:
+    raw_lines = _resolve_pipeline_lyric_lines(config)
+    try:
+        window_lines = cut_lyric_window(
+            raw_lines,
+            start_sec=segment.start_s,
+            end_sec=segment.end_s,
+        )
+    except (LrcEmptyWindowError, ValueError) as err:
+        raise PipelineError(str(err)) from err
+
+    duration_s = segment.end_s - segment.start_s
+    ass_content = lyric_lines_to_ass(window_lines, duration_s=duration_s)
+    destination = registry.register(_temporary_path(output_dir / subtitles_name))
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = destination.write_text(ass_content, encoding="utf-8")
+        target = output_dir / subtitles_name
+        _ = destination.replace(target)
+    except OSError as error:
+        msg = f"no se pudo guardar el archivo .ass en {destination}: {error}"
+        raise PipelineError(msg) from error
+    else:
+        return target
 
 
 def _write_subtitles(

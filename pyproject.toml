@@ -231,6 +231,9 @@ ignore = [
     # get_synced_lyrics delega en _fetch_bytes, que lanza LyricsError; la sección
     # Raises documenta el contrato público.
     "docstring-extraneous-exception",
+    # SubtitleSegment se importa de forma diferida en lyric_lines_to_subtitle_segments
+    # para evitar importación circular entre lyrics y gate.
+    "import-outside-top-level",
 ]
 "src/kliptych/runtime/transport.py" = [
     # petición al endpoint configurado por el operador; el esquema http/https
@@ -495,6 +498,12 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
+]
+"tests/test_lyric_video_integration.py" = [
+    # ffmpeg se invoca con lista de argumentos y shell=False para generar el
+    # fixture sintético y probar el quemado con letras sincronizadas.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
 ]
 "tests/support.py" = [
     # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
