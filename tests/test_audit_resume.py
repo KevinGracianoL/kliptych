@@ -14,7 +14,7 @@ from typing import cast, override
 
 import pytest
 
-from kliptych.contract import Contract, Segment
+from kliptych.contract import Contract, Segment, TimestampRange
 from kliptych.encoding import RenderConfig
 from kliptych.moments import ChatMessage, Moment, MomentDetector, MomentSource
 from kliptych.orchestrator import (
@@ -96,15 +96,27 @@ def _resume_contract() -> Contract:
     )
 
 
+_last_ffmpeg_duration: list[str] = ["2.0"]
+
+
 def _ffmpeg_run(argv: list[str], **kwargs: object) -> object:
     _ = kwargs
+    if argv and "ffprobe" in argv[0]:
+        return SimpleNamespace(
+            args=argv,
+            returncode=0,
+            stdout=f"width=320\nheight=240\nduration={_last_ffmpeg_duration[0]}\n",
+            stderr="",
+        )
+    if "-t" in argv:
+        _last_ffmpeg_duration[0] = argv[argv.index("-t") + 1]
     out_path = Path(argv[-1])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _ = out_path.write_bytes(b"ffmpeg_output")
     return SimpleNamespace(
         args=argv,
         returncode=0,
-        stdout="width=320\nheight=240\nduration=2.0\n",
+        stdout=f"width=320\nheight=240\nduration={_last_ffmpeg_duration[0]}\n",
         stderr="",
     )
 
@@ -115,9 +127,14 @@ class _FakeDownloader:
         self._box: _PayloadBox = box
 
     def download_video(
-        self, *, url: str, destination: Path, format_selector: str | None = None
+        self,
+        *,
+        url: str,
+        destination: Path,
+        format_selector: str | None = None,
+        section: tuple[float, float] | None = None,
     ) -> Path:
-        _ = (url, format_selector)
+        _ = (url, format_selector, section)
         self._counter.download_calls += 1
         _ = destination.write_bytes(self._box.data)
         return destination
@@ -409,3 +426,21 @@ def test_run_audio_locked_and_repost_full_pipeline(
     assert isinstance(repost_result, PipelineResult)
     assert repost_result.transcript is None
     assert repost_result.final_video.is_file()
+
+
+def test_resume_invalidates_on_timestamp_range_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--resume invalida las etapas y vuelve a descargar si el contrato cambia timestamp_ranges."""
+    config, deps, counter = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"stable-bytes"))
+    _ = _run_resume(config, deps, resume=False)
+    assert counter.download_calls == 1
+    assert counter.transcribe_calls == 1
+
+    new_contract = config.contract.model_copy(
+        update={"timestamp_ranges": (TimestampRange(start_sec=10.0, end_sec=25.0),)}
+    )
+    config_changed = replace(config, contract=new_contract)
+    _ = _run_resume(config_changed, deps, resume=True)
+    assert counter.download_calls == 2
+    assert counter.transcribe_calls == 2

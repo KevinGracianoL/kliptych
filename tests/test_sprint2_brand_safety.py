@@ -8,7 +8,7 @@ revisión humana: jamás un ``pass`` silencioso.
 """
 
 from pathlib import Path
-from typing import override
+from typing import cast, override
 
 import pytest
 
@@ -38,12 +38,14 @@ from kliptych.git_proposals import ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification
 from kliptych.orchestrator import PipelineResult, SlideshowResult
 from kliptych.pipeline import RunOutcome, RunRequest, run_given_clips
+from kliptych.resolver import resolve_contract
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
     PROMPT_VERSION,
     CampaignModel,
     Caption,
     PieceContext,
+    openai_compatible,
 )
 from kliptych.segment import SegmentSelection
 from tests.support import (
@@ -430,3 +432,80 @@ def test_h4_campaign_manager_injects_brand_safety_assessor_from_model(tmp_path: 
     matched = [c for c in rejected.gate.checks if c.id == "brand.safety"]
     assert matched
     assert matched[0].status is CheckStatus.MANUAL_REVIEW
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "sin malas palabras",
+        "malas palabras",
+        "prohibido contenido nsfw",
+        "nsfw",
+        "sin temas sensibles",
+        "temas sensibles",
+        "no politica ni religion",
+        "no contenido para adultos",
+        "contenido para adultos",
+        "no insultos",
+        "sin insultos",
+    ],
+)
+def test_h5_bis_hal_cases_activate_brand_safety(tmp_path: Path, phrase: str) -> None:
+    def _risky(text: str) -> BrandSafetyAssessment:
+        _ = text
+        return BrandSafetyAssessment(risk=True, categories=("sensitive",), reason="inapropiado")
+
+    status, check = _run_gate(tmp_path, prohibitions=(phrase,), assess=_risky)
+    assert check is CheckStatus.MANUAL_REVIEW
+    assert status is GateStatus.PENDING_REVIEW
+
+
+def test_h5_bis_brand_safety_required_field_activates_rule(tmp_path: Path) -> None:
+    def _risky(text: str) -> BrandSafetyAssessment:
+        _ = text
+        return BrandSafetyAssessment(risk=True, categories=("profanity",), reason="inapropiado")
+
+    contract = make_contract(
+        hard=["artifact.integrity", "brand.safety"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        prohibitions=(),
+        brand_safety_required=True,
+        brand_safety_citation="sin temas sensibles",
+    )
+    piece = make_piece(_artifact(tmp_path), subtitle_text="hola a todos")
+    validators = {**DEFAULT_VALIDATORS, "brand.safety": make_brand_safety_validator(_risky)}
+    result = Gate(FakeProbe(info=make_media()), validators=validators).run(
+        contract=contract, piece=piece, assets=AssetRegistry(tmp_path)
+    )
+    matches = [check for check in result.checks if check.id == "brand.safety"]
+    assert len(matches) == 1
+    assert matches[0].status is CheckStatus.MANUAL_REVIEW
+    assert result.status is GateStatus.PENDING_REVIEW
+
+
+def _prompt_text(name: str) -> str:
+    return cast("str", getattr(openai_compatible, name))
+
+
+def test_h5_bis_extract_prompt_instructs_brand_safety_required() -> None:
+    prompt = _prompt_text("_EXTRACT_SYSTEM_PROMPT")
+    assert "brand_safety_required" in prompt
+    assert "brand_safety_citation" in prompt
+
+
+def test_h5_bis_resolver_resolves_brand_safety_from_draft(tmp_path: Path) -> None:
+    draft = make_draft(
+        brand_safety_required=candidate(value=True, quote="evitar contenido sensible"),
+        brand_safety_citation=candidate("evitar contenido sensible", "evitar contenido sensible"),
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    assert result is not None
+    assert result.contract is not None
+    contract = result.contract
+    assert contract.brand_safety_required is True
+    assert contract.brand_safety_citation == "evitar contenido sensible"
+    assert "brand.safety" in contract.rules.hard

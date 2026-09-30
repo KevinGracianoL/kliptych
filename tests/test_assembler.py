@@ -1,9 +1,11 @@
 """Tests del ensamblado given_clips: unitarios con subprocess falso e integración."""
 
+import json
 import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -465,3 +467,81 @@ def test_real_timeout_keeps_previous_artifact(tmp_path: Path) -> None:
         )
     assert destination.read_bytes() == b"artefacto-previo"
     _no_partials(destination)
+
+
+def test_cut_exact_rejects_missing_file_or_invalid_bounds(tmp_path: Path) -> None:
+    assembler = FFmpegAssembler()
+    missing = tmp_path / "missing.mp4"
+    dst = tmp_path / "dst.mp4"
+    with pytest.raises(AssembleError, match="no existe"):
+        _ = assembler.cut_exact(source=missing, destination=dst, start_s=0.0, duration_s=10.0)
+
+    existing = _file(tmp_path, "existing.mp4")
+    with pytest.raises(AssembleError, match="intervalo de corte"):
+        _ = assembler.cut_exact(source=existing, destination=dst, start_s=-1.0, duration_s=10.0)
+    with pytest.raises(AssembleError, match="intervalo de corte"):
+        _ = assembler.cut_exact(source=existing, destination=dst, start_s=0.0, duration_s=0.0)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    _FFMPEG is None or _FFPROBE is None,
+    reason="ffmpeg/ffprobe no disponibles",
+)
+def test_exact_cut_real_ffmpeg_integration(tmp_path: Path) -> None:
+    assert _FFMPEG is not None
+    assert _FFPROBE is not None
+    source = tmp_path / "source_30s.mp4"
+    argv_gen = [
+        _FFMPEG,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=duration=30:size=320x240:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=1000:duration=30",
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        str(source),
+    ]
+    _ = subprocess.run(argv_gen, check=True)
+
+    destination = tmp_path / "cut_exact.mp4"
+    assembler = FFmpegAssembler(ffmpeg=_FFMPEG)
+    out = assembler.cut_exact(
+        source=source,
+        destination=destination,
+        start_s=5.0,
+        duration_s=10.0,
+    )
+    assert out.is_file()
+
+    probe_cmd = [
+        _FFPROBE,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,start_time",
+        "-of",
+        "json",
+        str(out),
+    ]
+    res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+    data = cast("dict[str, object]", json.loads(res.stdout))
+    fmt = cast("dict[str, object]", data["format"])
+    fmt_duration = float(cast("str", fmt["duration"]))
+    assert fmt_duration == pytest.approx(10.0, abs=0.1)
+
+    streams = cast("list[dict[str, object]]", data.get("streams", []))
+    for stream in streams:
+        start_time = float(cast("str", stream.get("start_time", "0.0")))
+        assert start_time == pytest.approx(0.0, abs=0.05)

@@ -286,15 +286,19 @@ class _Injectables:
 
 
 def _mock_ffmpeg() -> object:
+    last_duration: list[str] = ["2.0"]
+
     def run(argv: list[str], **kwargs: object) -> object:
         _ = kwargs
         if argv and argv[0] == "ffprobe":
             return SimpleNamespace(
                 args=argv,
                 returncode=0,
-                stdout="width=320\nheight=240\nduration=2.0\n",
+                stdout=f"width=320\nheight=240\nduration={last_duration[0]}\n",
                 stderr="",
             )
+        if "-t" in argv:
+            last_duration[0] = argv[argv.index("-t") + 1]
         # escribe el destino para comandos ffmpeg simulados
         out_path = Path(argv[-1])
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +306,7 @@ def _mock_ffmpeg() -> object:
         return SimpleNamespace(
             args=argv,
             returncode=0,
-            stdout="width=320\nheight=240\nduration=2.0\n",
+            stdout=f"width=320\nheight=240\nduration={last_duration[0]}\n",
             stderr="",
         )
 

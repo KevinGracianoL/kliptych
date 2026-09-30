@@ -97,6 +97,13 @@ class SegmentDraft(ContractBase):
     end_s: FieldCandidate[float] | None = None
 
 
+class TimestampRangeDraft(ContractBase):
+    """Rango de marcas temporales propuesto del brief."""
+
+    start_sec: FieldCandidate[float | str] | dict[str, object] | float | str | None = None
+    end_sec: FieldCandidate[float | str] | dict[str, object] | float | str | None = None
+
+
 class SegmentsDraft(ContractBase):
     """Segmentos propuestos para el modo long_video."""
 
@@ -159,7 +166,10 @@ class ContractDraft(ContractBase):
     hook_keyword: FieldCandidate[str] | None = None
     hook_window_seconds: FieldCandidate[float] | None = None
     brand_safety: FieldCandidate[bool] | None = None
+    brand_safety_required: FieldCandidate[bool] | None = None
+    brand_safety_citation: FieldCandidate[str] | None = None
     unmapped: list[UnmappedRuleDraft] = Field(default_factory=list)
+    timestamp_ranges: list[TimestampRangeDraft] = Field(default_factory=list)
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

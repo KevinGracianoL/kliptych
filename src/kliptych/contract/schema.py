@@ -180,6 +180,31 @@ class Segment(ContractBase):
         return self
 
 
+class TimestampRange(ContractBase):
+    """Rango de marcas temporales mandatorio extraído del brief o solicitado."""
+
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(gt=0)
+
+    @field_validator("start_sec", "end_sec")
+    @classmethod
+    def _bounds_are_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            msg = f"las cotas del rango temporal deben ser finitas, no {value}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if not (0.0 <= self.start_sec < self.end_sec):
+            msg = (
+                f"se exige 0 <= start_sec < end_sec, pero "
+                f"start_sec={self.start_sec}, end_sec={self.end_sec}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class RuleSet(ContractBase):
     """Clasificación de cada regla como hard, recommended o manual_review."""
 
@@ -267,6 +292,7 @@ class GlobalRestrictions(ContractBase):
     prohibitions: tuple[str, ...] = ()
     audio_policy: AudioPolicy | None = None
     hook_keyword: str | None = None
+    brand_safety_required: bool = False
 
 
 class UnmappedRule(ContractBase):
@@ -324,7 +350,10 @@ class Contract(ContractBase):
     spelling_locks: list[str] = Field(default_factory=list)
     prohibitions: list[str] = Field(default_factory=list)
     hook_keyword: str | None = Field(default=None, min_length=1, max_length=140)
+    brand_safety_required: bool = False
+    brand_safety_citation: str | None = None
     unmapped: tuple[UnmappedRule, ...] = ()
+    timestamp_ranges: tuple[TimestampRange, ...] = ()
     rules: RuleSet
     assets: AssetBundle
     segments: tuple[Segment, ...] = ()
@@ -352,8 +381,9 @@ class Contract(ContractBase):
     def _unmapped_rules_do_not_collide_with_catalog(
         cls, unmapped: tuple[UnmappedRule, ...]
     ) -> tuple[UnmappedRule, ...]:
+        normalized_known = {rule.strip().lower() for rule in KNOWN_VALIDATOR_RULES}
         for entry in unmapped:
-            if entry.rule in KNOWN_VALIDATOR_RULES:
+            if entry.rule.strip().lower() in normalized_known:
                 msg = (
                     f"la regla no mapeada '{entry.rule}' colisiona con un validador "
                     "conocido en el catálogo del gate"
@@ -416,6 +446,7 @@ class Contract(ContractBase):
             prohibitions=tuple(self.prohibitions),
             audio_policy=self.audio_policy,
             hook_keyword=self.hook_keyword,
+            brand_safety_required=self.brand_safety_required,
         )
         aliases: dict[str, tuple[str, ...]] = {
             "audio.official_track": (
@@ -437,6 +468,15 @@ class Contract(ContractBase):
                 "restricciones declaradas sin regla clasificada en rules: "
                 f"{sorted(missing)}; cada regla debe ser hard, recommended o manual_review"
             )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _brand_safety_citation_present_when_required(self) -> Self:
+        if self.brand_safety_required and (
+            not self.brand_safety_citation or not self.brand_safety_citation.strip()
+        ):
+            msg = "brand_safety_required=True exige brand_safety_citation no vacía"
             raise ValueError(msg)
         return self
 
@@ -540,6 +580,12 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
         _ = dump.pop("hook_keyword", None)
     if not contract.unmapped:
         _ = dump.pop("unmapped", None)
+    if not contract.brand_safety_required:
+        _ = dump.pop("brand_safety_required", None)
+    if contract.brand_safety_citation is None:
+        _ = dump.pop("brand_safety_citation", None)
+    if not contract.timestamp_ranges:
+        _ = dump.pop("timestamp_ranges", None)
     _prune_default_watermark_options(dump)
 
 
@@ -632,6 +678,8 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
         active.append("hook.keyword")
     if global_restrictions.audio_policy is AudioPolicy.INTERNAL_OFFICIAL_SOUND:
         active.extend(("audio.policy", "audio.silence"))
+    if global_restrictions.brand_safety_required:
+        active.append("brand.safety")
     return active
 
 

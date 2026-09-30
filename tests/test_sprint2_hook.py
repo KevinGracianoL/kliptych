@@ -437,7 +437,13 @@ def test_h1_unmapped_outside_rules_forces_pending_review(tmp_path: Path) -> None
 
 
 def test_h1_contract_rejects_unmapped_colliding_with_known_validators() -> None:
-    for rule_id in ("artifact.integrity", "caption.forbidden", "watermark.present"):
+    for rule_id in (
+        "artifact.integrity",
+        "caption.forbidden",
+        "watermark.present",
+        " Artifact.Integrity ",
+        " artifact.integrity ",
+    ):
         with pytest.raises(ValueError, match="colisiona con un validador conocido"):
             _ = make_contract(
                 hard=["artifact.integrity"],

@@ -355,3 +355,20 @@ def test_long_video_contract_requires_segments() -> None:
 def test_non_long_video_rejects_segments() -> None:
     with pytest.raises(ValidationError, match="solo el modo long_video"):
         _ = _build(segments=[{"start_s": 0.0, "end_s": 8.5}])
+
+
+def test_brand_safety_required_requires_non_empty_citation() -> None:
+    base_data = _contract_data()
+    rules = dict(cast("dict[str, list[str]]", base_data["rules"]))
+    rules["hard"] = [*rules["hard"], "brand.safety"]
+    with pytest.raises(ValidationError, match="brand_safety_citation"):
+        _ = _build(brand_safety_required=True, brand_safety_citation=None, rules=rules)
+    with pytest.raises(ValidationError, match="brand_safety_citation"):
+        _ = _build(brand_safety_required=True, brand_safety_citation="   ", rules=rules)
+    contract = _build(
+        brand_safety_required=True,
+        brand_safety_citation="contenido seguro",
+        rules=rules,
+    )
+    assert contract.brand_safety_required is True
+    assert contract.brand_safety_citation == "contenido seguro"

@@ -26,6 +26,7 @@ el resultado se publica con la misma limpieza determinista.
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -39,7 +40,13 @@ from typing import Protocol, overload
 
 from pydantic import TypeAdapter, ValidationError
 
-from kliptych.contract import Contract, Segment, contract_digest, contract_mutes_audio
+from kliptych.contract import (
+    Contract,
+    Segment,
+    TimestampRange,
+    contract_digest,
+    contract_mutes_audio,
+)
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
@@ -81,6 +88,7 @@ _SLIDESHOW_FILTER = (
     f"scale={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:force_original_aspect_ratio=decrease,"
     f"pad={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 )
+_CUT_DURATION_TOLERANCE_S = 0.5
 
 
 class PipelineError(Exception):
@@ -427,6 +435,13 @@ def compute_long_video_fingerprint(
             "ffmpeg": config.render.ffmpeg,
             "timeout_s": config.render.timeout_s,
             "nvenc_available": config.render.nvenc_available,
+        },
+        "download": {
+            "timestamp_ranges": [
+                {"start_sec": tr.start_sec, "end_sec": tr.end_sec}
+                for tr in config.contract.timestamp_ranges
+            ],
+            "download_section_mode": bool(config.contract.timestamp_ranges),
         },
         "repost_mode": config.repost_mode,
         "watermark": _watermark_signature(config),
@@ -1134,6 +1149,7 @@ def _resolve_source_stage(
                 return _revalidate_remote_source(
                     url,
                     source_path,
+                    config=config,
                     downloader=downloader,
                     registry=registry,
                 )
@@ -1154,6 +1170,7 @@ def _revalidate_remote_source(
     *,
     downloader: MediaDownloader,
     registry: _CleanupRegistry,
+    config: PipelineConfig | None = None,
 ) -> Path:
     """Re-descarga la fuente remota y actualiza el local solo si cambió.
 
@@ -1167,6 +1184,7 @@ def _revalidate_remote_source(
         source_path: Archivo local descargado en una corrida previa.
         downloader: Descargador acotado para re-descargar los bytes.
         registry: Registro donde se anota el temporal de revalidación.
+        config: Configuración del pipeline con contrato y render (opcional).
 
     Returns:
         La ruta del archivo fuente local (actualizado).
@@ -1176,7 +1194,29 @@ def _revalidate_remote_source(
     """
     temporary = registry.register(_temporary_path(source_path))
     with _translated("revalidación de la fuente"):
-        _ = downloader.download_video(url=url, destination=temporary)
+        if config is not None and config.contract.timestamp_ranges:
+            window_start = min(tr.start_sec for tr in config.contract.timestamp_ranges)
+            window_end = max(tr.end_sec for tr in config.contract.timestamp_ranges)
+            actual_download_start = max(0.0, window_start - 10.0)
+            margin_dest = registry.register(
+                _temporary_path(source_path.with_name("margin_source.mp4"))
+            )
+            _ = downloader.download_video(
+                url=url,
+                destination=margin_dest,
+                section=(window_start, window_end),
+            )
+            cut_start = window_start - actual_download_start
+            cut_duration = window_end - window_start
+            _ = _cut_exact_ffmpeg(
+                source=margin_dest,
+                destination=temporary,
+                start_s=cut_start,
+                duration_s=cut_duration,
+                render=config.render,
+            )
+        else:
+            _ = downloader.download_video(url=url, destination=temporary)
     try:
         changed = sha256_file(temporary) != sha256_file(source_path)
     except OSError as error:
@@ -1408,6 +1448,25 @@ def _resolve_moments_stage(
         return moments
 
 
+def _source_time_offset_sec(config: PipelineConfig) -> float:
+    if config.contract.timestamp_ranges:
+        return min(tr.start_sec for tr in config.contract.timestamp_ranges)
+    return 0.0
+
+
+def _contract_with_relative_timestamps(contract: Contract, *, offset_sec: float) -> Contract:
+    if math.isclose(offset_sec, 0.0, abs_tol=1e-6) or not contract.timestamp_ranges:
+        return contract
+    rel_ranges = tuple(
+        TimestampRange(
+            start_sec=max(0.0, tr.start_sec - offset_sec),
+            end_sec=max(0.0, tr.end_sec - offset_sec),
+        )
+        for tr in contract.timestamp_ranges
+    )
+    return contract.model_copy(update={"timestamp_ranges": rel_ranges})
+
+
 def _resolve_selection_stage(
     *,
     transcript: Transcript,
@@ -1433,10 +1492,13 @@ def _resolve_selection_stage(
                     state.mark_done(PipelineStage.SELECT, artifact_file)
                 return selection
     try:
+        rel_contract = _contract_with_relative_timestamps(
+            config.contract, offset_sec=_source_time_offset_sec(config)
+        )
         selection = _select(
             transcript,
             moments,
-            contract=config.contract,
+            contract=rel_contract,
             model=model,
             selector=selector,
         )
@@ -1909,6 +1971,49 @@ def _run_stages(
     )
 
 
+def _cut_exact_ffmpeg(
+    *,
+    source: Path,
+    destination: Path,
+    start_s: float,
+    duration_s: float,
+    render: RenderConfig,
+) -> Path:
+    argv = [
+        render.ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-ss",
+        _seconds(start_s),
+        "-t",
+        _seconds(duration_s),
+        "-i",
+        str(source),
+        "-vf",
+        "setpts=PTS-STARTPTS",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+    ]
+    argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
+    argv += list(audio_and_container_arguments())
+    argv.append(str(destination))
+    with _translated("corte exacto de la fuente"):
+        _run_ffmpeg(argv, render=render)
+    info = _probe_video(destination, render=render)
+    if info.duration_s <= 0.0 or abs(info.duration_s - duration_s) > _CUT_DURATION_TOLERANCE_S:
+        msg = (
+            f"el corte exacto produjo una duración inválida ({info.duration_s:.3f} s), "
+            f"se esperaban {duration_s:.3f} s (tolerancia {_CUT_DURATION_TOLERANCE_S} s)"
+        )
+        raise PipelineError(msg)
+    return destination
+
+
 def _download(
     url: str,
     *,
@@ -1919,7 +2024,27 @@ def _download(
     source = config.output_dir / _SOURCE_NAME
     temporary = registry.register(_temporary_path(source))
     with _translated("descarga"):
-        _ = downloader.download_video(url=url, destination=temporary)
+        if config.contract.timestamp_ranges:
+            window_start = min(tr.start_sec for tr in config.contract.timestamp_ranges)
+            window_end = max(tr.end_sec for tr in config.contract.timestamp_ranges)
+            actual_download_start = max(0.0, window_start - 10.0)
+            margin_dest = registry.register(_temporary_path(source.with_name("margin_source.mp4")))
+            _ = downloader.download_video(
+                url=url,
+                destination=margin_dest,
+                section=(window_start, window_end),
+            )
+            cut_start = window_start - actual_download_start
+            cut_duration = window_end - window_start
+            _ = _cut_exact_ffmpeg(
+                source=margin_dest,
+                destination=temporary,
+                start_s=cut_start,
+                duration_s=cut_duration,
+                render=config.render,
+            )
+        else:
+            _ = downloader.download_video(url=url, destination=temporary)
         _ = temporary.replace(source)
     return source
 
@@ -2257,8 +2382,19 @@ def _cut_segment(
     argv += list(video_encoder_arguments(nvenc_available=render.nvenc_available))
     argv += list(audio_and_container_arguments())
     argv.append(str(destination))
+    expected_duration = segment.end_s - segment.start_s
     with _translated("corte del segmento"):
         _run_ffmpeg(argv, render=render)
+    info = _probe_video(destination, render=render)
+    if (
+        info.duration_s <= 0.0
+        or abs(info.duration_s - expected_duration) > _CUT_DURATION_TOLERANCE_S
+    ):
+        msg = (
+            f"el corte del segmento produjo una duración inválida ({info.duration_s:.3f} s), "
+            f"se esperaban {expected_duration:.3f} s (tolerancia {_CUT_DURATION_TOLERANCE_S} s)"
+        )
+        raise PipelineError(msg)
     return destination
 
 

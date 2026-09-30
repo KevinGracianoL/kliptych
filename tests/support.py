@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from kliptych.contract import AssetRef, AudioPolicy, Contract, ContractDraft, Platform
+from kliptych.contract import (
+    AssetRef,
+    AudioPolicy,
+    Contract,
+    ContractDraft,
+    Platform,
+    TimestampRange,
+)
 from kliptych.gate import MediaInfo, Piece, ProbeError, SubtitleSegment
 
 ALL_HARD_RULES = (
@@ -123,6 +130,18 @@ def _watermark_rule_id(
     return "watermark.present"
 
 
+def _build_timestamp_payload(
+    ranges: Sequence[TimestampRange | tuple[float, float] | list[float]],
+) -> list[dict[str, float]]:
+    payload: list[dict[str, float]] = []
+    for r in ranges:
+        if isinstance(r, TimestampRange):
+            payload.append({"start_sec": r.start_sec, "end_sec": r.end_sec})
+        elif len(r) == 2:
+            payload.append({"start_sec": float(r[0]), "end_sec": float(r[1])})
+    return payload
+
+
 def make_contract(
     *,
     hard: Sequence[str] = ALL_HARD_RULES,
@@ -148,11 +167,17 @@ def make_contract(
     language: str | None = None,
     audio_policy: AudioPolicy | None = None,
     hook_keyword: str | None = None,
+    brand_safety_required: bool = False,
+    brand_safety_citation: str | None = None,
     unmapped: Sequence[tuple[str, str]] = (),
+    timestamp_ranges: Sequence[TimestampRange | tuple[float, float] | list[float]] = (),
 ) -> Contract:
     plan = [*hard]
     manual = [*manual_review]
     classified = {*hard, *recommended, *manual_review}
+    if brand_safety_required and "brand.safety" not in classified:
+        plan.append("brand.safety")
+        classified.add("brand.safety")
     audio_rule_id = _AUDIO_MANUAL_RULES.get(audio_rule)
     if audio_rule_id is not None and audio_rule_id not in classified:
         manual.append(audio_rule_id)
@@ -184,6 +209,7 @@ def make_contract(
             else:
                 plan.append(rule_id)
             classified.add(rule_id)
+    timestamp_ranges_payload = _build_timestamp_payload(timestamp_ranges)
     return Contract.model_validate(
         {
             "schema_version": "1.1",
@@ -226,7 +252,10 @@ def make_contract(
             "prohibitions": list(prohibitions),
             "audio_policy": audio_policy,
             "hook_keyword": hook_keyword,
+            "brand_safety_required": brand_safety_required,
+            "brand_safety_citation": brand_safety_citation,
             "unmapped": [{"rule": rule, "quote": quote} for rule, quote in unmapped],
+            "timestamp_ranges": timestamp_ranges_payload,
             "rules": {
                 "hard": plan,
                 "recommended": list(recommended),

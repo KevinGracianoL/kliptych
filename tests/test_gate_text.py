@@ -42,3 +42,8 @@ def test_contains_phrase_preserves_enie_semantics() -> None:
     assert not contains_phrase("peña", "pena")
     assert not contains_phrase("pena", "peña")
     assert contains_phrase("peña", "peña")
+
+
+def test_h7_bis_decomposed_enie_normalization() -> None:
+    assert normalize_text("an\u0303o") == "año"
+    assert contains_phrase("feliz an\u0303o", "año")

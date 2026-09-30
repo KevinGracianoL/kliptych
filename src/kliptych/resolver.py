@@ -22,8 +22,11 @@ Política de resolución:
   se puede resolver se descarta y se reporta (no bloquea).
 """
 
+import math
+import re
 import unicodedata
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
@@ -61,6 +64,7 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    TimestampRange,
     UnmappedRule,
     Watermark,
     WatermarkPosition,
@@ -263,6 +267,422 @@ def resolve_contract(
     )
 
 
+def _resolve_brand_safety(
+    draft: ContractDraft,
+    brief_text: str | None,
+    prohibitions: list[str],
+) -> tuple[bool, str | None, list[str]]:
+    brand_safety_indicated = (
+        _brief_indicates_brand_safety(brief_text, prohibitions)
+        or _value(draft.brand_safety) is True
+        or _value(draft.brand_safety_required) is True
+    )
+    brand_safety_required = (
+        _value(draft.brand_safety_required) is True
+        or _value(draft.brand_safety) is True
+        or brand_safety_indicated
+    )
+    brand_safety_citation = _value(draft.brand_safety_citation)
+    if brand_safety_citation is None and brand_safety_required:
+        if (
+            draft.brand_safety_required is not None
+            and draft.brand_safety_required.evidence is not None
+        ):
+            brand_safety_citation = draft.brand_safety_required.evidence.quote
+        elif draft.brand_safety is not None and draft.brand_safety.evidence is not None:
+            brand_safety_citation = draft.brand_safety.evidence.quote
+        elif draft.prohibitions is not None and draft.prohibitions.evidence is not None:
+            brand_safety_citation = draft.prohibitions.evidence.quote
+        elif prohibitions:
+            brand_safety_citation = prohibitions[0]
+    if brand_safety_indicated or brand_safety_required:
+        prohibitions_text = normalize_text(" ".join(prohibitions))
+        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
+            prohibitions = [*prohibitions, "brand safety"]
+    return brand_safety_required, brand_safety_citation, prohibitions
+
+
+_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_HOUR = 3600.0
+_TIME_PARTS_MM_SS = 2
+_TIME_PARTS_HH_MM_SS = 3
+
+_CLOCK_RE = re.compile(r"^[0-9]+(:[0-5][0-9]){1,2}(\.[0-9]+)?$")
+_NUMERIC_SEC_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def _parse_clock_seconds(parts: list[str]) -> float | None:
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == _TIME_PARTS_MM_SS:
+        return nums[0] * _SECONDS_PER_MINUTE + nums[1]
+    if len(nums) == _TIME_PARTS_HH_MM_SS:
+        return nums[0] * _SECONDS_PER_HOUR + nums[1] * _SECONDS_PER_MINUTE + nums[2]
+    return None
+
+
+def parse_timestamp_seconds(value: float | str) -> float | None:
+    """Convierte un valor de tiempo a float seconds con validación estricta ASCII.
+
+    Args:
+        value: Valor numérico o texto en formato segundos, 'MM:SS' o 'HH:MM:SS'.
+
+    Returns:
+        Segundos como float finito no negativo, o None si el valor es inválido.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        val = float(value)
+        return val if math.isfinite(val) and val >= 0.0 else None
+    cleaned = value.strip().rstrip("sS").strip()
+    if not cleaned:
+        return None
+    val: float | None = None
+    if _NUMERIC_SEC_RE.match(cleaned):
+        with suppress(ValueError):
+            val = float(cleaned)
+    elif _CLOCK_RE.match(cleaned):
+        val = _parse_clock_seconds(cleaned.split(":"))
+    return val if val is not None and math.isfinite(val) and val >= 0.0 else None
+
+
+_TIME_PATTERN = r"(?:[0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}(?:\.[0-9]+)?"
+_SEC_PATTERN = r"[0-9]+(?:\.[0-9]+)?\s*s?"
+_TIME_SEP = r"(?:-|[\u2013\u2014]|\ba\b|\bal\b|\bto\b|\bhasta\b)"
+_RANGE_RE = re.compile(
+    rf"(?P<start>{_TIME_PATTERN}|{_SEC_PATTERN})\s*{_TIME_SEP}\s*(?P<end>{_TIME_PATTERN}|{_SEC_PATTERN})",
+    re.IGNORECASE,
+)
+_CUTOFF_LABEL_RE = re.compile(
+    r"\b(?:timestamps?|cortes?|cortar\s+de(?:l)?|corte\s+de(?:l)?|minutos?|segmentos?|fragmentos?|marcas?|clip\s+from)\b",
+    re.IGNORECASE,
+)
+_EXCLUDED_CONTEXT_RE = re.compile(
+    r"\b(?:durar|duracion|duración|duration|horario|schedule|horas?)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[\r\n;]+|(?<=\S)\.\s+")
+
+
+def _is_valid_cutoff_clause(clause: str) -> bool:
+    cleaned = clause.strip()
+    if not cleaned or _EXCLUDED_CONTEXT_RE.search(cleaned):
+        return False
+    return bool(_CUTOFF_LABEL_RE.search(cleaned))
+
+
+def _extract_clause_ranges(
+    clause: str,
+    seen: set[tuple[float, float]],
+    ranges: list[TimestampRange],
+    issues: list[ResolutionIssue] | None,
+) -> None:
+    for match in _RANGE_RE.finditer(clause):
+        start = parse_timestamp_seconds(match.group("start"))
+        end = parse_timestamp_seconds(match.group("end"))
+        if start is None or end is None:
+            continue
+        if start >= end:
+            if issues is not None:
+                issues.append(
+                    ResolutionIssue(
+                        code=IssueCode.INVALID_CONTRACT,
+                        field="timestamp_ranges",
+                        detail=f"rango temporal invertido en el brief: start={start} >= end={end}",
+                    )
+                )
+        elif (start, end) not in seen:
+            seen.add((start, end))
+            ranges.append(TimestampRange(start_sec=start, end_sec=end))
+
+
+def _extract_timestamp_ranges_from_text(
+    brief_text: str, issues: list[ResolutionIssue] | None = None
+) -> list[TimestampRange]:
+    ranges: list[TimestampRange] = []
+    seen: set[tuple[float, float]] = set()
+
+    for line in brief_text.splitlines():
+        for clause in _CLAUSE_SPLIT_RE.split(line):
+            if _is_valid_cutoff_clause(clause):
+                _extract_clause_ranges(clause.strip(), seen, ranges, issues)
+    return ranges
+
+
+def _extract_candidate_value(
+    candidate: FieldCandidate[float | str] | dict[str, object] | float | str | None,
+) -> float | str | None:
+    if isinstance(candidate, FieldCandidate):
+        val = candidate.value
+        return val if isinstance(val, (int, float, str)) and not isinstance(val, bool) else None
+    if isinstance(candidate, dict):
+        val = candidate.get("value")
+        return val if isinstance(val, (int, float, str)) and not isinstance(val, bool) else None
+    if isinstance(candidate, (int, float, str)) and not isinstance(candidate, bool):
+        return candidate
+    return None
+
+
+def _extract_candidate_quote(bound: object) -> str | None:
+    if isinstance(bound, FieldCandidate):
+        return bound.evidence.quote if bound.evidence else None
+    if isinstance(bound, dict):
+        d = cast("dict[str, object]", bound)
+        ev = d.get("evidence")
+        if isinstance(ev, dict):
+            ev_dict = cast("dict[str, object]", ev)
+            quote = ev_dict.get("quote")
+            if isinstance(quote, str):
+                return quote
+        elif isinstance(ev, SourceEvidence):
+            return ev.quote
+    return None
+
+
+def _extract_candidate_confidence(bound: object) -> object:
+    if isinstance(bound, FieldCandidate):
+        return bound.confidence
+    if isinstance(bound, dict):
+        d = cast("dict[str, object]", bound)
+        return d.get("confidence")
+    return None
+
+
+def _check_confidence_provenance(bound: object, issues: list[ResolutionIssue]) -> bool:
+    conf = _extract_candidate_confidence(bound)
+    if conf is None or (isinstance(conf, str) and not conf.strip()):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal sin confianza explícita",
+            )
+        )
+        return False
+
+    conf_str = str(conf).lower()
+    if "conflict" in conf_str:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.CONFLICT,
+                field="timestamp_ranges",
+                detail="rango temporal en conflicto",
+            )
+        )
+        return False
+    if "missing" in conf_str:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal con confianza 'missing'",
+            )
+        )
+        return False
+    if conf_str not in {"explicit", "inferred"}:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=f"rango temporal con confianza inválida: {conf!r}",
+            )
+        )
+        return False
+    return True
+
+
+def _check_evidence_provenance(
+    bound: object,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> bool:
+    quote = _extract_candidate_quote(bound)
+    if quote is None or not quote.strip():
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="timestamp_ranges",
+                detail="rango temporal sin evidencia textual obligatoria",
+            )
+        )
+        return False
+
+    if brief_text is not None and quote not in brief_text:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=f"cita del rango temporal no encontrada en el brief: {quote!r}",
+            )
+        )
+        return False
+    return True
+
+
+def _check_candidate_provenance(
+    bound: object,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> bool:
+    conf_ok = _check_confidence_provenance(bound, issues)
+    ev_ok = _check_evidence_provenance(bound, brief_text, issues)
+    return conf_ok and ev_ok
+
+
+_QUOTE_TIME_RE = re.compile(rf"\b(?:{_TIME_PATTERN}|{_SEC_PATTERN})\b")
+
+
+def _extract_ordered_times(text: str) -> list[float]:
+    times: list[float] = []
+    for match in _QUOTE_TIME_RE.finditer(text):
+        token = match.group(0).strip()
+        parsed = parse_timestamp_seconds(token)
+        if parsed is not None:
+            times.append(parsed)
+    return times
+
+
+def _extract_parsed_times(text: str) -> set[float]:
+    return set(_extract_ordered_times(text))
+
+
+def _check_numeric_correspondence(
+    start_bound: object,
+    end_bound: object,
+    s: float,
+    e: float,
+    issues: list[ResolutionIssue],
+) -> bool:
+    start_quote = _extract_candidate_quote(start_bound)
+    end_quote = _extract_candidate_quote(end_bound)
+    start_times: set[float] = _extract_parsed_times(start_quote) if start_quote else set()
+    end_times: set[float] = _extract_parsed_times(end_quote) if end_quote else set()
+
+    has_s = any(math.isclose(t, s, abs_tol=1e-3) for t in start_times)
+    has_e = any(math.isclose(t, e, abs_tol=1e-3) for t in end_times)
+    if not (has_s and has_e):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="timestamp_ranges",
+                detail=(
+                    f"marcas temporales start={s} end={e} no se corresponden con la cita: "
+                    f"start_quote={start_quote!r}, end_quote={end_quote!r}"
+                ),
+            )
+        )
+        return False
+
+    if (
+        start_quote is not None
+        and end_quote is not None
+        and start_quote.strip() == end_quote.strip()
+    ):
+        ordered = _extract_ordered_times(start_quote)
+        in_order = any(
+            math.isclose(ordered[i], s, abs_tol=1e-3) and math.isclose(ordered[j], e, abs_tol=1e-3)
+            for i in range(len(ordered))
+            for j in range(i + 1, len(ordered))
+        )
+        if not in_order:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=(
+                        f"marcas temporales start={s} end={e} desordenadas en la cita compartida: "
+                        f"{start_quote!r}"
+                    ),
+                )
+            )
+            return False
+
+    return True
+
+
+def _resolve_timestamp_ranges(
+    draft: ContractDraft,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> tuple[TimestampRange, ...]:
+    ranges: list[TimestampRange] = []
+    for item in draft.timestamp_ranges:
+        start_bound = item.start_sec
+        end_bound = item.end_sec
+        if start_bound is None or end_bound is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.MISSING_REQUIRED,
+                    field="timestamp_ranges",
+                    detail="rango temporal incompleto: falta start_sec o end_sec",
+                )
+            )
+            continue
+
+        start_valid = _check_candidate_provenance(start_bound, brief_text, issues)
+        end_valid = _check_candidate_provenance(end_bound, brief_text, issues)
+        if not (start_valid and end_valid):
+            continue
+
+        start_raw = _extract_candidate_value(start_bound)
+        end_raw = _extract_candidate_value(end_bound)
+        if start_raw is None or end_raw is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=f"rango temporal sin valor válido: start={start_raw}, end={end_raw}",
+                )
+            )
+            continue
+
+        s = parse_timestamp_seconds(start_raw)
+        e = parse_timestamp_seconds(end_raw)
+        if s is not None and e is not None and 0.0 <= s < e:
+            if not _check_numeric_correspondence(start_bound, end_bound, s, e, issues):
+                continue
+            ranges.append(TimestampRange(start_sec=s, end_sec=e))
+        else:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="timestamp_ranges",
+                    detail=f"rango temporal inválido: start={start_raw}, end={end_raw}",
+                )
+            )
+    if not ranges and brief_text and not issues:
+        ranges.extend(_extract_timestamp_ranges_from_text(brief_text, issues=issues))
+    return tuple(ranges)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedSecondary:
+    official_audio: OfficialAudio | None
+    unmapped: tuple[UnmappedRule, ...]
+    segments: tuple[Segment, ...]
+    geo_target: GeoTarget | None
+    timestamp_ranges: tuple[TimestampRange, ...]
+
+
+def _resolve_secondary_fields(
+    draft: ContractDraft,
+    platforms: dict[Platform, PlatformRules],
+    mode: Mode,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+) -> _ResolvedSecondary:
+    return _ResolvedSecondary(
+        official_audio=_resolve_official_audio(draft, platforms, issues),
+        unmapped=_resolve_unmapped(draft, issues),
+        segments=_resolve_segments(draft, mode, issues),
+        geo_target=_resolve_geo_target(draft, issues),
+        timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
+    )
+
+
 def _build_contract(
     draft: ContractDraft,
     registry: AssetRegistry,
@@ -279,17 +699,11 @@ def _build_contract(
     assets = _resolve_assets(draft, registry, issues)
     spelling_locks = _values(draft.spelling_locks)
     prohibitions = _values(draft.prohibitions)
-    if (
-        _brief_indicates_brand_safety(brief_text, prohibitions)
-        or _value(draft.brand_safety) is True
-    ):
-        prohibitions_text = normalize_text(" ".join(prohibitions))
-        if not any(normalize_text(m) in prohibitions_text for m in BRAND_SAFETY_MENTIONS):
-            prohibitions = [*prohibitions, "brand safety"]
-    official_audio = _resolve_official_audio(draft, platforms, issues)
+    brand_safety_required, brand_safety_citation, prohibitions = _resolve_brand_safety(
+        draft, brief_text, prohibitions
+    )
     hook_keyword = _value(draft.hook_keyword)
-    unmapped = _resolve_unmapped(draft, issues)
-    segments = _resolve_segments(draft, mode, issues)
+    secondary = _resolve_secondary_fields(draft, platforms, mode, brief_text, issues)
     rules = _resolve_rules(
         draft,
         context=_RuleContext(
@@ -303,13 +717,13 @@ def _build_contract(
                 prohibitions=tuple(prohibitions),
                 audio_policy=_value(draft.audio_policy),
                 hook_keyword=hook_keyword,
+                brand_safety_required=brand_safety_required,
             ),
             brief_text=brief_text,
         ),
-        unmapped=unmapped,
+        unmapped=secondary.unmapped,
         issues=issues,
     )
-    geo_target = _resolve_geo_target(draft, issues)
 
     if _has_blocking(issues) or campaign_id is None or languages is None:
         return None
@@ -320,17 +734,20 @@ def _build_contract(
         mode=mode,
         platforms=platforms,
         languages=languages,
-        official_audio=official_audio,
+        official_audio=secondary.official_audio,
         audio_policy=_value(draft.audio_policy),
         watermark=watermark,
         spelling_locks=spelling_locks,
         prohibitions=prohibitions,
         hook_keyword=hook_keyword,
-        unmapped=unmapped,
+        brand_safety_required=brand_safety_required,
+        brand_safety_citation=brand_safety_citation,
+        unmapped=secondary.unmapped,
+        timestamp_ranges=secondary.timestamp_ranges,
         rules=rules,
         assets=assets,
-        segments=segments,
-        geo_target=geo_target,
+        segments=secondary.segments,
+        geo_target=secondary.geo_target,
         min_views_for_payout=MinViewsForPayout(value=_value(draft.min_views_for_payout)),
         analytics_proof_required=AnalyticsProofRequired(
             value=bool(_value(draft.analytics_proof_required))
@@ -429,6 +846,8 @@ def _collect_top_level_conflicts(
         ("hook_keyword", draft.hook_keyword),
         ("hook_window_seconds", draft.hook_window_seconds),
         ("brand_safety", draft.brand_safety),
+        ("brand_safety_required", draft.brand_safety_required),
+        ("brand_safety_citation", draft.brand_safety_citation),
         ("min_views_for_payout", draft.min_views_for_payout),
         ("analytics_proof_required", draft.analytics_proof_required),
     ):
@@ -929,8 +1348,12 @@ def _resolve_rules(
         issues=issues,
     )
     if (
-        _brief_indicates_brand_safety(context.brief_text, context.global_restrictions.prohibitions)
+        context.global_restrictions.brand_safety_required
+        or _brief_indicates_brand_safety(
+            context.brief_text, context.global_restrictions.prohibitions
+        )
         or _value(draft.brand_safety) is True
+        or _value(draft.brand_safety_required) is True
     ) and "brand.safety" not in classified:
         classified.add("brand.safety")
         hard.append("brand.safety")

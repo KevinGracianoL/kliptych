@@ -46,7 +46,17 @@ BRAND_SAFETY_MENTIONS: tuple[str, ...] = (
     "nada de lenguaje ofensivo",
     "sin lenguaje ofensivo",
     "sin insultos",
+    "no insultos",
     "no profanity",
+    "sin malas palabras",
+    "malas palabras",
+    "prohibido contenido nsfw",
+    "nsfw",
+    "sin temas sensibles",
+    "temas sensibles",
+    "no politica ni religion",
+    "no contenido para adultos",
+    "contenido para adultos",
 )
 _BRAND_SAFETY_MENTIONS = BRAND_SAFETY_MENTIONS
 
@@ -247,15 +257,17 @@ def _parse_categories(raw: object) -> tuple[str, ...]:
 
 
 def _brand_safety_required(contract: Contract) -> bool:
-    """Indica si el contrato exige brand safety en sus prohibiciones o reglas.
+    """Indica si el contrato exige brand safety en sus campos o prohibiciones.
 
     Args:
         contract: Contrato validado de la campaña.
 
     Returns:
-        True si alguna prohibición menciona controversia, toxicidad o
-        brand safety explícitos.
+        True si contract.brand_safety_required es True o si alguna prohibición
+        menciona controversia, toxicidad o brand safety explícitos.
     """
+    if contract.brand_safety_required:
+        return True
     haystack = normalize_text(" ".join(contract.prohibitions))
     return any(normalize_text(mention) in haystack for mention in _BRAND_SAFETY_MENTIONS)
 
