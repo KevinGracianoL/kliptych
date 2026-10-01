@@ -1052,6 +1052,8 @@ def _resolve_split_screen(
     draft: ContractDraft,
     brief_text: str | None,
     issues: list[ResolutionIssue],
+    *,
+    mode: Mode,
 ) -> SplitScreenConfig | None:
     """Resuelve el split_screen con procedencia estricta T6.
 
@@ -1061,14 +1063,20 @@ def _resolve_split_screen(
     subcadena, los numéricos por correspondencia, el ratio también como
     porcentaje) y cualquier fallo es bloqueante (MANUAL_REVIEW).
 
+    Fail-closed por modo: solo ``given_clips`` compone dos paneles. Cualquier
+    otro modo genera un único panel 9:16 que el gate ``layout.geometry`` no
+    puede distinguir de un split real, así que el split declarado fuera de
+    ``given_clips`` se rechaza como contrato inválido antes de renderizar.
+
     Args:
         draft: Salida cruda del extractor, con evidencia por campo.
         brief_text: Texto crudo del brief original, o ``None``.
         issues: Hallazgos del resolutor; se amplía en sitio.
+        mode: Modo de campaña ya resuelto; solo ``given_clips`` admite split.
 
     Returns:
-        La configuración resuelta, o ``None`` sin split declarado o ante
-        cualquier fallo de procedencia o validación.
+        La configuración resuelta, o ``None`` sin split declarado, con modo
+        sin soporte o ante cualquier fallo de procedencia o validación.
     """
     split_draft = draft.split_screen
     if split_draft is None:
@@ -1082,6 +1090,19 @@ def _resolve_split_screen(
         ("height", split_draft.height),
     ]
     has_error = False
+    if mode is not Mode.GIVEN_CLIPS:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=(
+                    "split_screen solo se compone en el modo given_clips; "
+                    f"el modo {mode.value} genera un único panel que el gate "
+                    "layout.geometry no puede distinguir de un split real"
+                ),
+            )
+        )
+        has_error = True
     for _, bound in fields:
         if bound is not None and not _check_candidate_provenance(
             bound, brief_text, issues, field="split_screen"
@@ -1136,7 +1157,7 @@ def _resolve_secondary_fields(
         geo_target=_resolve_geo_target(draft, issues),
         timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
         lyric_video=_resolve_lyric_video(draft, format_, brief_text, registry, issues),
-        split_screen=_resolve_split_screen(draft, brief_text, issues),
+        split_screen=_resolve_split_screen(draft, brief_text, issues, mode=mode),
     )
 
 

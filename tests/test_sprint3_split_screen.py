@@ -19,8 +19,9 @@ e integración del pipeline given_clips.
 
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
-from typing import override
+from typing import NoReturn, override
 
 import pytest
 from pydantic import ValidationError
@@ -35,9 +36,16 @@ from kliptych.environment import EnvironmentReport
 from kliptych.gate import CheckStatus, Gate, GateContext
 from kliptych.gate.checks import check_split_screen_geometry
 from kliptych.gate.probe import FFprobeProbe
-from kliptych.orchestrator import PipelineConfig, compute_long_video_fingerprint
+from kliptych.orchestrator import (
+    LongVideoModel,
+    PipelineConfig,
+    PipelineError,
+    compute_long_video_fingerprint,
+    run_long_video,
+    run_slideshow,
+)
 from kliptych.pipeline import PieceAssembler, RunOutcome, RunRequest, run_given_clips
-from kliptych.resolver import ResolutionStatus, resolve_contract
+from kliptych.resolver import IssueCode, ResolutionStatus, resolve_contract
 from kliptych.runtime import (
     CAPTION_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -810,3 +818,58 @@ def test_pipeline_split_screen_end_to_end(tmp_path: Path) -> None:
     assert len(artifacts) == 1
     media = FFprobeProbe(ffprobe=_FFPROBE).probe(artifacts[0])
     assert (media.width, media.height) == (1080, 1920)
+
+
+def _long_video_split_draft() -> ContractDraft:
+    return make_draft(
+        mode=candidate("long_video"),
+        segments={"segments": [{"start_s": candidate(0.0), "end_s": candidate(8.5)}]},
+        split_screen=_split_draft(),
+    )
+
+
+def test_resolver_rejects_split_screen_outside_given_clips(tmp_path: Path) -> None:
+    draft = _long_video_split_draft()
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path), brief_text=_SPLIT_BRIEF)
+    assert result.status == ResolutionStatus.MANUAL_REVIEW
+    assert result.contract is None
+    assert any(
+        issue.field == "split_screen" and issue.code is IssueCode.INVALID_CONTRACT
+        for issue in result.issues
+    )
+
+
+class _GuardStubModel(LongVideoModel):
+    @override
+    def select_segments(self, prompt: Mapping[str, object]) -> object:
+        _ = prompt
+        return {}
+
+
+def _explode_downloader(*args: object, **kwargs: object) -> NoReturn:
+    _ = (args, kwargs)
+    msg = "el pipeline no debe descargar con split_screen declarado"
+    raise AssertionError(msg)
+
+
+def test_long_video_rejects_split_screen_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _explode_downloader)
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=make_contract(split_screen=_split_payload()),
+        render=RenderConfig(),
+    )
+    with pytest.raises(PipelineError, match="split_screen"):
+        _ = run_long_video(_RESUME_URL, model=_GuardStubModel(), config=config)
+
+
+def test_slideshow_rejects_split_screen_contract(tmp_path: Path) -> None:
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=make_contract(split_screen=_split_payload()),
+        render=RenderConfig(),
+    )
+    with pytest.raises(PipelineError, match="split_screen"):
+        _ = run_slideshow(images=[tmp_path / "img.png"], config=config)
