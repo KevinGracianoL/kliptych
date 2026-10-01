@@ -19,8 +19,6 @@ What it does NOT do: it never auto-publishes, never lets an LLM clear a hard
 rule, and never ships a partial delivery — a rejected piece aborts the whole
 batch.
 
-![Demo](assets/samples/given-clips-sample.mp4)
-
 ## Quickstart
 
 Requires Python 3.13+ and [`uv`](https://docs.astral.sh/uv/).
@@ -37,6 +35,18 @@ uv run kliptych run campaigns/fixtures/given-clips/brief.md \
 
 Accepted run prints `"outcome": "exported"`; a fixture missing a mandatory
 mention prints `"outcome": "blocked"` and exports nothing.
+
+## How it Works
+
+```mermaid
+flowchart LR
+    Brief[Campaign Brief] --> Resolver[Contract Resolver]
+    Resolver --> Modes[Orchestrator Modes]
+    Modes --> Pipeline[ML/GPU Pipeline]
+    Pipeline --> Gate{Gate}
+    Gate --> Exporter[Atomic Exporter]
+    Exporter --> Manifest[manifest.json]
+```
 
 ## Modes
 
@@ -90,6 +100,13 @@ attributed signature that is sealed into the delivery record next to
 [docs/operations.md](docs/operations.md).
 
 </details>
+
+## Current Limits
+
+- 4 GB VRAM constraint requires a strictly sequential pipeline: one GPU
+  stage at a time, no parallel model execution.
+- Under heavy load, manual CUDA garbage collection/purging between models
+  is required to reclaim VRAM before loading the next stage.
 
 ## Project Status
 

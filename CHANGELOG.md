@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0] — 2026-09-30
+
+### Added
+- **Sprint 1 — Hardening:** real `subtitle_text` wiring, Whisper language
+  handling, audio policy gate, fail-closed resume with `approved-by`
+  attribution, CUDA hardening
+- **Sprint 2 — Brand safety:** dynamic watermarks with OpenCV validator,
+  forbidden phrases, LLM brand-safety evaluator (fail-closed to
+  `manual_review`), hook validation (CB22), P1 performance pass
+- **Sprint 3 — New formats:** `Format.LYRIC_VIDEO` (`.lrc`/lrclib, absolute
+  offsets, ASS burn-in), `Layout.SPLIT_SCREEN` with gate geometry checks,
+  T6 strict provenance, surgical timestamps, spelling locks
+
+### Reliability
+- Atomic batch export preserved across all new formats and layouts
+- Test coverage kept above the 90% CI gate
+
 ## [1.0.0] — 2026-09-24
 
 ### Added
