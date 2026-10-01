@@ -21,7 +21,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import NoReturn, override
+from typing import NoReturn, cast, override
 
 import pytest
 from pydantic import ValidationError
@@ -878,6 +878,13 @@ def test_slideshow_rejects_split_screen_contract(tmp_path: Path) -> None:
         _ = run_slideshow(images=[tmp_path / "img.png"], config=config)
 
 
+def _assembler_private(name: str) -> object:
+    return cast("object", getattr(assembler, name))
+
+
+_split_panel_has_audio = cast("Callable[..., bool]", _assembler_private("_split_panel_has_audio"))
+
+
 def _probe_run(
     stdout: str, *, returncode: int = 0
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
@@ -897,7 +904,7 @@ def _raise_probe_error(argv: Sequence[str], **kwargs: object) -> subprocess.Comp
 def test_split_panel_has_audio_with_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clip = _file(tmp_path, "clip.mp4")
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run("0\n"))
-    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+    assert _split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
 
 
 def test_split_panel_has_audio_without_stream(
@@ -905,7 +912,7 @@ def test_split_panel_has_audio_without_stream(
 ) -> None:
     clip = _file(tmp_path, "clip.mp4")
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run(""))
-    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is False
+    assert _split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is False
 
 
 def test_split_panel_has_audio_probe_failure_is_fail_closed(
@@ -913,7 +920,7 @@ def test_split_panel_has_audio_probe_failure_is_fail_closed(
 ) -> None:
     clip = _file(tmp_path, "clip.mp4")
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run("", returncode=1))
-    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+    assert _split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
 
 
 def test_split_panel_has_audio_probe_error_is_fail_closed(
@@ -921,15 +928,13 @@ def test_split_panel_has_audio_probe_error_is_fail_closed(
 ) -> None:
     clip = _file(tmp_path, "clip.mp4")
     monkeypatch.setattr("kliptych.assembler.subprocess.run", _raise_probe_error)
-    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+    assert _split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
 
 
 def test_split_panel_has_audio_missing_binary_is_fail_closed(tmp_path: Path) -> None:
     clip = _file(tmp_path, "clip.mp4")
     assert (
-        assembler._split_panel_has_audio(
-            clip, ffprobe="binario-inexistente-kliptych-test", timeout_s=5.0
-        )
+        _split_panel_has_audio(clip, ffprobe="binario-inexistente-kliptych-test", timeout_s=5.0)
         is True
     )
 
@@ -1002,7 +1007,8 @@ def test_split_argv_muted_single_panel_uses_af(
 
 
 def test_assemble_split_docstring_describes_longest_panel() -> None:
-    doc = FFmpegAssembler._assemble_split.__doc__
+    name = "_assemble_split"
+    doc = cast("str | None", getattr(FFmpegAssembler, name).__doc__)
     assert doc is not None
     assert "panel más corto" not in doc
     assert "entra en bucle" not in doc
