@@ -1,339 +1,101 @@
 # Kliptych
 
-**Deterministic, Fail-Closed Short-Form Video Production & Compliance Gate Engine**
+Feed it a campaign brief; it delivers publication-ready vertical clips and ruthlessly blocks anything that breaks the brand's rules
 
-[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions)
-![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white)
-[![Release](https://img.shields.io/badge/release-v1.1.1-2563eb?logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases/tag/v1.1.1)
-![Tests](https://img.shields.io/badge/tests-1%2C091_passed-10b981?logo=pytest&logoColor=white)
-![Coverage](https://img.shields.io/badge/coverage-96.61%25-0d9488)
-![Types](https://img.shields.io/badge/basedpyright-0_errors-6366f1?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFUAAABVCAYAAAA49ahaAAAAgElEQVR42u3ZMQ6AIBAAwcPou3y776KA3kqJEAMzpc0lm4MCIwAAAAAAAAAAAKCDVK6jdB9y5nT/NvPczV6JKuqq9if30Fst99ZMc22q4y+qqIgqqqiIKqqoiCqqqIgqqqhE2yP1iB9j8dED81/n2lTHX1QAAAAAAAAAAAAA1lMBSyQfRvTnP34AAAAASUVORK5CYII=)
-![Lint](https://img.shields.io/badge/ruff-clean-261230?logo=ruff&logoColor=d7ff64)
-![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white)
-![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white)
-![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
+[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions) [![Release](https://img.shields.io/github/v/release/KevinGracianoL/kliptych?color=2563eb&logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases) ![Tests](https://img.shields.io/badge/tests-%E2%89%A51%2C500_passed-10b981?logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25_(CI_gate)-0d9488)
+![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white) ![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white) ![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white) ![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
 
-Kliptych converts a chaotic campaign brief into a validated vertical-video delivery package through a
-versioned JSON contract and a fail-closed compliance gate. The pipeline does the heavy lifting
-(download, transcription, moment detection, 9:16 reframe, karaoke subtitles, hardware render);
-publication stays manual — nothing ships without passing the gate or carrying an explicit,
-attributed human approval sealed into the delivery record.
+Content Rewards / UGC campaigns only pay when every contractual rule holds:
+exact brand spelling, mandatory mentions and hashtags, duration bounds, audio
+requirements, watermark coverage. Human review does not scale to dozens of
+cuts, and an LLM verdict is not evidence.
 
----
+Kliptych converts a chaotic campaign brief into a validated vertical-video
+delivery package through a versioned JSON contract, a GPU pipeline
+(download, transcription, moments, 9:16 reframe, karaoke subtitles, hardware
+render), and a fail-closed compliance gate.
 
-## Why Kliptych?
+What it does NOT do: it never auto-publishes, never lets an LLM clear a hard
+rule, and never ships a partial delivery — a rejected piece aborts the whole
+batch.
 
-Content Rewards / UGC campaigns pay against contractual rules (mandatory mentions, exact brand
-spelling, hashtags, duration bounds, audio requirements, watermark coverage). A false positive —
-shipping a piece the rules actually reject — publishes non-monetized content or, worse, content
-that draws a platform penalty. Human review does not scale to dozens of cuts; an LLM verdict does
-not count as evidence.
-
-Kliptych treats this as a controls problem and solves it with four engineering pillars:
-
-### 1. Defense-in-Depth Fail-Closed Gate (`src/kliptych/gate/engine.py`, `src/kliptych/exporter.py`)
-
-`_derive_status` maps **any** measured `CheckOutcome.FAIL` to `GateStatus.REJECTED` — regardless of
-whether the rule was classified `hard`, `recommended`, or `manual_review`. A second barrier lives in
-the exporter: `_is_piece_exportable` refuses every piece except `PASSED`, or `PENDING_REVIEW` with
-explicit manual approval **and** zero `FAIL` checks. Batch export is all-or-nothing atomic
-(staging directory + atomic rename in `_publish`); a rejected piece aborts the whole delivery, never
-a partial shipment.
-
-The validator catalog is mechanical and closed (`KNOWN_VALIDATOR_RULES`, 17 rule ids). Declared
-rules without a registered validator never pass silently: they resolve to `MANUAL_REVIEW` when the
-contract classified them so or cited them, otherwise `UNSUPPORTED` — and `UNSUPPORTED` on a `hard`
-rule blocks the piece. Requirements with no mechanical validator at all are declared explicitly as
-`contract.unmapped[]` (`rule` + verbatim `quote`); the engine emits one aggregate `rules.unmapped`
-check carrying every citation, `MANUAL_REVIEW` by default, `FAIL` when an unmapped id collides with
-a known validator. Authorship decides the verdict where it matters: `caption.forbidden` is `FAIL`
-when a prohibited term appears in account-published text (caption, hashtags) and `MANUAL_REVIEW`
-when it appears only in streamer-spoken `subtitle_text`.
-
-### 2. Cryptographic `--resume` State Machine (`src/kliptych/orchestrator.py`)
-
-Every stage checkpoint carries SHA-256 signatures over its inputs: `source`, `audio_track` (local
-bytes and remote URL + fingerprint), segment coordinates, model paths. On `--resume` each signature
-is recomputed and compared; remote audio is revalidated, and any network failure during
-revalidation fails closed instead of reusing a stale track. Corrupt artifacts (zero bytes,
-truncated JSON, schema mismatch) invalidate exactly one stage for regeneration.
-
-The fingerprint covers every Sprint 2–3 input that changes the output: the `audio_track` signature
-(path bytes or URL), the `watermark` block (position, scale, opacity), `timestamp_ranges`,
-`lyric_video` config plus per-piece lyric windows and `ass_path`, and `split_screen` config. Any
-change in these inputs invalidates the cached stage. External audio injection is exclusive-or:
-exactly one of `--audio-track-path` / `--audio-track-url` is accepted, and `audio_locked` combined
-with `internal_official_sound` is rejected at contract validation and in the orchestrator
-(contradiction guard) — muting and injecting are opposites and never compose.
-
-### 3. Human-in-the-Loop Audit Trail (`src/kliptych/exporter.py`, `src/kliptych/manifest.py`)
-
-Rules with no mechanical validator (official-audio identity, full-video watermark, on-screen
-product presence, unmapped brief requirements, brand-safety risk) resolve to `MANUAL_REVIEW`, never
-to a silent `PASS` — an LLM is not permitted to clear a hard rule. Affected pieces pause at
-`PENDING_REVIEW` and export only with an explicit operator signature:
-
-```sh
---approve-manual-review --approved-by "<operator>"
-```
-
-Omitting `--approved-by` is a hard error (exit 1). Approval seals `manually_approved_rules`,
-`approved_by`, and a UTC `approved_at_utc` timestamp into the delivery record next to
-`brief_sha256` / `contract_sha256` provenance in `run_manifest.json`.
-
-### 4. Constrained-VRAM GPU Orchestration — 4 GB GTX 1650 Ti
-
-One GPU stage at a time, enforced by architecture, not discipline: `faster-whisper` (`small` and
-`large-v3-turbo`, `int8` CUDA, in-memory model cache, explicit `languages.language` locale with
-autodetect fallback) transcribes, releases VRAM (`cuda.empty_cache()`), then MediaPipe
-`FaceDetector` (`.tflite`, CPU delegate — zero VRAM footprint) drives the 9:16 reframe, then FFmpeg
-`h264_nvenc` renders and burns ASS subtitles, with automatic fallback to `libx264` when NVENC is
-absent. Windows hardening is load-bearing, not cosmetic: CUDA 12 DLL directories
-(`nvidia/cublas/bin`, `nvidia/cudnn/bin`) are registered via `os.add_dll_directory`, and the
-Hugging Face Hub symlink cache is patched to copy-fallback so model download survives
-`WinError 1314` without Developer Mode. Watermark verification reads the rendered file through a
-single `cv2.VideoCapture` pass (one open, one seek per sample) instead of one ffmpeg process per
-frame.
-
----
-
-## System Architecture
-
-```mermaid
-flowchart LR
-    A[Campaign Brief JSON] --> B[Contract Resolver]
-    B --> C[4 Orchestrator Modes]
-    C --> D[ML/GPU Pipeline]
-    D --> E[Fail-Closed Gate Engine]
-    E --> F[Atomic Delivery Exporter]
-    D --> G[Whisper CUDA]
-    D --> H[Moments Detection]
-    D --> I[MediaPipe 9:16 Reframe]
-    D --> J[ASS Subtitles Burn via NVENC]
-    C --> K[Surgical Download ±10s]
-    D --> L[Lyric-Video .lrc Path]
-    D --> M[Split-Screen 9:16 Dual Panel]
-    F --> N[manifest.json + SHA-256 Provenance]
-```
-
-Pipeline order per piece: surgical `yt-dlp`/`streamlink` acquisition → `faster-whisper` word-level
-transcript → scene + audio-energy + chat-density moments → LLM segment selection → MediaPipe 9:16
-reframe (or lyric-window / split-screen composition) → `.ass` karaoke render → NVENC encode → gate
-over the finished artifact → atomic delivery. The gate probes the rendered file with `ffprobe`,
-`volumedetect`, and OpenCV — never the parameters that produced it. All external invocations
-(`ffmpeg`, `ffprobe`, `yt-dlp`, `git`, `gh`) use argument lists; `shell=True` with interpolation
-is banned repository-wide.
-
----
-
-## Hardware Benchmarks — GTX 1650 Ti, 4,096 MiB VRAM
-
-Measured host (`uv run kliptych env`): `NVIDIA GeForce GTX 1650 Ti`, `vram_mib: 4096`,
-`nvenc_available: true`. Transcription in `int8` CUDA; reframe via MediaPipe CPU delegate;
-render via `h264_nvenc`.
-
-### Table A — CUDA Transcription Scaling
-
-| Model | init (s) | 30s warm/cold (s) | 180s warm/cold (s) | Words (180s) | Marginal slope | Real-time factor | Peak VRAM |
-|-------|----------|-------------------|---------------------|--------------|----------------|------------------|-----------|
-| small | 2.0 | 2.47 / 2.81 | 11.82 / 12.08 | 569 | 0.062s/s | ~16x | 848 MiB (80% free) |
-| large-v3-turbo | 4.4 | 3.86 / 3.99 | 18.01 / 18.06 | 561 | 0.094s/s | ~10.6x | 1,522 MiB (63% free) |
-
-Both models stay well under the 4 GiB ceiling with headroom for the NVENC stage that follows.
-
-### Table B — E2E Pipeline (3-min 1080p VOD → 4 Portrait 9:16 Clips)
-
-| Stage | Time (s) | VRAM (MiB) | Encoder |
-|-------|----------|------------|---------|
-| Transcribe CUDA | 13.0 | 486→494 | CUDA |
-| Moments | 5.5 | 494 | — |
-| MediaPipe Reframe 9:16 (4 segs) | 17.4 | 593 | h264_nvenc |
-| ASS Subtitles Burn NVENC (4 segs) | 4.4 | 593 | h264_nvenc |
-| Gate + Export | <1 | — | — |
-
----
-
-## Production Modes
-
-`uv run kliptych campaign --mode <mode>` (default: `long_video`). The `run` subcommand serves the
-`given_clips` fast path with recorded model replays. Accepted `--mode` values: `long_video`,
-`audio_locked`, `repost` (alias of the canonical `repost_ugc`), `repost_ugc`, `slideshow`.
-
-| Mode | Trigger | What it does |
-|------|---------|--------------|
-| `long_video` | `--url <video>` | Full chain: surgical download → CUDA transcript → moments → LLM cut selection → MediaPipe 9:16 reframe → ASS burn → NVENC render → gate. Honors mandatory `timestamp_ranges`; accepts YouTube, Twitch, and Kick URLs. |
-| `audio_locked` | `--audio-track-path <f>` xor `--audio-track-url <u>` | Injects a mandatory external track (exactly one source required); enforces audibility and duration match. Slideshows require this mode. Rejected with `internal_official_sound` (mute and inject never compose). |
-| `repost_ugc` | (alias: `repost`) | Skips transcription and moment detection; reuses the approved clip. Lossless `-c copy` passthrough when the source is already 9:16, reframe otherwise; metadata normalized, caption rewritten. |
-| `slideshow` | images + `audio_locked` | `concat`-demuxer assembly of `JPG`/`PNG` stills paced against the external audio; no transcription overhead. |
-
-Two contract-level surfaces cut across modes: `format: lyric_video` (synchronized-lyrics path with
-`.lrc` ground truth, `lrclib` lookup, per-piece lyric windows) and `layout: split_screen`
-(dual-panel 9:16 composition from two panel sources). Both are detailed below.
-
-### Surgical Acquisition — Timestamp Ranges + Kick (`src/kliptych/download.py`)
-
-Mandatory `contract.timestamp_ranges[]` (`start_sec < end_sec`, finite, non-negative) bound the
-work before any byte is fetched: the downloader requests `yt-dlp --download-sections
-*{start-10}-{end+10} --force-keyframes-at-cuts --merge-output-format mp4` (±10 s margin for
-cut precision), then applies an exact FFmpeg cut with PTS reset. Segment selection must respect
-mandatory ranges exactly; coordinates translate between download-relative and source-absolute via
-`source_offset_sec`, with bounds validated and post-cut duration probed. Kick URLs (`kick.com`
-and subdomains) are first-class: channel/video path required, auth/cookie/403/Cloudflare failures
-surface as explicit `DownloadError` instead of a generic tool failure. Limits are hard: explicit
-timeout plus post-download byte cap, subprocess argv lists only, sidecar cleanup on failure.
-
-### Compliance Catalog — Mechanical Validators (`src/kliptych/gate/checks.py`)
-
-| Rule id | Verdict shape |
-|---------|---------------|
-| `artifact.integrity`, `artifact.video_stream`, `assets.required`, `audio.present` | Presence/integrity probes; missing or unmeasurable fails closed. |
-| `audio.policy` | `internal_official_sound` → `MANUAL_REVIEW`, always. Never `PASS`. Any other policy → `PASS`. |
-| `audio.silence` | Only active under `internal_official_sound`. Requires exactly one audio track (ffprobe count; 0 or 2+ → `FAIL` without measuring), then `volumedetect max_volume <= -80.0 dB` on the rendered MP4 (`-map 0:a:0`). Any measurement failure → `FAIL`. |
-| `watermark.present` / `watermark.full_video` | OpenCV frame-by-frame `matchTemplate` against the contract PNG at the contracted `WatermarkConfig` zone (7 positions: `top_left`, `top_right`, `bottom_left`, `bottom_right`, `center_top`, `center_bottom`, `center`), contracted `scale_ratio` (default 0.20), opacity-aware scoring (contract floor 0.15) with alpha-edge/gradient fallback. `present` needs one matching sample; `full_video` needs all density-distributed samples (4/s, 12–120). Strong translucent signal without full confidence → `MANUAL_REVIEW`; anything else that cannot be proven → `FAIL`. Single `VideoCapture` pass, no per-frame ffmpeg processes. |
-| `caption.required_mention`, `caption.required_hashtag`, `caption.first_line` | Token-boundary, case-insensitive matching against caption/hashtags. |
-| `caption.forbidden` | Union of `caption_rules.forbidden` + campaign `prohibitions`, NFKD-normalized, word-boundary. Published-text hit → `FAIL`; spoken-only (`subtitle_text`) hit → `MANUAL_REVIEW`. |
-| `subtitles.spelling_lock` | Exact brand spelling in subtitles; lyric-video pieces additionally checked against the cut `.lrc` window (identical token sequence and time-interval concordance with the burned ASS; missing `ass_path` → `FAIL`, no substitution). |
-| `hook.keyword` (CB22) | Opening keyword must appear in timed `subtitle_segments` or `screen_text_segments` with `start_s <= 3.0 s` (NFKD-normalized). Missing, late, or untimed (plain `subtitle_text` only) → `FAIL`. First-3 s `volumedetect` is attached as an informational note and never changes the verdict. |
-| `brand.safety` | Opt-in only: active when the campaign requires it (`brand_safety_required` + citation, or matching `prohibitions`). With the rule active, an injected LLM assessor decides — risk → `MANUAL_REVIEW`, clean → `PASS`. No assessor, assessor exception/timeout, or invalid response → `MANUAL_REVIEW` (fail-closed, never `PASS`). Inactive → `PASS` without invoking any model. |
-| `layout.geometry` | Split-screen canvases must satisfy the contracted geometry (even 9:16 canvas, even gap, viable panels); split composition outside the supported pipeline → `FAIL`. |
-| `duration.min` / `duration.max` | `ffprobe` duration inside bounds; unmeasurable → `UNSUPPORTED`, never `PASS`. |
-| `rules.unmapped` | Aggregate over `contract.unmapped[]` citations: `MANUAL_REVIEW` with every `rule` + `quote` in evidence; `FAIL` when an unmapped id collides with the known-validator catalog. |
-
-### Lyric Video — `Format.LYRIC_VIDEO` (`src/kliptych/lyrics.py`)
-
-`lyric_video: LyricConfig` carries `lrc_asset_id`, `track_name` / `artist_name` (lrclib lookup),
-and `lrclib_enabled`. The `.lrc` parser is deterministic and strict (ASCII timestamps, `[offset:]`
-support, metadata discarded, chronological order). Windows are cut in absolute source coordinates
-(`cut_lyric_window` + `source_offset_sec`); an empty window is an error, not an empty render. The
-gate verifies the exact lyric sequence and the ASS concordance per piece; per-piece windows and
-`ass_path` are preserved through resume, and the `.ass` is burned before render in `given_clips`
-with fail-closed behavior when the burn input is missing.
-
-### Split Screen — `Layout.SPLIT_SCREEN` (`src/kliptych/assembler.py`)
-
-`split_screen: SplitScreenConfig` declares `top_source` / `bottom_source` asset ids, even-pixel
-`gap`, `panel_ratio` (fraction of usable height taken by the top panel), and an even 9:16 canvas
-(default 1080×1920; top panel rounds down to even, bottom absorbs the remainder — always
-`yuv420p`-safe). `FFmpegAssembler` composes the dual-panel 9:16 output; audio follows the longest
-panel with fallback and mixing. Provenance is strict (T6): panel sources must verify against the
-asset registry. The `layout.geometry` gate check fails closed on geometry mismatch or on split
-composition outside the supported pipeline, and the config participates in the resume fingerprint.
-
-### Two-Step CLI Workflow (human approval gate)
-
-Step 1 — the run pauses at `PENDING_REVIEW` and exits non-zero; nothing is exported:
-
-```sh
-uv run kliptych campaign campaigns/fixtures/long-video/brief.md \
-  --out runs/demo-review \
-  --mode long_video \
-  --url "https://www.youtube.com/watch?v=<id>"
-# exit code 1 — pieces awaiting manual review, delivery/ not written
-```
-
-Step 2 — the operator reviews the pending rules, then resumes with an attributed signature:
-
-```sh
-uv run kliptych campaign campaigns/fixtures/long-video/brief.md \
-  --out runs/demo-review \
-  --mode long_video \
-  --url "https://www.youtube.com/watch?v=<id>" \
-  --resume --approve-manual-review --approved-by "Kevin Graciano"
-# exit code 0 — exports to runs/demo-review/delivery/
-```
-
-The delivery record seals the approval next to content provenance:
-
-```json
-{
-  "manually_approved_rules": ["audio.official_selection", "watermark.full_video"],
-  "approved_by": "Kevin Graciano",
-  "approved_at_utc": "2026-09-25T02:14:00+00:00",
-  "brief_sha256": "1ccafe8d5e0fcf45100e6eb947239742cd69b8cbb987640285ebaf738e622989"
-}
-```
-
-(`manually_approved_rules`, `approved_by`, `approved_at_utc` are written by the exporter per piece;
-`brief_sha256` and `contract_sha256` are sealed in `run_manifest.json` alongside gate results,
-render arguments, model versions, and hardware/degradation info.)
-
----
+![Demo](assets/samples/given-clips-sample.mp4)
 
 ## Quickstart
 
 Requires Python 3.13+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```sh
-# Base install (deterministic, locked)
 uv sync
-
-# GPU extras: CUDA transcription (faster-whisper) + MediaPipe reframe
-uv sync --extra transcription --extra reframe
-
-# Verify toolchain, GPU, and NVENC in one shot
-uv run kliptych env
-```
-
-### Windows GPU Provisioning
-
-CUDA 12 ships as venv wheels (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`); at transcription start
-Kliptych registers their `nvidia/cublas/bin` and `nvidia/cudnn/bin` directories with
-`os.add_dll_directory` so `cublas`/`cudnn` resolve without a system CUDA install. Two environment
-knobs:
-
-```sh
-$env:KLIPTYCH_WHISPER_MODEL = "small"          # or "large-v3-turbo"; int8 only
-# Face model: MediaPipe .tflite bundle passed as PipelineConfig.face_model_path
-# (bundled detector preset: blaze_face_short_range equivalent)
-```
-
-### Verify End-to-End
-
-```sh
-# 1. Environment + hardware report (ffmpeg, NVENC, VRAM)
-uv run kliptych env
-
-# 2. Ingest a brief to a versioned contract (offline, deterministic)
+uv sync --extra transcription --extra reframe  # CUDA + MediaPipe
+uv run kliptych env                             # toolchain, GPU, NVENC
 uv run kliptych ingest campaigns/fixtures/given-clips/brief.md
-
-# 3. Full gate proof: accepted fixture exports, broken fixture is rejected
 uv run kliptych run campaigns/fixtures/given-clips/brief.md \
   --out runs/demo-pass/package \
   --recorded campaigns/fixtures/given-clips/recorded
-
-# 4. Quality gates — all four must pass before any PR
-uv run ruff format --check .
-uv run ruff check .
-uv run basedpyright
-uv run pytest
 ```
 
-Accepted run prints `"outcome": "exported"` with the package path and manifest hash; a fixture
-missing a mandatory mention (e.g. `@marca`) prints `"outcome": "blocked"` with
-`"reason": "el gate no aprobó la pieza (rejected): caption.required_mention"` and exports nothing.
-The important test is not that the gate passes a correct piece — it is that it rejects an
-incorrect one, and CI carries intentionally broken fixtures (missing caption mark, missing hashtag,
-out-of-range duration, wrong spelling, absent watermark, wrong audio, out-of-bounds segment) to
-prove it on every push (Ubuntu + Windows).
+Accepted run prints `"outcome": "exported"`; a fixture missing a mandatory
+mention prints `"outcome": "blocked"` and exports nothing.
 
----
+## Modes
+
+| Mode | Plain language |
+|------|----------------|
+| `long_video` | Full chain from a long URL: downloads the best moments, cuts them, and renders vertical clips with subtitles. |
+| `audio_locked` | Same as above but dubs a mandatory external audio track over the video (slideshows require it). |
+| `repost_ugc` | Reuses an already-approved clip: no re-transcription, just reframe, metadata cleanup, and caption rewrite. |
+| `slideshow` | Turns still images into a video paced against the external audio track. |
+
+## Why the Gate rejects
+
+Any single failed check rejects the piece, and anything the gate cannot
+mechanically prove pauses for explicit human approval instead of passing
+silently — see [docs/gate.md](docs/gate.md).
+
+## Learn more
+
+- [Architecture — 4 Engineering Pillars](docs/architecture.md)
+- [Benchmarks — GTX 1650 Ti, 4 GB VRAM](docs/benchmarks.md)
+- [Gate — Fail-Closed Compliance Engine](docs/gate.md)
+- [Operations — CLI 2-Step Workflow](docs/operations.md)
+
+<details><summary>Technical detail: fail-closed export barrier</summary>
+
+`_derive_status` maps any measured `FAIL` to `REJECTED`, whatever the rule
+severity. The exporter (`_is_piece_exportable`) ships only `PASSED` pieces,
+or `PENDING_REVIEW` with zero `FAIL`s plus `--approve-manual-review
+--approved-by "<operator>"`. Batch export is atomic via staging + rename:
+one rejection aborts the delivery, never a partial shipment.
+
+</details>
+
+<details><summary>Technical detail: constrained-VRAM GPU orchestration</summary>
+
+One GPU stage at a time: `faster-whisper` (`int8` CUDA, in-memory cache)
+transcribes and releases VRAM, MediaPipe `FaceDetector` (CPU delegate, zero
+VRAM) drives the 9:16 reframe, FFmpeg `h264_nvenc` renders with `libx264`
+fallback. Checkpoints carry SHA-256 fingerprints so `--resume` regenerates
+exactly the stale stage. Full numbers in
+[docs/benchmarks.md](docs/benchmarks.md).
+
+</details>
+
+<details><summary>Technical detail: human-in-the-loop approval</summary>
+
+Unprovable rules resolve to `MANUAL_REVIEW`, never `PASS`. The run pauses at
+`PENDING_REVIEW` (exit 1, no `delivery/`), and resumes only with an
+attributed signature that is sealed into the delivery record next to
+`brief_sha256` / `contract_sha256`. Full workflow in
+[docs/operations.md](docs/operations.md).
+
+</details>
 
 ## Project Status
 
-Phases A–F implemented, each executable end-to-end (nothing counts as done from schema alone):
-
-- [x] **A — Foundation & Gate Core**: contract schemas v1.1 with per-field evidence, fail-closed gate, asset registry with SHA-256, run manifests.
-- [x] **B — Walking Skeleton (`given_clips`)**: headless brief → contract → assembly → caption → gate → atomic package, with rejection fixtures.
-- [x] **C — Long-Video Engine**: bounded download, word-level Whisper (`small`, `large-v3-turbo`, `int8`, explicit locale), multimodal moments, LLM selection, MediaPipe CPU reframe, ASS subtitles, NVENC/CPU render with registered degradation.
-- [x] **D — Special Modes**: `audio_locked`, `repost_ugc`, `slideshow`.
-- [x] **E — Campaign Intelligence**: `KNOWN` / `KNOWN_WITH_VARIATION` / `NEW_ARCHETYPE` classifier with Zero Auto-Merge PR proposals — the model proposes, the owner merges.
-- [x] **F — Operational Maturity**: structured CLI (`env`, `ingest`, `run`, `campaign`, `clean`), cryptographic `--resume` / `--restart`, TTL garbage collection.
-- [x] **Sprint 1 — Gate & CLI hardening**: fail-closed on any `FAIL`, complete CLI wiring (all four modes through real orchestrators), audio-track validation + fingerprinting, real `subtitle_text` wiring into gate flows, explicit Whisper locale, `audio.policy` gate with `internal_official_sound` muting, `--approved-by` required for manual approval.
-- [x] **Sprint 2 — Contract fidelity**: dynamic watermarks (7-position `WatermarkConfig` with scale/opacity, render + resume fingerprinting) validated frame-by-frame with OpenCV (single-pass capture, density sampling, opacity-aware scoring with translucent `MANUAL_REVIEW` path); forbidden phrases with published/spoken authorship separation; opt-in fail-closed brand-safety LLM; cited unmapped rules; CB22 hook keyword (≤3.0 s timed window); per-campaign audio policy with contradiction guard and real `volumedetect` silence verification.
-- [x] **Sprint 3 — Temporal & media precision**: surgical `timestamp_ranges` (±10 s download margin, exact FFmpeg cut, PTS reset, absolute-coordinate translation, resume invalidation); Kick.com URL support; `Format.LYRIC_VIDEO` with deterministic `.lrc` parsing, lrclib lookup, absolute lyric-window cutting, and `.lrc`-grounded `spelling_lock`; `Layout.SPLIT_SCREEN` dual-panel 9:16 composition with fail-closed `layout.geometry` gate and strict T6 provenance.
-
-`campaigns/private/` and `runs/` are git-ignored; CI fixtures are synthetic or anonymized. No
-secrets, credentials, or personal data in commits or logs.
+Phases A–F plus Sprints 1–3 implemented, each executable end-to-end. Full
+history in [docs/architecture.md](docs/architecture.md); `campaigns/private/`
+and `runs/` are git-ignored and CI fixtures are synthetic.
 
 ## License
 
