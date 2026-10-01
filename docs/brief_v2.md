@@ -1,5 +1,5 @@
 ====================================================================
-KLIPTYCH — Brief de proyecto v2 (para agente de código)
+KLIPTYCH — Brief de proyecto v2 (Technical Specification)
 ====================================================================
 Autor/owner: Kevin Graciano
 Repo: PRIVADO, nombre "kliptych".
@@ -14,9 +14,9 @@ Ya NO aplica la regla de ocultar palabras como "clip", "shorts", "rewards",
 - Fixtures de CI sintéticos o anonimizados.
 - campaigns/private/ y runs/ NO se commitean (ver sección 13).
 
-Compatibilidad requerida: el repo se desarrolla y orquesta con opencode,
-Claude Code y Codex de forma intercambiable. Esto es HERRAMIENTA DE DESARROLLO,
-capa distinta al LLM de runtime del pipeline (ver sección 9).
+Compatibilidad requerida: el repo se desarrolla con herramientas estándar del
+ecosistema Python (CLI nativa, automatización estándar). Esto es HERRAMIENTA DE
+DESARROLLO, capa distinta al LLM de runtime del pipeline (ver sección 9).
 
 GUI: OPCIONAL y al final. Todo el core corre headless (CLI/API).
 
@@ -39,10 +39,8 @@ GUI: OPCIONAL y al final. Todo el core corre headless (CLI/API).
    golden y contract tests.
 8) Reproducibilidad (run_manifest.json), seguridad de red/shell y política
    explícita de VRAM para la laptop.
-9) La revisión de cada PR la hace el mismo agente que programa, pero como
-   TAREA SEPARADA, con contexto limpio, mediante la skill
-   "evidence-driven-review" (revisión multifocal con validación adversarial;
-   secciones 12 y 15).
+9) La revisión de cada PR se realiza como TAREA SEPARADA, mediante revisión
+   independiente del snapshot completo base/head (secciones 12 y 15).
 
 --------------------------------------------------------------------
 1. QUÉ ES KLIPTYCH
@@ -352,7 +350,7 @@ Cuello de botella: VRAM (4GB). As bajo la manga: NVENC en la 1650Ti.
 - Reframe 9:16:       MediaPipe (CPU, ligero), crop dinámico.
 - Subtítulos karaoke: timestamps -> .ass (libass) -> quemado ffmpeg
 - Render:             ffmpeg h264_nvenc (usa la 1650Ti). Libera CPU.
-- Cerebro/LLM:        API vía opencode go (NO correr LLM grande local con 4GB).
+- Cerebro/LLM:        API externa (NO correr LLM grande local con 4GB).
                       Respaldo offline mecánico: Qwen2.5-3B Q4 en CPU.
 - Anti-duplicado:     ffmpeg -map_metadata -1 + re-encode + micro-variación
                       (zoom/color leve). NUNCA llamarlo "pasar desapercibido".
@@ -376,10 +374,10 @@ y escribe -> reframe MediaPipe -> subs .ass -> ffmpeg NVENC -> GATE compliance
 9. RUNTIME LLM vs HERRAMIENTAS DE DESARROLLO
 --------------------------------------------------------------------
 Son dos capas distintas y no se mezclan:
-A) Herramientas de desarrollo: opencode / Claude Code / Codex construyen y
-   mantienen el repo. Cualquiera de las tres debe poder trabajar aquí.
-B) Runtime LLM: Kliptych necesita su propia interfaz, independiente del
-   agente que desarrolla:
+A) Herramientas de desarrollo: herramientas estándar del ecosistema Python
+   construyen y mantienen el repo.
+B) Runtime LLM: Kliptych necesita su propia interfaz, independiente de las
+   herramientas de desarrollo:
 
    class CampaignModel(Protocol):
        def extract_contract(self, brief: str) -> ContractDraft: ...
@@ -486,27 +484,16 @@ Cada PR deja: código + tests + fixture + documentación + criterio de
 aceptación + evidencia de ejecución (comando y salida). CI verde obligatorio
 (lint + type + test) antes de merge.
 
-Ciclo de revisión (mismo agente puede programar y revisar, pero no en la
-misma fase mental; una auto-revisión inmediata es complaciente):
-1) el agente implementa el PR;
+Ciclo de revisión (quien implementa no revisa su propio trabajo):
+1) el contributor implementa el PR;
 2) ejecuta tests y CI;
-3) termina su turno;
-4) terminado el PR y con el CI verde, el owner pide la revisión y se invoca
-   la skill "evidence-driven-review" sobre el PR en la misma sesión; los
-   revisores se lanzan como subagentes con contexto limpio, independientes
-   entre sí y de quien implementó;
-5) la skill fija un snapshot inmutable (base_sha/head_sha), despliega
-   revisores independientes por frente (corrección funcional, contratos e
-   integraciones, seguridad, pruebas), somete cada candidato a validación
-   adversarial por un validador distinto del descubridor y cierra con mapa
-   de cobertura;
-6) devuelve hallazgos confirmados con evidencia, severidad y corrección
-   mínima, más limitaciones. La skill no aprueba nada y en modo report no
-   publica: publicar comentarios exige autorización explícita del owner;
-7) el agente corrige los hallazgos y ejecuta una re-revisión del delta con
-   la misma skill (clasifica los hallazgos previos como persistentes,
-   corregidos, reintroducidos o no verificables);
-8) el owner aprueba y se pasa al siguiente PR.
+3) terminado el PR y con el CI verde, el owner realiza la revisión sobre
+   el snapshot completo base/head del PR;
+4) la revisión verifica: corrección funcional, contratos e integraciones,
+   seguridad, pruebas, y cobertura;
+5) los hallazgos se confirman con evidencia, severidad y corrección mínima;
+6) el contributor corrige los hallazgos y se re-revisa el delta;
+7) el owner aprueba y se pasa al siguiente PR.
 
 Prohibido: saltar etapas en silencio, mezclar refactors con features en el
 mismo PR, dejar un modo marcado como implementado cuando solo está en el
@@ -550,13 +537,9 @@ Venta del proyecto (frase oficial):
 --------------------------------------------------------------------
 15. CONVENCIONES DE TRABAJO
 --------------------------------------------------------------------
-- Cada PR exige una revisión dual: al terminar el PR y con el CI verde, el
-  agente ejecuta la skill "evidence-driven-review" en la misma sesión
-  (revisión multifocal con subagentes de contexto limpio y validación
-  adversarial de cada candidato; modo report por defecto), y luego el owner
-  hace la validación y aprobación final. Si la herramienta no soporta
-  subagentes ni la skill, se aplica el procedimiento de forma manual y se
-  declara que no hubo independencia real.
+- Cada PR exige una revisión dual: al terminar el PR y con el CI verde, se
+  realiza una revisión independiente sobre el snapshot completo base/head, y
+  luego el owner hace la validación y aprobación final.
 - CI verde obligatorio (lint + type + test) antes de merge.
 - Fixtures de campaña en campaigns/; cada campaña nueva es un test.
 - Sin secretos en el repo; fixtures sintéticos donde haya datos personales.
