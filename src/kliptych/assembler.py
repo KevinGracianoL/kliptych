@@ -26,6 +26,7 @@ from kliptych.encoding import muted_audio_arguments
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
 _DEFAULT_TIMEOUT_S = 300.0
+_SPLIT_AUDIO_PROBE_TIMEOUT_S = 30.0
 _WATERMARK_MARGIN = 20
 _STDERR_TAIL = 400
 
@@ -43,7 +44,8 @@ class RenderSpec:
     una firma mínima sin perder explicitud. Con ``layout=SPLIT_SCREEN`` el
     lienzo lo define ``split_screen`` y los paneles salen de ``top_clip`` y
     ``bottom_clip`` (``clip`` se ignora pero se conserva por compatibilidad);
-    el audio se toma del panel superior.
+    el audio mezcla ambos paneles cuando los dos aportan pista, o conserva
+    el único que la aporta (un panel con audio jamás queda silenciado).
     """
 
     clip: Path
@@ -68,15 +70,19 @@ class FFmpegAssembler:
         *,
         ffmpeg: str = "ffmpeg",
         timeout_s: float = _DEFAULT_TIMEOUT_S,
+        ffprobe: str = "ffprobe",
     ) -> None:
         """Configura el binario y el timeout del ensamblado.
 
         Args:
             ffmpeg: Nombre o ruta del binario ffmpeg.
             timeout_s: Timeout máximo del ensamblado, en segundos.
+            ffprobe: Nombre o ruta del binario ffprobe para contar el audio
+                de cada panel del split antes de elegir el mapa final.
         """
         self._ffmpeg: str = ffmpeg
         self._timeout_s: float = timeout_s
+        self._ffprobe: str = ffprobe
 
     def assemble(self, spec: RenderSpec) -> Path:
         """Ensambla un clip entregado en una pieza vertical para el gate.
@@ -512,7 +518,9 @@ class FFmpegAssembler:
         estática entra como frame único y el framesync repite su último
         frame hasta el fin del panel más largo (sin ``-loop`` ni
         ``-shortest``: un bucle infinito bajo ``vstack`` nunca termina).
-        El audio se toma del panel superior.
+        El audio se elige por panel con ffprobe: mezcla ``amix`` cuando los
+        dos aportan pista, o el único mapa con audio en caso contrario (un
+        panel con audio jamás queda silenciado).
 
         Args:
             top: Panel superior (video o imagen estática).
@@ -592,9 +600,13 @@ class FFmpegAssembler:
                 f"{_subtitles_filter_value(subtitles, destination)}'[vout]"
             )
             video_label = "[vout]"
-        argv += ["-filter_complex", graph, "-map", video_label, "-map", "0:a?"]
-        if mute_audio:
-            argv += list(muted_audio_arguments())
+        argv += self._split_audio_tail(
+            top=top,
+            bottom=bottom,
+            graph=graph,
+            video_label=video_label,
+            mute_audio=mute_audio,
+        )
         argv += [
             "-c:v",
             "libx264",
@@ -613,6 +625,133 @@ class FFmpegAssembler:
             destination_arg,
         ]
         return argv
+
+    def _split_audio_tail(
+        self,
+        *,
+        top: Path,
+        bottom: Path,
+        graph: str,
+        video_label: str,
+        mute_audio: bool,
+    ) -> list[str]:
+        """Arma la cola del argv split: filtro de audio, mapas y silenciado.
+
+        Cuenta el audio real de cada panel con ffprobe y delega la elección
+        en ``_split_audio_parts`` (mezcla ``amix`` con ambos, o el único mapa
+        con audio): un panel con audio jamás queda silenciado por mapear
+        solo el otro.
+
+        Args:
+            top: Panel superior (video o imagen estática).
+            bottom: Panel inferior (video o imagen estática).
+            graph: Grafo de video ya cerrado (vstack, watermark, subtítulos).
+            video_label: Etiqueta del video final dentro del grafo.
+            mute_audio: Si es True, silencia la pista sin eliminarla.
+
+        Returns:
+            La cola del argv desde ``-filter_complex`` hasta el mapa de
+            audio, con el silenciado ya aplicado cuando corresponde.
+        """
+        top_has_audio = _split_panel_has_audio(
+            top, ffprobe=self._ffprobe, timeout_s=_SPLIT_AUDIO_PROBE_TIMEOUT_S
+        )
+        bottom_has_audio = _split_panel_has_audio(
+            bottom, ffprobe=self._ffprobe, timeout_s=_SPLIT_AUDIO_PROBE_TIMEOUT_S
+        )
+        audio_filter, audio_maps, mute_embedded = _split_audio_parts(
+            top_has_audio=top_has_audio,
+            bottom_has_audio=bottom_has_audio,
+            mute_audio=mute_audio,
+        )
+        tail = ["-filter_complex", graph + audio_filter, "-map", video_label, *audio_maps]
+        if mute_audio and not mute_embedded:
+            tail += list(muted_audio_arguments())
+        return tail
+
+
+def _split_panel_has_audio(path: Path, *, ffprobe: str, timeout_s: float) -> bool:
+    """Indica si un panel del split aporta pista de audio (fail-closed a True).
+
+    Cuenta las pistas de audio con ffprobe (lista de argumentos, sin shell):
+    una imagen estática no reporta ninguna y un video con audio al menos una.
+    Ante cualquier fallo (binario ausente, timeout o error de inspección) se
+    asume que hay audio: antes una mezcla que quizá falle en ffmpeg que un
+    MP4 silenciado cuando sí había audio que conservar.
+
+    Args:
+        path: Panel superior o inferior del split.
+        ffprobe: Binario ffprobe para contar las pistas de audio.
+        timeout_s: Timeout máximo de la inspección, en segundos.
+
+    Returns:
+        True si el panel tiene al menos una pista de audio o no se pudo
+        determinar; False solo cuando ffprobe confirma que no hay ninguna.
+    """
+    # ffprobe no acepta `-nostdin` (falla con "Option not found"): solo
+    # `-hide_banner` y `-v error` lo silencian sin romper la inspección.
+    argv = [
+        ffprobe,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return True
+    if completed.returncode != 0:
+        return True
+    return any(line.strip() for line in completed.stdout.splitlines())
+
+
+def _split_audio_parts(
+    *, top_has_audio: bool, bottom_has_audio: bool, mute_audio: bool
+) -> tuple[str, list[str], bool]:
+    """Elige el filtro y el mapa de audio del split según las pistas reales.
+
+    Con audio en ambos paneles los mezcla con ``amix`` en una única pista
+    (normalizados a estéreo antes de mezclar); con audio en un solo panel
+    mapea ese panel para no silenciarlo; sin audio en ninguno conserva el
+    mapa opcional histórico (el MP4 queda sin pista, como antes).
+
+    Args:
+        top_has_audio: Si el panel superior aporta pista de audio.
+        bottom_has_audio: Si el panel inferior aporta pista de audio.
+        mute_audio: Si el render debe silenciar la pista sin eliminarla.
+
+    Returns:
+        El tramo de filtro a anexar al grafo, los argumentos ``-map`` de
+        audio y si el silenciado ya quedó incrustado en la mezcla (en ese
+        caso el llamador no debe agregar ``-af volume=0``, que chocaría con
+        el ``filter_complex`` de audio).
+    """
+    if top_has_audio and bottom_has_audio:
+        silence = ",volume=0" if mute_audio else ""
+        audio_filter = (
+            ";[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[topa]"
+            ";[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo[bottoma]"
+            f";[topa][bottoma]amix=inputs=2:duration=longest{silence}[a]"
+        )
+        return (audio_filter, ["-map", "[a]"], mute_audio)
+    if bottom_has_audio:
+        return ("", ["-map", "1:a"], False)
+    if top_has_audio:
+        return ("", ["-map", "0:a"], False)
+    return ("", ["-map", "0:a?"], False)
 
 
 def _subtitles_filter_value(subtitles: Path, output: Path) -> str:

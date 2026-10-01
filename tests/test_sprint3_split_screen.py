@@ -19,13 +19,14 @@ e integración del pipeline given_clips.
 
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NoReturn, override
 
 import pytest
 from pydantic import ValidationError
 
+from kliptych import assembler
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
 from kliptych.assets import AssetRegistry
 from kliptych.config import Settings
@@ -72,6 +73,7 @@ def _split_spec(
     gap: int = 0,
     panel_ratio: float = 0.5,
     bottom_suffix: str = ".mp4",
+    mute_audio: bool = False,
 ) -> RenderSpec:
     top = _file(tmp_path, "top.mp4")
     bottom = _file(tmp_path, f"bottom{bottom_suffix}")
@@ -88,6 +90,7 @@ def _split_spec(
         split_screen=config,
         top_clip=top,
         bottom_clip=bottom,
+        mute_audio=mute_audio,
     )
 
 
@@ -873,3 +876,196 @@ def test_slideshow_rejects_split_screen_contract(tmp_path: Path) -> None:
     )
     with pytest.raises(PipelineError, match="split_screen"):
         _ = run_slideshow(images=[tmp_path / "img.png"], config=config)
+
+
+def _probe_run(
+    stdout: str, *, returncode: int = 0
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = (argv, kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+    return fake_run
+
+
+def _raise_probe_error(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    _ = (argv, kwargs)
+    msg = "ffprobe no disponible"
+    raise OSError(msg)
+
+
+def test_split_panel_has_audio_with_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run("0\n"))
+    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+
+
+def test_split_panel_has_audio_without_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run(""))
+    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is False
+
+
+def test_split_panel_has_audio_probe_failure_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _probe_run("", returncode=1))
+    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+
+
+def test_split_panel_has_audio_probe_error_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", _raise_probe_error)
+    assert assembler._split_panel_has_audio(clip, ffprobe="ffprobe", timeout_s=5.0) is True
+
+
+def test_split_panel_has_audio_missing_binary_is_fail_closed(tmp_path: Path) -> None:
+    clip = _file(tmp_path, "clip.mp4")
+    assert (
+        assembler._split_panel_has_audio(
+            clip, ffprobe="binario-inexistente-kliptych-test", timeout_s=5.0
+        )
+        is True
+    )
+
+
+def _stub_panel_audio(monkeypatch: pytest.MonkeyPatch, *, top: bool, bottom: bool) -> None:
+    def fake(path: Path, *, ffprobe: str, timeout_s: float) -> bool:
+        _ = (ffprobe, timeout_s)
+        return top if path.name == "top.mp4" else bottom
+
+    monkeypatch.setattr("kliptych.assembler._split_panel_has_audio", fake)
+
+
+def test_split_argv_mixes_audio_when_both_panels_have_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_panel_audio(monkeypatch, top=True, bottom=True)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path))
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=longest" in graph
+    assert "[a]" in argv
+    assert "0:a?" not in argv
+
+
+def test_split_argv_falls_back_to_bottom_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_panel_audio(monkeypatch, top=False, bottom=True)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path))
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "amix" not in graph
+    assert "1:a" in argv
+    assert "0:a" not in argv
+    assert "0:a?" not in argv
+
+
+def test_split_argv_keeps_top_audio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_panel_audio(monkeypatch, top=True, bottom=False)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path))
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "amix" not in graph
+    assert "0:a" in argv
+    assert "1:a" not in argv
+
+
+def test_split_argv_without_audio_maps_optional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_panel_audio(monkeypatch, top=False, bottom=False)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path))
+    assert "0:a?" in argv
+
+
+def test_split_argv_muted_mix_embeds_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_panel_audio(monkeypatch, top=True, bottom=True)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path, mute_audio=True))
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "volume=0" in graph
+    assert "-af" not in argv
+
+
+def test_split_argv_muted_single_panel_uses_af(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_panel_audio(monkeypatch, top=False, bottom=True)
+    argv = FFmpegAssembler().render_arguments(_split_spec(tmp_path, mute_audio=True))
+    assert "-af" in argv
+    assert argv[argv.index("-af") + 1] == "volume=0"
+
+
+def _synth_clip_with_audio(path: Path, *, duration: float = 2.0) -> Path:
+    assert _FFMPEG is not None
+    argv = [
+        _FFMPEG,
+        "-y",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=s=640x480:r=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+        "-t",
+        f"{duration}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(path),
+    ]
+    _ = subprocess.run(argv, capture_output=True, check=True, timeout=180)
+    return path
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_split_screen_preserves_bottom_audio_when_top_is_image(tmp_path: Path) -> None:
+    assert _FFMPEG is not None
+    assert _FFPROBE is not None
+    image = tmp_path / "top.png"
+    argv = [
+        _FFMPEG,
+        "-y",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=320x240:r=30",
+        "-frames:v",
+        "1",
+        str(image),
+    ]
+    _ = subprocess.run(argv, capture_output=True, check=True, timeout=180)
+    bottom = _synth_clip_with_audio(tmp_path / "bottom.mp4")
+    config = SplitScreenConfig(top_source="img-top", bottom_source="clip-bottom")
+    destination = tmp_path / "split-fallback.mp4"
+    _ = FFmpegAssembler(ffmpeg=_FFMPEG).assemble(
+        RenderSpec(
+            clip=image,
+            destination=destination,
+            layout=Layout.SPLIT_SCREEN,
+            split_screen=config,
+            top_clip=image,
+            bottom_clip=bottom,
+        )
+    )
+    media = FFprobeProbe(ffprobe=_FFPROBE).probe(destination)
+    assert (media.width, media.height) == (1080, 1920)
+    assert media.has_audio
