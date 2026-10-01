@@ -44,16 +44,12 @@ pass a gate. Fix the code.
 - Every performance/VRAM/compatibility claim requires a measurement on
   the target hardware (command + result), never estimates.
 
-## Agent roles
+## Roles
 
-- **Orchestrator**: designs, delegates implementation, verifies gates,
-  opens PRs, and reports. Implements no code and performs no code reviews.
-- **Implementer**: executes delegated coding tasks. Performs no code reviews.
-- **Reviewer**: reviews complete PRs over a base/head snapshot (never
-  commit by commit) and reports findings. Merges, approves, or publishes
-  nothing on its own.
-- The orchestrator never implements code directly; it delegates
-  implementation and review, then verifies the results.
+- **Maintainer**: designs the work, reviews every PR over the full base/head snapshot, verifies the gates, and merges. Reviews nothing it wrote itself.
+- **Contributor**: works on one verifiable capability per PR.
+
+No one merges their own work without review.
 
 ## Branch hygiene
 
@@ -72,6 +68,6 @@ pass a gate. Fix the code.
 
 When a PR is complete with green CI, the owner requests review: the
 reviewer runs a single evidence-driven review over the full PR (base/head
-snapshot, clean-context subagents, adversarial validation). Confirmed
+snapshot, independent validation). Confirmed
 findings are fixed and the delta is re-reviewed. Reviews report only;
 they approve and publish nothing.
