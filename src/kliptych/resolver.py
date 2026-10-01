@@ -65,6 +65,8 @@ from kliptych.contract import (
     RuleSet,
     Segment,
     SourceEvidence,
+    SplitScreenConfig,
+    SplitScreenDraft,
     TimestampRange,
     UnmappedRule,
     Watermark,
@@ -138,6 +140,7 @@ class _RuleContext:
     global_restrictions: GlobalRestrictions
     format_: Format
     brief_text: str | None = None
+    split_screen: SplitScreenConfig | None = None
 
 
 class _ConfidenceCarrier(Protocol):
@@ -808,6 +811,324 @@ def _resolve_lyric_video(
         return None
 
 
+_SPLIT_NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_SPLIT_PERCENT_SCALE = 100.0
+_SPLIT_NUMERIC_TOLERANCE = 1e-6
+
+
+def _extract_split_int(bound: object) -> int | None:
+    """Extrae un entero del candidato, rechazando booleanos.
+
+    Args:
+        bound: Candidato con evidencia, dict crudo o valor directo.
+
+    Returns:
+        El entero declarado, o ``None`` si no hay valor entero válido.
+    """
+    if isinstance(bound, FieldCandidate):
+        value = cast("object", bound.value)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    if isinstance(bound, dict):
+        raw = cast("dict[str, object]", bound).get("value")
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+    if isinstance(bound, int) and not isinstance(bound, bool):
+        return bound
+    return None
+
+
+def _extract_split_float(bound: object) -> float | None:
+    """Extrae un flotante del candidato, rechazando booleanos.
+
+    Args:
+        bound: Candidato con evidencia, dict crudo o valor directo.
+
+    Returns:
+        El flotante declarado, o ``None`` si no hay valor numérico válido.
+    """
+    if isinstance(bound, FieldCandidate):
+        value = cast("object", bound.value)
+    elif isinstance(bound, dict):
+        value = cast("dict[str, object]", bound).get("value")
+    elif isinstance(bound, (int, float)) and not isinstance(bound, bool):
+        return float(bound)
+    else:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _quote_numbers(quote: str) -> list[float]:
+    """Extrae los literales numéricos de una cita del brief.
+
+    Args:
+        quote: Cita textual del brief.
+
+    Returns:
+        Los números mencionados, en orden de aparición.
+    """
+    return [float(match.group(0)) for match in _SPLIT_NUMBER_RE.finditer(quote)]
+
+
+def _quote_mentions_number(quote: str, value: float) -> bool:
+    """Indica si la cita menciona un valor numérico dentro de la tolerancia.
+
+    Args:
+        quote: Cita textual del brief.
+        value: Valor declarado por el candidato.
+
+    Returns:
+        True si algún número de la cita coincide con el valor.
+    """
+    return any(
+        math.isclose(number, value, abs_tol=_SPLIT_NUMERIC_TOLERANCE)
+        for number in _quote_numbers(quote)
+    )
+
+
+def _check_split_source_quote(bound: object, value: str, issues: list[ResolutionIssue]) -> bool:
+    """Exige que la fuente aparezca en su propia cita, no en la de otro campo.
+
+    Args:
+        bound: Candidato del campo (o ``None`` si no se declaró).
+        value: Valor resuelto de la fuente.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+
+    Returns:
+        True si el campo no se declaró o su valor está en su propia cita.
+    """
+    if bound is None:
+        return True
+    quote = _extract_candidate_quote(bound)
+    if quote is None or value not in quote:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=(f"la fuente {value!r} no aparece en su propia cita: {quote!r}"),
+            )
+        )
+        return False
+    return True
+
+
+def _check_split_number_quote(bound: object, value: float, issues: list[ResolutionIssue]) -> bool:
+    """Exige correspondencia numérica entre el valor y su propia cita.
+
+    Args:
+        bound: Candidato del campo (o ``None`` si no se declaró).
+        value: Valor numérico resuelto.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+
+    Returns:
+        True si el campo no se declaró o su cita menciona el valor.
+    """
+    if bound is None:
+        return True
+    quote = _extract_candidate_quote(bound)
+    if quote is None or not _quote_mentions_number(quote, value):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=(f"el valor {value} no se corresponde con su propia cita: {quote!r}"),
+            )
+        )
+        return False
+    return True
+
+
+def _check_split_ratio_quote(bound: object, value: float, issues: list[ResolutionIssue]) -> bool:
+    """Exige que la cita mencione el ratio como fracción o como porcentaje.
+
+    Args:
+        bound: Candidato del campo (o ``None`` si no se declaró).
+        value: Fracción resuelta del panel superior (p. ej. ``0.5``).
+        issues: Hallazgos del resolutor; se amplía en sitio.
+
+    Returns:
+        True si el campo no se declaró o su cita menciona la fracción o su
+        porcentaje equivalente (p. ej. ``50`` para ``0.5``).
+    """
+    if bound is None:
+        return True
+    quote = _extract_candidate_quote(bound)
+    if quote is None or not (
+        _quote_mentions_number(quote, value)
+        or _quote_mentions_number(quote, value * _SPLIT_PERCENT_SCALE)
+    ):
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=(f"el ratio {value} no se corresponde con su propia cita: {quote!r}"),
+            )
+        )
+        return False
+    return True
+
+
+def _check_split_own_quotes(
+    split_draft: SplitScreenDraft,
+    config: SplitScreenConfig,
+    issues: list[ResolutionIssue],
+) -> bool:
+    """Valida cada campo declarado contra su propia cita, nunca contra la unión.
+
+    Args:
+        split_draft: Borrador con los candidatos y sus citas.
+        config: Configuración ya construida con los valores resueltos.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+
+    Returns:
+        True si cada campo declarado se corresponde con su propia cita.
+    """
+    valid = True
+    if not _check_split_source_quote(split_draft.top_source, config.top_source, issues):
+        valid = False
+    if not _check_split_source_quote(split_draft.bottom_source, config.bottom_source, issues):
+        valid = False
+    if not _check_split_number_quote(split_draft.gap, float(config.gap), issues):
+        valid = False
+    if not _check_split_ratio_quote(split_draft.panel_ratio, config.panel_ratio, issues):
+        valid = False
+    if not _check_split_number_quote(split_draft.width, float(config.width), issues):
+        valid = False
+    if not _check_split_number_quote(split_draft.height, float(config.height), issues):
+        valid = False
+    return valid
+
+
+def _split_config_kwargs(
+    split_draft: SplitScreenDraft,
+    issues: list[ResolutionIssue],
+) -> dict[str, object] | None:
+    """Extrae las fuentes y los numéricos opcionales del split o falla en cerrado.
+
+    Args:
+        split_draft: Borrador con los candidatos y sus citas.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+
+    Returns:
+        Los argumentos para ``SplitScreenConfig``, o ``None`` si faltan las
+        fuentes o un campo declarado no trae un valor válido.
+    """
+    top_source = _extract_candidate_str(split_draft.top_source)
+    bottom_source = _extract_candidate_str(split_draft.bottom_source)
+    if top_source is None or bottom_source is None:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.MISSING_REQUIRED,
+                field="split_screen",
+                detail="split_screen exige top_source y bottom_source con valor textual",
+            )
+        )
+        return None
+    kwargs: dict[str, object] = {"top_source": top_source, "bottom_source": bottom_source}
+    optionals: list[tuple[str, object, bool]] = [
+        ("gap", split_draft.gap, True),
+        ("panel_ratio", split_draft.panel_ratio, False),
+        ("width", split_draft.width, True),
+        ("height", split_draft.height, True),
+    ]
+    for name, bound, is_int in optionals:
+        if bound is None:
+            continue
+        value = _extract_split_int(bound) if is_int else _extract_split_float(bound)
+        if value is None:
+            issues.append(
+                ResolutionIssue(
+                    code=IssueCode.INVALID_CONTRACT,
+                    field="split_screen",
+                    detail=f"campo '{name}' declarado sin valor numérico válido",
+                )
+            )
+            return None
+        kwargs[name] = value
+    return kwargs
+
+
+def _resolve_split_screen(
+    draft: ContractDraft,
+    brief_text: str | None,
+    issues: list[ResolutionIssue],
+    *,
+    mode: Mode,
+) -> SplitScreenConfig | None:
+    """Resuelve el split_screen con procedencia estricta T6.
+
+    Cada campo declarado exige confianza válida y una cita textual presente
+    en el brief (los alias sueltos ``citation``/``quote`` en la raíz se
+    rechazan); cada valor se valida contra su propia cita (las fuentes como
+    subcadena, los numéricos por correspondencia, el ratio también como
+    porcentaje) y cualquier fallo es bloqueante (MANUAL_REVIEW).
+
+    Fail-closed por modo: solo ``given_clips`` compone dos paneles. Cualquier
+    otro modo genera un único panel 9:16 que el gate ``layout.geometry`` no
+    puede distinguir de un split real, así que el split declarado fuera de
+    ``given_clips`` se rechaza como contrato inválido antes de renderizar.
+
+    Args:
+        draft: Salida cruda del extractor, con evidencia por campo.
+        brief_text: Texto crudo del brief original, o ``None``.
+        issues: Hallazgos del resolutor; se amplía en sitio.
+        mode: Modo de campaña ya resuelto; solo ``given_clips`` admite split.
+
+    Returns:
+        La configuración resuelta, o ``None`` sin split declarado, con modo
+        sin soporte o ante cualquier fallo de procedencia o validación.
+    """
+    split_draft = draft.split_screen
+    if split_draft is None:
+        return None
+    fields: list[tuple[str, object]] = [
+        ("top_source", split_draft.top_source),
+        ("bottom_source", split_draft.bottom_source),
+        ("gap", split_draft.gap),
+        ("panel_ratio", split_draft.panel_ratio),
+        ("width", split_draft.width),
+        ("height", split_draft.height),
+    ]
+    has_error = False
+    if mode is not Mode.GIVEN_CLIPS:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=(
+                    "split_screen solo se compone en el modo given_clips; "
+                    f"el modo {mode.value} genera un único panel que el gate "
+                    "layout.geometry no puede distinguir de un split real"
+                ),
+            )
+        )
+        has_error = True
+    for _, bound in fields:
+        if bound is not None and not _check_candidate_provenance(
+            bound, brief_text, issues, field="split_screen"
+        ):
+            has_error = True
+    if has_error:
+        return None
+    kwargs = _split_config_kwargs(split_draft, issues)
+    if kwargs is None:
+        return None
+    try:
+        config = SplitScreenConfig.model_validate(kwargs)
+    except ValidationError as err:
+        issues.append(
+            ResolutionIssue(
+                code=IssueCode.INVALID_CONTRACT,
+                field="split_screen",
+                detail=str(err),
+            )
+        )
+        return None
+    if not _check_split_own_quotes(split_draft, config, issues):
+        return None
+    return config
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedSecondary:
     official_audio: OfficialAudio | None
@@ -816,6 +1137,7 @@ class _ResolvedSecondary:
     geo_target: GeoTarget | None
     timestamp_ranges: tuple[TimestampRange, ...]
     lyric_video: LyricConfig | None
+    split_screen: SplitScreenConfig | None
 
 
 def _resolve_secondary_fields(
@@ -835,6 +1157,7 @@ def _resolve_secondary_fields(
         geo_target=_resolve_geo_target(draft, issues),
         timestamp_ranges=_resolve_timestamp_ranges(draft, brief_text, issues),
         lyric_video=_resolve_lyric_video(draft, format_, brief_text, registry, issues),
+        split_screen=_resolve_split_screen(draft, brief_text, issues, mode=mode),
     )
 
 
@@ -891,6 +1214,7 @@ def _build_contract(
                 brand_safety_required=brand_safety_required,
             ),
             brief_text=brief_text,
+            split_screen=secondary.split_screen,
         ),
         unmapped=secondary.unmapped,
         issues=issues,
@@ -916,6 +1240,7 @@ def _build_contract(
         unmapped=secondary.unmapped,
         timestamp_ranges=secondary.timestamp_ranges,
         lyric_video=secondary.lyric_video,
+        split_screen=secondary.split_screen,
         rules=rules,
         assets=assets,
         segments=secondary.segments,
@@ -1464,6 +1789,8 @@ def _base_rules(context: _RuleContext) -> list[str]:
             if context.global_restrictions.watermark_visible_full_video
             else "watermark.present"
         )
+    if context.split_screen is not None:
+        rules.append("layout.geometry")
     return rules
 
 

@@ -8,7 +8,13 @@ from kliptych.gate.brand_safety import (
     make_model_assessor,
     parse_brand_safety_response,
 )
-from kliptych.gate.checks import DEFAULT_VALIDATORS, CheckOutcome, GateContext, Validator
+from kliptych.gate.checks import (
+    DEFAULT_VALIDATORS,
+    CheckOutcome,
+    GateContext,
+    Validator,
+    check_split_screen_geometry,
+)
 from kliptych.gate.engine import Gate, GateError
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import (
@@ -44,6 +50,7 @@ __all__ = [
     "Validator",
     "check_brand_safety",
     "check_hook_keyword",
+    "check_split_screen_geometry",
     "check_watermark_full_video",
     "check_watermark_present",
     "make_brand_safety_validator",

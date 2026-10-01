@@ -373,6 +373,13 @@ ignore = [
     "suspicious-subprocess-import",
     "start-process-with-partial-path",
 ]
+"tests/test_sprint3_split_screen.py" = [
+    # ffmpeg/ffprobe se invocan con lista de argumentos y shell=False para
+    # generar fixtures sintéticos y renderizar el split bajo prueba.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "tests/test_audio_silence.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para generar el
     # fixture sintético y medir el silencio real (volumedetect).

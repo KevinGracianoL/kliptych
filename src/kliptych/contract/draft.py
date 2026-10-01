@@ -113,6 +113,17 @@ class LyricConfigDraft(ContractBase):
     lrclib_enabled: FieldCandidate[bool] | dict[str, object] | bool | None = None
 
 
+class SplitScreenDraft(ContractBase):
+    """Composición en dos paneles propuesta, con evidencia por campo."""
+
+    top_source: FieldCandidate[str] | dict[str, object] | str | None = None
+    bottom_source: FieldCandidate[str] | dict[str, object] | str | None = None
+    gap: FieldCandidate[int] | dict[str, object] | int | None = None
+    panel_ratio: FieldCandidate[float] | dict[str, object] | float | int | None = None
+    width: FieldCandidate[int] | dict[str, object] | int | None = None
+    height: FieldCandidate[int] | dict[str, object] | int | None = None
+
+
 class SegmentsDraft(ContractBase):
     """Segmentos propuestos para el modo long_video."""
 
@@ -180,6 +191,7 @@ class ContractDraft(ContractBase):
     unmapped: list[UnmappedRuleDraft] = Field(default_factory=list)
     timestamp_ranges: list[TimestampRangeDraft] = Field(default_factory=list)
     lyric_video: LyricConfigDraft | None = None
+    split_screen: SplitScreenDraft | None = None
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

@@ -23,7 +23,10 @@ from kliptych.contract import (
     Contract,
     ContractDraft,
     Format,
+    Layout,
     Mode,
+    Platform,
+    SplitScreenConfig,
     contract_digest,
     contract_mutes_audio,
 )
@@ -47,6 +50,7 @@ from kliptych.lyrics import (
     resolve_synced_lyrics,
 )
 from kliptych.manifest import OutputHash, RunManifest, write_manifest
+from kliptych.naming import MAX_SEGMENT_LENGTH
 from kliptych.resolver import (
     IssueCode,
     ProvenanceError,
@@ -569,6 +573,8 @@ def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
 ) -> tuple[list[Piece], list[GateResult], list[OutputHash]]:
+    if contract.split_screen is not None:
+        return _assemble_split_pieces(context, contract, contract.split_screen)
     pieces: list[Piece] = []
     gates: list[GateResult] = []
     outputs: list[OutputHash] = []
@@ -625,6 +631,134 @@ def _assemble_pieces(
                 )
             )
     return pieces, gates, outputs
+
+
+def _assemble_split_pieces(
+    context: _RunContext,
+    contract: Contract,
+    split: SplitScreenConfig,
+) -> tuple[list[Piece], list[GateResult], list[OutputHash]]:
+    """Ensambla una pieza split_screen por plataforma desde sus dos fuentes.
+
+    Las fuentes se resuelven en el registro (video o imagen); cada
+    plataforma recibe un único artefacto 9:16 con ambos paneles apilados y
+    el gate verifica su geometría con ``layout.geometry``.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+        split: Geometría de los paneles ya resuelta del contrato.
+
+    Returns:
+        Las piezas, sus resultados del gate y sus hashes de salida.
+
+    Raises:
+        PipelineError: Si una fuente no está registrada o el identificador
+            de la pieza excede el máximo del gate.
+    """
+    try:
+        top_clip = context.registry.path_for(split.top_source)
+        bottom_clip = context.registry.path_for(split.bottom_source)
+    except AssetNotFoundError as error:
+        msg = f"fuente split_screen no registrada en el workspace: {error}"
+        raise PipelineError(msg) from error
+    piece_id = f"{split.top_source}__{split.bottom_source}"
+    if len(piece_id) > MAX_SEGMENT_LENGTH:
+        msg = f"identificador de pieza split_screen demasiado largo: {piece_id!r}"
+        raise PipelineError(msg)
+    watermark = _watermark_path(contract, context.registry)
+    lyric = _prepare_lyric_clip(context, contract, source_offset_sec=0.0)
+    deps = _SplitRenderDeps(
+        split=split,
+        piece_id=piece_id,
+        top_clip=top_clip,
+        bottom_clip=bottom_clip,
+        watermark=watermark,
+        mute_audio=contract_mutes_audio(contract),
+        lyric=lyric,
+    )
+    pieces: list[Piece] = []
+    gates: list[GateResult] = []
+    outputs: list[OutputHash] = []
+    for platform in sorted(contract.platforms, key=lambda item: item.value):
+        piece, gate, output = _render_split_piece(context, contract, deps, platform)
+        pieces.append(piece)
+        gates.append(gate)
+        outputs.append(output)
+    return pieces, gates, outputs
+
+
+@dataclass(frozen=True, slots=True)
+class _SplitRenderDeps:
+    """Entradas ya resueltas para ensamblar las piezas split_screen."""
+
+    split: SplitScreenConfig
+    piece_id: str
+    top_clip: Path
+    bottom_clip: Path
+    watermark: Path | None
+    mute_audio: bool
+    lyric: _LyricClipState
+
+
+def _render_split_piece(
+    context: _RunContext,
+    contract: Contract,
+    deps: _SplitRenderDeps,
+    platform: Platform,
+) -> tuple[Piece, GateResult, OutputHash]:
+    """Ensambla, subtitula y valida una pieza split_screen de una plataforma.
+
+    Args:
+        context: Estado y dependencias de la corrida ya preparada.
+        contract: Contrato validado de la corrida.
+        deps: Fuentes, identificador y opciones ya resueltas del split.
+        platform: Plataforma destino de la pieza.
+
+    Returns:
+        La pieza, su resultado del gate y su hash de salida.
+    """
+    artifact = context.run_dir / "artifacts" / platform.value / f"{deps.piece_id}.mp4"
+    spec = RenderSpec(
+        clip=deps.top_clip,
+        destination=artifact,
+        watermark=deps.watermark,
+        watermark_config=contract.watermark if deps.watermark is not None else None,
+        subtitles=_resolve_assemble_subtitles(context, contract, deps.lyric, artifact),
+        mute_audio=deps.mute_audio,
+        layout=Layout.SPLIT_SCREEN,
+        split_screen=deps.split,
+        top_clip=deps.top_clip,
+        bottom_clip=deps.bottom_clip,
+    )
+    _ = context.builder.assemble(spec)
+    caption = context.model.write_caption(
+        contract,
+        PieceContext(piece_id=deps.piece_id, platform=platform),
+    )
+    sub_text, sub_segments = _resolve_piece_subtitles(
+        context, deps.piece_id, lyric_window=deps.lyric.lines
+    )
+    piece = Piece(
+        piece_id=deps.piece_id,
+        platform=platform,
+        caption=caption.caption,
+        hashtags=caption.hashtags,
+        subtitle_text=sub_text,
+        subtitle_segments=sub_segments,
+        artifact_path=artifact,
+        start_sec=deps.lyric.start_sec,
+        end_sec=deps.lyric.end_sec,
+        ass_path=spec.subtitles,
+    )
+    gate = context.engine.run(contract=contract, piece=piece, assets=context.registry)
+    output = OutputHash(
+        path=artifact.relative_to(context.run_dir).as_posix(),
+        sha256=sha256_file(artifact),
+        size_bytes=artifact.stat().st_size,
+        render_arguments=context.builder.render_arguments(spec),
+    )
+    return piece, gate, output
 
 
 def _watermark_path(contract: Contract, registry: AssetRegistry) -> Path | None:

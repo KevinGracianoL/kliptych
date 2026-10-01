@@ -469,6 +469,9 @@ def compute_long_video_fingerprint(
     lyric_sig = _lyric_signature(config)
     if lyric_sig is not None:
         payload["lyric_video"] = lyric_sig
+    split_sig = _split_screen_signature(config)
+    if split_sig is not None:
+        payload["split_screen"] = split_sig
     return sha256_canonical_json(payload)
 
 
@@ -532,6 +535,23 @@ def _watermark_signature(config: PipelineConfig) -> dict[str, object]:
     }
 
 
+def _split_screen_signature(config: PipelineConfig) -> dict[str, object] | None:
+    """Firma la geometría split_screen exacta para ``--resume``.
+
+    Los valores entran tal cual (fuentes, gap, ratio y lienzo): cualquier
+    cambio invalida el checkpoint aunque el resto del contrato no se mueva.
+
+    Args:
+        config: Configuración de la corrida.
+
+    Returns:
+        El bloque determinista del split, o ``None`` sin split declarado.
+    """
+    if config.contract.split_screen is None:
+        return None
+    return config.contract.split_screen.model_dump(mode="json")
+
+
 def compute_slideshow_fingerprint(
     images: Sequence[Path | str],
     *,
@@ -567,7 +587,33 @@ def compute_slideshow_fingerprint(
         },
         "watermark": _watermark_signature(config),
     }
+    split_sig = _split_screen_signature(config)
+    if split_sig is not None:
+        payload["split_screen"] = split_sig
     return sha256_canonical_json(payload)
+
+
+def _reject_split_screen(config: PipelineConfig) -> None:
+    """Rechaza split_screen en pipelines de un único panel (fail-closed).
+
+    ``run_long_video`` y ``run_slideshow`` componen un solo panel 9:16: sin
+    esta guarda, un contrato con ``split_screen`` generaría un MP4 de un
+    panel que el gate ``layout.geometry`` aceptaría por sus dimensiones. El
+    split solo se compone en el pipeline ``given_clips``.
+
+    Args:
+        config: Configuración con el contrato de la corrida.
+
+    Raises:
+        PipelineError: Si el contrato declara ``split_screen``.
+    """
+    if config.contract.split_screen is not None:
+        msg = (
+            "split_screen exige el pipeline given_clips con composición de dos "
+            "paneles; este pipeline genera un único panel que el gate "
+            "layout.geometry no puede distinguir de un split real"
+        )
+        raise PipelineError(msg)
 
 
 def _validate_audio_combination(config: PipelineConfig) -> None:
@@ -630,6 +676,7 @@ def run_long_video(
     Raises:
         PipelineError: Si una etapa falla o no se puede construir el reframe.
     """
+    _reject_split_screen(config)
     _validate_audio_combination(config)
     try:
         config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -807,6 +854,7 @@ def run_slideshow(
         PipelineError: Si la duración no es positiva, falta ``audio_locked``,
             no hay imágenes, una imagen no existe o una etapa falla.
     """
+    _reject_split_screen(config)
     _validate_audio_combination(config)
     _validate_slideshow(images, config=config, slide_duration_s=slide_duration_s)
     try:
