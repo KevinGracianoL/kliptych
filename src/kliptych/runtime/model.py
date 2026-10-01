@@ -1,8 +1,7 @@
 """Interfaz del modelo de runtime de Kliptych (capa 0).
 
-La interfaz es independiente del agente de desarrollo (opencode, Claude Code,
-Codex) y del proveedor concreto. ``select_segments`` (brief §9) se incorpora en
-la fase C, cuando exista su tipo.
+La interfaz es independiente del proveedor concreto. ``select_segments``
+(brief §9) se incorpora en la fase C, cuando exista su tipo.
 
 ``write_caption`` (brief §9) recibe ``Contract`` y un ``PieceContext`` en lugar
 de la ``Piece`` del gate: la pieza final ya incluye el caption que se está
