@@ -144,9 +144,10 @@ class FFmpegAssembler:
 
         Cada panel se escala y recorta a su franja del lienzo del
         ``split_screen`` y ambas franjas se apilan con ``vstack``; una
-        imagen estática entra en bucle y el render se acota al panel más
-        corto con ``-shortest``. La publicación es atómica igual que el
-        modo simple.
+        imagen estática entra como frame único y el framesync repite su
+        último frame hasta el fin del panel más largo (sin ``-loop`` ni
+        ``-shortest``: un bucle infinito bajo ``vstack`` nunca termina).
+        La publicación es atómica igual que el modo simple.
 
         Args:
             spec: Entradas del render con ``layout=SPLIT_SCREEN``.

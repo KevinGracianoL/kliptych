@@ -1001,6 +1001,14 @@ def test_split_argv_muted_single_panel_uses_af(
     assert argv[argv.index("-af") + 1] == "volume=0"
 
 
+def test_assemble_split_docstring_describes_longest_panel() -> None:
+    doc = FFmpegAssembler._assemble_split.__doc__
+    assert doc is not None
+    assert "panel más corto" not in doc
+    assert "entra en bucle" not in doc
+    assert "más largo" in doc
+
+
 def _synth_clip_with_audio(path: Path, *, duration: float = 2.0) -> Path:
     assert _FFMPEG is not None
     argv = [
