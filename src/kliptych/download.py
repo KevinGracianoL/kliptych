@@ -54,7 +54,18 @@ _YTDLP_SIDECAR_SUFFIXES = (".part", ".ytdl")
 _YTDLP_FRAGMENT_PATTERNS = (".part-Frag*", ".f[0-9]*")
 _YTDLP_APPENDED_CONTAINER_SUFFIXES = (".webm", ".mkv", ".mp4")
 _YTDLP_FORMAT_ENV_VAR = "KLIPTYCH_YTDLP_FORMAT"
-_DEFAULT_YTDLP_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+# Techo anti-4K: TODAS las ramas llevan ``height<=?1080`` a proposito.
+#
+# El ``?`` hace el filtro opcional: yt-dlp lo descarta cuando el extractor no
+# reporta ``height`` (extractores genericos de MP4 directo, donde la resolucion
+# sale "unknown"), y lo aplica cuando si lo reporta (YouTube, Kick), que es
+# donde esta el riesgo de VRAM. Con el filtro estricto ``[height<=1080]`` esos
+# MP4 directos fallan con "Requested format is not available".
+#
+# No se anade un ``/best`` final porque ese fallback reintroduce la descarga
+# nativa 2K/4K precisamente cuando la fuente no publica variante <=1080, que
+# es el caso que motiva el techo. Sin fallback, yt-dlp falla en cerrado.
+_DEFAULT_YTDLP_FORMAT = "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]"
 
 _KICK_VOD_PATH_MARKER = "/videos/"
 _KICK_M3U8_SUFFIX = ".m3u8"
@@ -257,7 +268,10 @@ class MediaDownloader:
             url: URL del video; debe ser http/https y no apuntar a una dirección
                 local o privada.
             destination: Ruta del artefacto descargado.
-            format_selector: Selector de formato de yt-dlp, si se requiere.
+            format_selector: Selector de formato de yt-dlp. Si se pasa, manda
+                sobre el techo anti-4K por defecto y sobre el override
+                ``KLIPTYCH_YTDLP_FORMAT``; ambos existen como escapes para
+                fuentes que no publican variante <=1080.
             section: Rango [start, end] en segundos para descarga quirúrgica.
 
         Returns:
@@ -269,15 +283,11 @@ class MediaDownloader:
         """
         _validate_url(url)
         resolved_url = resolve_kick_vod_stream_url(url)
-        if format_selector is not None:
-            effective_format = format_selector
-        else:
-            effective_format = os.environ.get(_YTDLP_FORMAT_ENV_VAR) or _DEFAULT_YTDLP_FORMAT
         argv = self.build_ytdlp_argv(
             url=resolved_url,
             destination=destination,
             max_size_bytes=self._max_size_bytes,
-            format_selector=effective_format,
+            format_selector=_effective_format_selector(format_selector),
             section=section,
         )
         return self._run_download(argv, destination=destination, tool=_YTDLP)
@@ -343,7 +353,7 @@ class MediaDownloader:
         url: str,
         destination: Path,
         max_size_bytes: int,
-        format_selector: str | None = None,
+        format_selector: str = _DEFAULT_YTDLP_FORMAT,
         section: tuple[float, float] | None = None,
     ) -> list[str]:
         """Construye el argv de yt-dlp, con límite de tamaño nativo.
@@ -352,7 +362,13 @@ class MediaDownloader:
             url: URL del video.
             destination: Ruta del artefacto descargado.
             max_size_bytes: Tamaño máximo aceptado, en bytes.
-            format_selector: Selector de formato opcional.
+            format_selector: Selector de formato de yt-dlp. El defecto es el
+                selector con techo anti-4K, no ``None``: ``--format`` se emite
+                siempre, de modo que una llamada externa que omita este
+                argumento hereda la protección en vez de dejar que yt-dlp elija
+                el mejor formato disponible sin limite. Para una fuente sin
+                variante <=1080 se pasa el selector explícito o se define
+                ``KLIPTYCH_YTDLP_FORMAT``.
             section: Rango [start, end] en segundos para descarga quirúrgica con margen.
 
         Returns:
@@ -367,9 +383,9 @@ class MediaDownloader:
             str(max_size_bytes),
             "--output",
             str(destination),
+            "--format",
+            format_selector,
         ]
-        if format_selector is not None:
-            argv += ["--format", format_selector]
         if section is not None:
             start_sec, end_sec = section
             margin_start = max(0.0, start_sec - 10.0)
@@ -524,6 +540,27 @@ def is_kick_url(url: str) -> bool:
     if host:
         host = host.rstrip(".")
     return bool(host and (host == "kick.com" or host.endswith(".kick.com")))
+
+
+def _effective_format_selector(format_selector: str | None) -> str:
+    """Resuelve el selector de formato de yt-dlp aplicando el techo anti-4K.
+
+    La precedencia es: selector explicito del llamador, luego el override de
+    emergencia ``KLIPTYCH_YTDLP_FORMAT`` (para fuentes que no publican
+    variante <=1080) y por defecto el selector con techo. Un override en
+    blanco se descarta en vez de degradar la politica a "sin selector", que
+    dejaria a yt-dlp elegir el mejor formato disponible sin limite.
+
+    Args:
+        format_selector: Selector pedido por el llamador, si lo hay.
+
+    Returns:
+        El selector efectivo para ``--format``.
+    """
+    if format_selector is not None:
+        return format_selector
+    override = os.environ.get(_YTDLP_FORMAT_ENV_VAR, "").strip()
+    return override or _DEFAULT_YTDLP_FORMAT
 
 
 def resolve_kick_vod_stream_url(url: str, timeout_s: float = 15.0) -> str:

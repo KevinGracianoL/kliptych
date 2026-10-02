@@ -176,7 +176,7 @@ class _FakeReframer(Reframer):
     def analyze(self, video: Path) -> ReframeResult:
         _ = video
         return ReframeResult(
-            targets=(ReframeTarget(x=0, y=0, width=134, height=240),),
+            targets=(ReframeTarget(x=0.0, y=0.0, width=134 / 320, height=240 / 240),),
             source_width=320,
             source_height=240,
         )

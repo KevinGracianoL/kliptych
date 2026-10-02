@@ -12,9 +12,11 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from kliptych import download as _download_module
 from kliptych.download import (
     DownloadError,
     DownloadRunner,
@@ -28,6 +30,14 @@ from kliptych.environment import CommandResult
 _YTDLP = "yt-dlp"
 _STREAMLINK = "streamlink"
 _CHAT = "chat_downloader"
+
+
+def _private(name: str) -> object:
+    return cast("object", getattr(_download_module, name))
+
+
+_CAPPED_SELECTOR = cast("str", _private("_DEFAULT_YTDLP_FORMAT"))
+_FORMAT_ENV_VAR = cast("str", _private("_YTDLP_FORMAT_ENV_VAR"))
 
 _DEFAULT_TIMEOUT_S = 3600.0
 _DEFAULT_MAX_SIZE_BYTES = 2 * 1024**3
@@ -396,16 +406,34 @@ def test_build_ytdlp_argv_shape(tmp_path: Path) -> None:
     assert argv[-1] == "https://example.com/v"
 
 
-def test_build_ytdlp_argv_without_format(tmp_path: Path) -> None:
+def test_build_ytdlp_argv_inherits_capped_format_by_default(tmp_path: Path) -> None:
+    """Omitir ``format_selector`` ya no deja a yt-dlp sin techo.
+
+    El defecto del parámetro es el selector con techo, no ``None``: una llamada
+    externa que no pase el argumento hereda la protección anti-4K en vez de
+    dejar que yt-dlp elija el mejor formato disponible.
+    """
     argv = MediaDownloader.build_ytdlp_argv(
         url="https://example.com/v",
         destination=tmp_path / "video.mp4",
         max_size_bytes=2048,
     )
-    assert "--format" not in argv
+    assert argv[argv.index("--format") + 1] == _CAPPED_SELECTOR
     assert "--ignore-config" in argv
     assert argv[-2] == "--"
     assert argv[-1] == "https://example.com/v"
+
+
+def test_build_ytdlp_argv_never_emits_uncapped_selector(tmp_path: Path) -> None:
+    """Ninguna rama del selector por defecto puede quedarse sin techo."""
+    argv = MediaDownloader.build_ytdlp_argv(
+        url="https://example.com/v",
+        destination=tmp_path / "video.mp4",
+        max_size_bytes=2048,
+    )
+    selector = argv[argv.index("--format") + 1]
+    uncapped = [alt for alt in selector.split("/") if "height<=?1080" not in alt]
+    assert uncapped == []
 
 
 def test_build_streamlink_argv_shape(tmp_path: Path) -> None:
@@ -706,3 +734,93 @@ def test_download_video_resolves_kick_vod_url(
     download = _download_calls(runner)[-1]
     assert download[-2] == "--"
     assert download[-1] == _KICK_M3U8_URL
+
+
+def _format_of(runner: FakeRunner) -> str:
+    argv = _download_calls(runner)[-1]
+    return argv[argv.index("--format") + 1]
+
+
+def test_default_selector_caps_every_alternative_at_1080p() -> None:
+    """Gate anti-4K: ninguna rama del selector puede quedar sin techo.
+
+    Reintroducir un fallback ``/best`` sin el filtro devolvería la descarga
+    nativa 4K justo en el caso que motiva el techo: una fuente que no publica
+    variante <=1080.
+    """
+    alternatives = _CAPPED_SELECTOR.split("/")
+    assert alternatives
+    uncapped = [alt for alt in alternatives if "height<=?1080" not in alt]
+    assert uncapped == []
+
+
+def test_default_selector_cap_is_optional_filter() -> None:
+    """El ``?`` es lo que permite los MP4 directos, whose resolution es unknown.
+
+    Con el filtro estricto ``[height<=1080]`` un extractor generico que no
+    reporta ``height`` descarta todos los formatos y yt-dlp falla con
+    "Requested format is not available".
+    """
+    assert "?1080" in _CAPPED_SELECTOR
+    assert "[height<=1080]" not in _CAPPED_SELECTOR
+
+
+def test_default_selector_prefers_separate_video_and_audio() -> None:
+    assert _CAPPED_SELECTOR.startswith("bestvideo[height<=?1080]+bestaudio")
+
+
+def test_download_video_injects_capped_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(_FORMAT_ENV_VAR, raising=False)
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    _ = MediaDownloader(runner=runner).download_video(
+        url="https://example.com/v", destination=destination
+    )
+    assert _format_of(runner) == _CAPPED_SELECTOR
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_format_override_falls_back_to_capped_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blank: str
+) -> None:
+    """Un override vacío no debe degradar la política a "sin selector"."""
+    monkeypatch.setenv(_FORMAT_ENV_VAR, blank)
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    _ = MediaDownloader(runner=runner).download_video(
+        url="https://example.com/v", destination=destination
+    )
+    assert _format_of(runner) == _CAPPED_SELECTOR
+
+
+def test_emergency_format_override_is_honoured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """KLIPTYCH_YTDLP_FORMAT es el escape hatch para fuentes sin variante <=1080."""
+    monkeypatch.setenv(_FORMAT_ENV_VAR, "best")
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    _ = MediaDownloader(runner=runner).download_video(
+        url="https://example.com/v", destination=destination
+    )
+    assert _format_of(runner) == "best"
+
+
+def test_explicit_selector_beats_environment_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Con ambos fijados manda el selector del llamador, no el override global.
+
+    Sin este test, invertir la precedencia documentada pasaria la suite entera.
+    """
+    monkeypatch.setenv(_FORMAT_ENV_VAR, "worst")
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    _ = MediaDownloader(runner=runner).download_video(
+        url="https://example.com/v",
+        destination=destination,
+        format_selector="bestvideo+bestaudio",
+    )
+    assert _format_of(runner) == "bestvideo+bestaudio"
