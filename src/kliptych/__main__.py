@@ -22,7 +22,7 @@ from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager, CampaignManagerError, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
-from kliptych.contract import Contract, ContractDraft
+from kliptych.contract import Contract, ContractDraft, vanilla_contract
 from kliptych.encoding import RenderConfig
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
@@ -30,8 +30,14 @@ from kliptych.gate import Gate
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.gc import clean_temporary_directories
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine
+from kliptych.hashing import brief_key
 from kliptych.ingest import MAX_BRIEF_BYTES, IngestError, ingest_bytes, ingest_file
-from kliptych.intelligence import Archetype, LLMCampaignClassifier
+from kliptych.intelligence import (
+    Archetype,
+    CampaignClassifier,
+    LLMCampaignClassifier,
+    VanillaClassifier,
+)
 from kliptych.logging_setup import setup_logging
 from kliptych.pipeline import PipelineError, RunOutcome, RunRequest, RunResult, run_given_clips
 from kliptych.resolver import ProvenanceError, resolve_contract
@@ -109,7 +115,7 @@ class _DefaultVideoOrchestrator:
         self,
         *,
         work_dir: Path,
-        model: _ChatSegmentModel,
+        model: _ChatSegmentModel | None,
         render: RenderConfig,
         assets: AssetRegistry | None = None,
     ) -> None:
@@ -117,12 +123,14 @@ class _DefaultVideoOrchestrator:
 
         Args:
             work_dir: Directorio donde el pipeline publica sus artefactos.
-            model: Modelo de selección de segmentos sobre el backend LLM.
+            model: Modelo de selección de segmentos sobre el backend LLM. Es
+                ``None`` en el modo zero-contract, que fuerza repost y nunca
+                selecciona segmentos.
             render: Binario, timeout y NVENC compartidos por los renders.
             assets: Registro de assets opcional del workspace.
         """
         self._work_dir: Path = work_dir
-        self._model: _ChatSegmentModel = model
+        self._model: _ChatSegmentModel | None = model
         self._render: RenderConfig = render
         self._assets: AssetRegistry | None = assets
 
@@ -136,6 +144,10 @@ class _DefaultVideoOrchestrator:
 
         Returns:
             El resultado del pipeline long_video.
+
+        Raises:
+            CampaignManagerError: Si el modo exige selección de segmentos con
+                el LLM y no hay backend configurado.
         """
         assets_in = kwargs.get("assets")
         assets = assets_in if isinstance(assets_in, AssetRegistry) else self._assets
@@ -150,6 +162,12 @@ class _DefaultVideoOrchestrator:
         resume = kwargs.get("resume") is True
         if config.repost_mode:
             return orchestrator.run_repost(url, model=self._model, config=config, resume=resume)
+        if self._model is None:
+            msg = (
+                "este modo necesita un modelo de selección de segmentos y no hay "
+                "backend LLM configurado; el modo zero-contract solo admite repost"
+            )
+            raise CampaignManagerError(msg)
         if config.audio_locked:
             return orchestrator.run_audio_locked(
                 url, model=self._model, config=config, resume=resume
@@ -625,11 +643,19 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     brief_path = cast(
         "str", getattr(args, "brief_option", None) or getattr(args, "brief", "") or ""
     )
-    if not brief_path:
-        logger.error("Se requiere la ruta del brief")
-        return 1
     out_dir = cast("str", getattr(args, "out", ""))
     dest_path = Path(out_dir) if out_dir else None
+    url = cast("str | None", getattr(args, "url", None))
+    mode = cast("str", getattr(args, "mode", "long_video"))
+
+    if not brief_path:
+        return _cmd_campaign_zero_contract(
+            args,
+            manager=manager,
+            destination=dest_path,
+            url=url,
+            mode=mode,
+        )
 
     try:
         brief = ingest_file(Path(brief_path))
@@ -673,6 +699,62 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
         logger.exception("Error de configuración")
         return 1
 
+    return _handle_campaign_result(_process_campaign(active_manager, campaign, args))
+
+
+def _cmd_campaign_zero_contract(
+    args: argparse.Namespace,
+    *,
+    manager: _CampaignManagerProtocol | None,
+    destination: Path | None,
+    url: str | None,
+    mode: str,
+) -> int:
+    """Procesa la campaña sin brief: contrato vainilla y ninguna llamada al LLM.
+
+    Es la vía de un solo argumento (``--url``). No se ingiere ningún brief, no
+    se extrae contrato y no se exige ``KLIPTYCH_LLM_*``: el contrato se
+    sintetiza en memoria y el modo se fuerza a repost, el único camino que no
+    selecciona segmentos con el LLM.
+
+    Args:
+        args: Argumentos parseados del subcomando ``campaign``.
+        manager: Manager inyectado, si la prueba lo provee.
+        destination: Directorio de salida resuelto de ``--out``.
+        url: URL del vídeo fuente.
+        mode: Modo pedido; el gestor lo fuerza a repost por ser zero-contract.
+
+    Returns:
+        ``0`` si la campaña se procesó, ``1`` si falta la URL o falla la config.
+    """
+    if url is None or not url.strip():
+        logger.error("Se requiere --url cuando no se pasa la ruta del brief")
+        return 1
+    campaign_id = brief_key(url.strip())[:12]
+    logger.info(
+        "Modo zero-contract: sin brief, contrato vainilla para la campaña %s (modo %s)",
+        campaign_id,
+        mode,
+    )
+    logger.info("Directorio de salida: %s", destination or "")
+    campaign = Campaign(
+        campaign_id=campaign_id,
+        brief="",
+        status=CampaignStatus.PENDING,
+        contract=vanilla_contract(campaign_id=campaign_id),
+    )
+    try:
+        active_manager = (
+            manager
+            if manager is not None
+            else _make_default_campaign_manager(
+                destination=destination / "delivery" if destination else None,
+                require_llm=False,
+            )
+        )
+    except RuntimeError:
+        logger.exception("Error de configuración")
+        return 1
     return _handle_campaign_result(_process_campaign(active_manager, campaign, args))
 
 
@@ -847,26 +929,52 @@ def _make_default_campaign_manager(
     destination: Path | None = None,
     gate: Gate | None = None,
     assets: AssetRegistry | None = None,
+    *,
+    require_llm: bool = True,
 ) -> _CampaignManagerProtocol:
+    """Construye el gestor de campañas real.
+
+    Args:
+        destination: Directorio de la entrega; por defecto ``./delivery``.
+        gate: Gate de validación; por defecto el de ffprobe.
+        assets: Registro de assets; por defecto el del directorio actual.
+        require_llm: Si es True exige ``KLIPTYCH_LLM_*`` y cablea el
+            clasificador y el modelo de segmentos con el backend LLM. El modo
+            zero-contract pasa False: sin brief no hay nada que clasificar ni
+            que seleccionar, así que no debe exigir credenciales ni construir
+            un cliente de chat que nunca se usaría.
+
+    Returns:
+        El gestor configurado.
+
+    Raises:
+        RuntimeError: Si ``require_llm`` y falta alguna variable ``KLIPTYCH_LLM_*``.
+    """
     source = os.environ
-    missing = [
-        name
-        for name in ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
-        if not source.get(name)
-    ]
-    if missing:
-        msg = f"faltan variables de entorno: {', '.join(missing)}"
-        raise RuntimeError(msg)
-    classifier = LLMCampaignClassifier(
-        base_url=source["KLIPTYCH_LLM_BASE_URL"],
-        api_key=source["KLIPTYCH_LLM_API_KEY"],
-        model=source["KLIPTYCH_LLM_MODEL"],
-    )
-    backend = OpenAIChatModel(
-        base_url=source["KLIPTYCH_LLM_BASE_URL"],
-        api_key=source["KLIPTYCH_LLM_API_KEY"],
-        model=source["KLIPTYCH_LLM_MODEL"],
-    )
+    classifier: CampaignClassifier
+    backend: OpenAIChatModel | None
+    if require_llm:
+        missing = [
+            name
+            for name in ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
+            if not source.get(name)
+        ]
+        if missing:
+            msg = f"faltan variables de entorno: {', '.join(missing)}"
+            raise RuntimeError(msg)
+        classifier = LLMCampaignClassifier(
+            base_url=source["KLIPTYCH_LLM_BASE_URL"],
+            api_key=source["KLIPTYCH_LLM_API_KEY"],
+            model=source["KLIPTYCH_LLM_MODEL"],
+        )
+        backend = OpenAIChatModel(
+            base_url=source["KLIPTYCH_LLM_BASE_URL"],
+            api_key=source["KLIPTYCH_LLM_API_KEY"],
+            model=source["KLIPTYCH_LLM_MODEL"],
+        )
+    else:
+        classifier = VanillaClassifier()
+        backend = None
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
     effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe())
@@ -874,7 +982,7 @@ def _make_default_campaign_manager(
     effective_assets = assets if assets is not None else AssetRegistry(Path.cwd())
     render = RenderConfig()
     work_dir = effective_dest.parent / f"{effective_dest.name}-work"
-    segment_model = _ChatSegmentModel(backend)
+    segment_model = _ChatSegmentModel(backend) if backend is not None else None
     return CampaignManager(
         classifier=classifier,
         proposal_engine=ProposalEngine(provider=provider),

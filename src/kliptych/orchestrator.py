@@ -778,7 +778,7 @@ def run_audio_locked(
 def run_repost(
     url: str,
     *,
-    model: LongVideoModel,
+    model: LongVideoModel | None = None,
     config: PipelineConfig,
     detector: MomentDetector | None = None,
     transcriber: Transcriber | None = None,
@@ -791,8 +791,9 @@ def run_repost(
 
     Args:
         url: URL http/https del vídeo fuente.
-        model: Modelo de runtime (no se usa en modo repost, que omite la
-            selección LLM).
+        model: Modelo de runtime. Opcional porque el modo repost omite la
+            selección LLM y no lo consulta; el modo zero-contract lo ejecuta
+            sin backend configurado.
         config: Directorio de salida, contrato y render; exige
             ``repost_mode=True``.
         detector: Detector de momentos; por defecto usa ffmpeg.

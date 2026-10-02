@@ -588,6 +588,69 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 }
 
 
+_ZERO_CONTRACT_AV_RULES = (
+    "artifact.integrity",
+    "artifact.video_stream",
+    "audio.present",
+)
+_ZERO_CONTRACT_LANGUAGE = "es"
+
+
+def vanilla_contract(
+    *,
+    campaign_id: str,
+    platform: Platform = Platform.TIKTOK,
+    language: str = _ZERO_CONTRACT_LANGUAGE,
+) -> Contract:
+    """Construye el contrato "vainilla" del modo zero-contract, sin brief ni LLM.
+
+    Es el contrato que se usa cuando el operador solo aporta una ``--url``: no
+    hay brief que extraer, así que no se llama al LLM y se sintetiza aquí el
+    mínimo válido. Declara únicamente la integridad estándar de audio y video
+    como reglas ``hard``; sin ellas el gate aprobaría en vacío incluso con el
+    artefacto ausente, porque ``_derive_status`` devuelve ``PASSED`` sobre
+    cero checks.
+
+    Lo que el contrato NO declara es precisamente lo que no se puede saber sin
+    un brief: sin prohibiciones léxicas, sin ``brand_safety_required``, sin
+    bounds de duración, sin menciones ni hashtags, y sin watermark. El audio
+    original se conserva declarando ``AudioPolicy.ORIGINAL_AUDIO``, que no
+    silencia la pista.
+
+    ``audio.present`` se declara pero, con ``audio_rule='any'``, ``check_audio_present``
+    aprueba sin interrogar ffprobe: verifica que haya flujo de video y que el
+    artefacto exista y sea legible, no que haya audio.
+
+    Args:
+        campaign_id: Identificador de campaña; debe ser un segmento de ruta
+            seguro porque se usa como nombre de directorio en la entrega.
+        platform: Plataforma única que declara el contrato.
+        language: Locale de fuente y caption.
+
+    Returns:
+        Un ``Contract`` válido, sin reglas de campaña.
+
+    Raises:
+        ValueError: Si ``campaign_id`` está vacío o no es un segmento seguro,
+            o si ``language`` no cumple el patrón de locale del schema.
+    """
+    if not campaign_id:
+        msg = "vanilla_contract exige un campaign_id no vacío"
+        raise ValueError(msg)
+    return Contract(
+        campaign_id=campaign_id,
+        format=Format.VIDEO,
+        mode=Mode.REPOST_UGC,
+        platforms={platform: PlatformRules()},
+        languages=Languages(source=language, caption=language),
+        watermark=Watermark(required=False, visible_full_video=False),
+        rules=RuleSet(hard=list(_ZERO_CONTRACT_AV_RULES)),
+        assets=AssetBundle(),
+        audio_policy=AudioPolicy.ORIGINAL_AUDIO,
+        brand_safety_required=False,
+    )
+
+
 def prompt_languages(contract: Contract) -> dict[str, object]:
     """Idiomas del contrato para prompts de LLM, sin el locale de transcripción.
 

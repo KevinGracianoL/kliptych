@@ -28,17 +28,32 @@ class CampaignStatus(StrEnum):
 
 
 class Campaign(BaseModel):
-    """Campaña con su clasificación y estado."""
+    """Campaña con su clasificación y estado.
+
+    ``brief`` vacío identifica el modo zero-contract: el operador solo aporta
+    una URL y el contrato se sintetiza en memoria, así que no hay texto de
+    campaña que clasificar ni del que derivar reglas.
+    """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
     campaign_id: str = Field(min_length=1)
-    brief: str = Field(min_length=1)
+    brief: str = ""
     status: CampaignStatus = CampaignStatus.PENDING
     archetype: Archetype | None = None
     classification: ArchetypeClassification | None = None
     contract: Contract | None = None
     variations_log: Path | None = None
+
+    @property
+    def is_zero_contract(self) -> bool:
+        """Indica si la campaña corre en modo zero-contract (sin brief).
+
+        Returns:
+            ``True`` cuando no hay brief, que es la única señal de que el
+            contrato fue sintetizado en vez de extraído de un brief.
+        """
+        return not self.brief
 
 
 @dataclass(frozen=True, slots=True)

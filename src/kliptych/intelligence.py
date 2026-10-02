@@ -84,6 +84,35 @@ class CampaignClassifier(Protocol):
         ...
 
 
+class VanillaClassifier:
+    """Clasificador del modo zero-contract: siempre ``KNOWN``, sin modelo.
+
+    Sustituye a ``LLMCampaignClassifier`` cuando no hay brief. Sin brief no hay
+    nada que clasificar: la pregunta "¿este brief encaja en el contrato?" no
+    tiene sentido, y responderla exigiría una llamada al LLM que este modo
+    prohíbe. La respuesta es ``KNOWN`` porque el contrato se sintetizó para la
+    URL concreta y, por construcción, todo encaja.
+    """
+
+    @staticmethod
+    def classify(brief: str, contract: Contract) -> ArchetypeClassification:
+        """Clasifica como ``KNOWN`` sin contactar ningún modelo.
+
+        Args:
+            brief: Texto del brief; se ignora y puede estar vacío.
+            contract: Contrato trampa del modo zero-contract.
+
+        Returns:
+            Una clasificación ``KNOWN`` sin variaciones.
+        """
+        _ = (brief, contract)
+        return ArchetypeClassification(
+            archetype=Archetype.KNOWN,
+            rationale="modo zero-contract: sin brief no hay arquetipo que clasificar",
+            variations=(),
+        )
+
+
 def classify_prompt_payload(brief: str, contract: Contract) -> dict[str, object]:
     """Construye el payload que recibe el clasificador.
 

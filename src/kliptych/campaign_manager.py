@@ -14,6 +14,7 @@ el primer uso.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
 _MAX_PIECE_ID_LENGTH: int = 64
+_ZERO_CONTRACT_MODE: str = "repost_ugc"
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CampaignManagerError(Exception):
@@ -234,33 +237,41 @@ class CampaignManager:
                 f"la campaña {campaign.campaign_id} no tiene contrato validado",
                 Archetype.NEW_ARCHETYPE,
             )
-        try:
-            classification = self._classifier.classify(campaign.brief, contract)
-        except Exception as error:
-            return _error_outcome(
-                campaign,
-                f"falló la clasificación de la campaña {campaign.campaign_id}: {error}",
-                Archetype.NEW_ARCHETYPE,
+        if campaign.is_zero_contract:
+            logger.info(
+                "campaña %s en modo zero-contract: sin brief no se clasifica y se "
+                "fuerza repost, el único modo que no llama al LLM",
+                campaign.campaign_id,
             )
-        if classification.archetype is Archetype.KNOWN:
-            return self._process_known(
-                campaign,
-                mode=mode,
-                url=url,
-                images=images,
-                resume=resume,
-                gate=gate,
-                assets=assets,
-                destination=destination,
-                caption=caption,
-                hashtags=hashtags,
-                platform=platform,
-                approve_manual_review=approve_manual_review,
-                approved_by=approved_by,
-                audio_track_path=audio_track_path,
-                audio_track_url=audio_track_url,
-            )
-        return self._process_proposal(campaign, contract, classification)
+            mode = _ZERO_CONTRACT_MODE
+        else:
+            try:
+                classification = self._classifier.classify(campaign.brief, contract)
+            except Exception as error:
+                return _error_outcome(
+                    campaign,
+                    f"falló la clasificación de la campaña {campaign.campaign_id}: {error}",
+                    Archetype.NEW_ARCHETYPE,
+                )
+            if classification.archetype is not Archetype.KNOWN:
+                return self._process_proposal(campaign, contract, classification)
+        return self._process_known(
+            campaign,
+            mode=mode,
+            url=url,
+            images=images,
+            resume=resume,
+            gate=gate,
+            assets=assets,
+            destination=destination,
+            caption=caption,
+            hashtags=hashtags,
+            platform=platform,
+            approve_manual_review=approve_manual_review,
+            approved_by=approved_by,
+            audio_track_path=audio_track_path,
+            audio_track_url=audio_track_url,
+        )
 
     def _process_known(
         self,
