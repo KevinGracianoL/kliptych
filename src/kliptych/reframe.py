@@ -26,9 +26,9 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, ClassVar, Protocol, cast
+from typing import BinaryIO, ClassVar, Protocol, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kliptych.encoding import (
     RenderConfig,
@@ -46,6 +46,10 @@ _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_MIN_SUPPRESSION = 0.3
 _STDERR_TAIL = 400
 _DIMENSION_PARTS = 2
+# Tolerancia de la suma normalizada x+width / y+height: el round-trip por
+# float puede exceder 1.0 en unos pocos ulp, aunque la ventana en pixeles
+# entre exacto. No relaja el limite, solo absorbe el error de representacion.
+_NORMALIZED_SUM_EPS = 1e-9
 
 
 class ReframeError(Exception):
@@ -53,14 +57,42 @@ class ReframeError(Exception):
 
 
 class ReframeTarget(BaseModel):
-    """Ventana de recorte de un frame, en píxeles del video fuente."""
+    """Ventana de recorte de un frame, normalizada respecto al video fuente.
+
+    Las cuatro coordenadas van en escala 0.0-1.0 sobre el ancho y el alto del
+    VOD, no en pixeles: asi la misma trayectoria sirve para cualquier
+    resolucion del mismo contenido. Los pixeles absolutos se derivan al
+    construir el filtro de ffmpeg, multiplicando por las dimensiones reales
+    (``ReframeResult.source_width`` / ``source_height``) y ajustando a pixeles
+    pares, que exige el subsampling de ffmpeg.
+    """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
-    x: int = Field(ge=0)
-    y: int = Field(ge=0)
-    width: int = Field(gt=0)
-    height: int = Field(gt=0)
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    width: float = Field(gt=0.0, le=1.0)
+    height: float = Field(gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _window_stays_inside_frame(self) -> Self:
+        """Rechaza ventanas que se salen del frame por la derecha o por abajo.
+
+        Returns:
+            La propia ventana, si cabe dentro del frame normalizado.
+
+        Raises:
+            ValueError: Si ``x + width`` o ``y + height`` exceden 1.0.
+        """
+        right = self.x + self.width
+        if right > 1.0 + _NORMALIZED_SUM_EPS:
+            msg = f"la ventana se sale del frame por la derecha: x+width={right}"
+            raise ValueError(msg)
+        bottom = self.y + self.height
+        if bottom > 1.0 + _NORMALIZED_SUM_EPS:
+            msg = f"la ventana se sale del frame por abajo: y+height={bottom}"
+            raise ValueError(msg)
+        return self
 
 
 class ReframeResult(BaseModel):
@@ -572,7 +604,12 @@ class FFmpegReframer:
         destination: Path,
         result: ReframeResult,
     ) -> list[str]:
-        crop = _crop_filter(result.targets, sample_fps=self._config.sample_fps)
+        crop = _crop_filter(
+            result.targets,
+            sample_fps=self._config.sample_fps,
+            source_width=result.source_width,
+            source_height=result.source_height,
+        )
         argv = [
             self._render.ffmpeg,
             "-hide_banner",
@@ -646,9 +683,18 @@ def _targets_from_faces(
     )
     targets: list[ReframeTarget] = []
     for center_x, center_y in centers:
-        x = max(0, min(_even(round(center_x - geometry.width / 2.0)), geometry.max_offset_x))
-        y = max(0, min(_even(round(center_y - geometry.height / 2.0)), geometry.max_offset_y))
-        targets.append(ReframeTarget(x=x, y=y, width=geometry.width, height=geometry.height))
+        half_width = geometry.width / 2.0
+        half_height = geometry.height / 2.0
+        offset_x = max(0, min(_even(round(center_x - half_width)), geometry.max_offset_x))
+        offset_y = max(0, min(_even(round(center_y - half_height)), geometry.max_offset_y))
+        targets.append(
+            ReframeTarget(
+                x=offset_x / source_width,
+                y=offset_y / source_height,
+                width=geometry.width / source_width,
+                height=geometry.height / source_height,
+            )
+        )
     return tuple(targets)
 
 
@@ -767,18 +813,81 @@ def _linear_expression(times: Sequence[float], values: Sequence[float]) -> str:
     return _build_tree(0, len(times) - 1)
 
 
-def _crop_filter(targets: Sequence[ReframeTarget], *, sample_fps: float) -> str:
+def _denormalized_size(normalized: float, total: int) -> int:
+    """Convierte una dimensión normalizada a píxeles pares dentro del frame.
+
+    Args:
+        normalized: Dimensión en escala 0.0-1.0.
+        total: Ancho o alto real del video fuente.
+
+    Returns:
+        La dimensión en píxeles, par y no mayor que el frame.
+
+    Raises:
+        ValueError: Si ``total`` no es positiva.
+    """
+    if total <= 0:
+        msg = f"dimensión de origen inválida: {total}"
+        raise ValueError(msg)
+    return max(2, min(_even(round(normalized * total)), _even(total)))
+
+
+def _denormalized_offset(normalized: float, total: int, *, size: int) -> int:
+    """Convierte un desplazamiento normalizado a píxeles pares dentro del frame.
+
+    Args:
+        normalized: Desplazamiento en escala 0.0-1.0.
+        total: Ancho o alto real del video fuente.
+        size: Tamaño ya desnormalizado de la ventana en esa direccion.
+
+    Returns:
+        El desplazamiento en píxeles, par y tal que ``offset + size <= total``.
+    """
+    limit = _even(total - size)
+    if limit <= 0:
+        return 0
+    return max(0, min(_even(round(normalized * total)), limit))
+
+
+def _crop_filter(
+    targets: Sequence[ReframeTarget],
+    *,
+    sample_fps: float,
+    source_width: int,
+    source_height: int,
+) -> str:
+    """Construye el filtro ``crop`` de ffmpeg desde una trayectoria normalizada.
+
+    Args:
+        targets: Ventanas normalizadas de la trayectoria.
+        sample_fps: Frecuencia de muestreo usada al calcular la trayectoria.
+        source_width: Ancho real del video fuente.
+        source_height: Alto real del video fuente.
+
+    Returns:
+        El valor completo del flag ``-vf``.
+
+    Raises:
+        ValueError: Si no hay ventanas, si no comparten tamaño o si las
+            dimensiones del fuente no son positivas.
+    """
     if not targets:
         msg = "no hay recortes para construir el filtro"
         raise ValueError(msg)
-    width = targets[0].width
-    height = targets[0].height
-    if any(target.width != width or target.height != height for target in targets):
+    width = _denormalized_size(targets[0].width, source_width)
+    height = _denormalized_size(targets[0].height, source_height)
+    if any(
+        _denormalized_size(target.width, source_width) != width
+        or _denormalized_size(target.height, source_height) != height
+        for target in targets
+    ):
         msg = "todos los recortes deben compartir tamaño"
         raise ValueError(msg)
     times = [index / sample_fps for index in range(len(targets))]
-    expression_x = _linear_expression(times, [target.x for target in targets])
-    expression_y = _linear_expression(times, [target.y for target in targets])
+    offsets_x = [_denormalized_offset(target.x, source_width, size=width) for target in targets]
+    offsets_y = [_denormalized_offset(target.y, source_height, size=height) for target in targets]
+    expression_x = _linear_expression(times, [float(value) for value in offsets_x])
+    expression_y = _linear_expression(times, [float(value) for value in offsets_y])
     return f"crop={width}:{height}:x='{expression_x}':y='{expression_y}'"
 
 

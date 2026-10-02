@@ -7,6 +7,7 @@ se simulan; ningún test ejecuta MediaPipe ni ffmpeg reales (eso vive en
 
 import ast
 import io
+import re
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from kliptych.reframe import (
 
 _Call = tuple[list[str], dict[str, object]]
 _FakeRun = Callable[..., subprocess.CompletedProcess[str]]
+_SAMPLE_FPS = 2.0
 
 
 def _private(name: str) -> object:
@@ -54,6 +56,32 @@ _targets_from_faces = cast(
 _boxes_from_result = cast("Callable[..., tuple[FaceBox, ...]]", _private("_boxes_from_result"))
 _probe_dimensions = cast("Callable[..., tuple[int, int]]", _private("_probe_dimensions"))
 _load_mediapipe = cast("Callable[[], object]", _private("_load_mediapipe"))
+_denormalized_size = cast("Callable[[float, int], int]", _private("_denormalized_size"))
+
+_CROP_RE = re.compile(r"^crop=(\d+):(\d+):x='([^']*)':y='([^']*)'$")
+
+
+def _crop_geometry_of(crop: str) -> tuple[int, int]:
+    match = _CROP_RE.match(crop)
+    assert match is not None, crop
+    return int(match.group(1)), int(match.group(2))
+
+
+def _crop_offset_of(crop: str) -> tuple[int, int]:
+    """Offsets literales; solo válido cuando la trayectoria tiene un solo frame.
+
+    Returns:
+        El desplazamiento x e y en píxeles.
+    """
+    match = _CROP_RE.match(crop)
+    assert match is not None, crop
+    return int(match.group(3)), int(match.group(4))
+
+
+def _crop_expressions_of(crop: str) -> tuple[int, int, str, str]:
+    match = _CROP_RE.match(crop)
+    assert match is not None, crop
+    return int(match.group(1)), int(match.group(2)), match.group(3), match.group(4)
 
 
 @dataclass
@@ -336,8 +364,61 @@ def test_targets_without_faces_center_the_crop() -> None:
         source_height=1080,
         config=ReframeConfig(),
     )
-    assert all(target.x == 656 and target.y == 0 for target in targets)
-    assert all(target.width == 608 and target.height == 1080 for target in targets)
+    assert all(target.x == pytest.approx(656 / 1920) for target in targets)
+    assert all(target.y == pytest.approx(0.0) for target in targets)
+    assert all(target.width == pytest.approx(608 / 1920) for target in targets)
+    assert all(target.height == pytest.approx(1.0) for target in targets)
+
+
+def test_targets_stay_inside_the_normalized_unit_square() -> None:
+    """Matriz de comportamiento: toda trayectoria es valida en escala 0..1."""
+    source_sizes = ((1920, 1080), (1280, 720), (640, 480), (2560, 1440), (1080, 1920))
+    for source_width, source_height in source_sizes:
+        targets = _targets_from_faces(
+            [(), (_face(0.8, 0.3, 0.2, 0.3),), (_face(0.05, 0.95, 0.1, 0.1),)],
+            source_width=source_width,
+            source_height=source_height,
+            config=ReframeConfig(),
+        )
+        assert targets
+        for target in targets:
+            assert 0.0 <= target.x <= 1.0, (source_width, source_height)
+            assert 0.0 <= target.y <= 1.0, (source_width, source_height)
+            assert 0.0 < target.width <= 1.0, (source_width, source_height)
+            assert 0.0 < target.height <= 1.0, (source_width, source_height)
+            assert target.x + target.width <= 1.0 + 1e-9, (source_width, source_height)
+            assert target.y + target.height <= 1.0 + 1e-9, (source_width, source_height)
+
+
+def test_targets_round_trip_to_an_even_crop_inside_the_source() -> None:
+    """Normalizar y desnormalizar debe dar un recorte valido de ffmpeg."""
+    source_sizes = ((1920, 1080), (1280, 720), (640, 480), (2560, 1440), (1080, 1920))
+    for source_width, source_height in source_sizes:
+        targets = _targets_from_faces(
+            [(), (_face(0.8, 0.3, 0.2, 0.3),), (_face(0.05, 0.95, 0.1, 0.1),)],
+            source_width=source_width,
+            source_height=source_height,
+            config=ReframeConfig(),
+        )
+        crop = _crop_filter(
+            targets,
+            sample_fps=2.0,
+            source_width=source_width,
+            source_height=source_height,
+        )
+        width, height, expression_x, expression_y = _crop_expressions_of(crop)
+        assert 0 < width <= source_width, (source_width, source_height, crop)
+        assert 0 < height <= source_height, (source_width, source_height, crop)
+        assert width % 2 == 0, crop
+        assert height % 2 == 0, crop
+        for index in range(len(targets)):
+            moment = index / _SAMPLE_FPS
+            offset_x = _evaluate_ffmpeg(expression_x, moment)
+            offset_y = _evaluate_ffmpeg(expression_y, moment)
+            assert offset_x >= 0, crop
+            assert offset_y >= 0, crop
+            assert offset_x + width <= source_width, crop
+            assert offset_y + height <= source_height, crop
 
 
 def test_targets_follow_face_to_the_right() -> None:
@@ -348,7 +429,7 @@ def test_targets_follow_face_to_the_right() -> None:
         source_height=1080,
         config=ReframeConfig(),
     )
-    assert targets[0].x > 656
+    assert targets[0].x > 656 / 1920
 
 
 def test_targets_clamp_to_source_bounds() -> None:
@@ -359,8 +440,8 @@ def test_targets_clamp_to_source_bounds() -> None:
         source_height=1080,
         config=ReframeConfig(),
     )
-    assert targets[0].x == 1312
-    assert targets[0].y == 0
+    assert targets[0].x == pytest.approx(1312 / 1920)
+    assert targets[0].y == pytest.approx(0.0)
 
 
 def test_targets_limit_step_between_frames() -> None:
@@ -372,11 +453,17 @@ def test_targets_limit_step_between_frames() -> None:
         source_height=1080,
         config=config,
     )
-    max_step = config.max_step_ratio * 1920
-    assert abs(targets[1].x - targets[0].x) <= max_step + 2
+    max_step = (config.max_step_ratio * 1920 + 2) / 1920
+    assert abs(targets[1].x - targets[0].x) <= max_step + 1e-9
 
 
 def test_targets_enforce_vertical_aspect() -> None:
+    """El aspecto 9:16 se comprueba en pixeles, no en la escala normalizada.
+
+    Normalizar el ancho por el ancho y el alto por el alto cambia el cociente
+    (608/1920 sobre 1080/1080); lo que debe conservarse es el recorte 9:16 una
+    vez desnormalizado contra las dimensiones reales.
+    """
     faces = [(), (_face(0.4, 0.4, 0.2, 0.2),)]
     targets = _targets_from_faces(
         faces,
@@ -385,7 +472,9 @@ def test_targets_enforce_vertical_aspect() -> None:
         config=ReframeConfig(),
     )
     for target in targets:
-        assert target.width / target.height == pytest.approx(9 / 16, abs=0.01)
+        width = _denormalized_size(target.width, 1920)
+        height = _denormalized_size(target.height, 1080)
+        assert width / height == pytest.approx(9 / 16, abs=0.01)
 
 
 def test_linear_expression_single_value() -> None:
@@ -478,22 +567,57 @@ def test_linear_expression_many_targets_stays_shallow() -> None:
 
 
 def test_crop_filter_serializes_single_target() -> None:
-    targets = (ReframeTarget(x=0, y=0, width=608, height=1080),)
-    assert _crop_filter(targets, sample_fps=2.0) == "crop=608:1080:x='0':y='0'"
+    targets = (ReframeTarget(x=656 / 1920, y=0.0, width=608 / 1920, height=1.0),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=1920, source_height=1080)
+    assert crop == "crop=608:1080:x='656':y='0'"
+
+
+def test_crop_filter_scales_window_to_a_different_source_size() -> None:
+    """La misma trayectoria normalizada se resuelve contra el tamano real.
+
+    Es el punto de la escala normalizada: un 608/1920 de ancho sobre una
+    fuente de 1280 produce el mismo recorte relativo, no los mismos pixeles.
+    """
+    targets = (ReframeTarget(x=656 / 1920, y=0.0, width=608 / 1920, height=1.0),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=1280, source_height=720)
+    width, height = _crop_geometry_of(crop)
+    assert (width, height) == (404, 720)
+    assert abs(width / 1280 - 608 / 1920) < 0.005
+
+
+def test_crop_filter_coerces_denormalized_size_to_even_pixels() -> None:
+    """Las dimensiones deben ser pares porque ffmpeg lo exige; el ajuste al desnormalizar."""
+    targets = (ReframeTarget(x=0.0, y=0.0, width=0.333, height=0.5),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=1000, source_height=1000)
+    width, height = _crop_geometry_of(crop)
+    assert (width, height) == (332, 500)
+    assert width % 2 == 0
+    assert height % 2 == 0
+
+
+def test_crop_filter_keeps_edge_window_inside_source() -> None:
+    """Una ventana pegada al borde derecho no puede desbordar el frame."""
+    targets = (ReframeTarget(x=0.5, y=0.5, width=0.5, height=0.5),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=1000, source_height=1000)
+    width, height = _crop_geometry_of(crop)
+    offset_x, offset_y = _crop_offset_of(crop)
+    assert (width, height) == (500, 500)
+    assert offset_x + width == 1000
+    assert offset_y + height == 1000
 
 
 def test_crop_filter_empty_raises() -> None:
-    with pytest.raises(ValueError, match="recortes"):
-        _ = _crop_filter((), sample_fps=2.0)
+    with pytest.raises(ValueError, match="no hay recortes"):
+        _ = _crop_filter((), sample_fps=2.0, source_width=1920, source_height=1080)
 
 
 def test_crop_filter_mismatched_sizes_raise() -> None:
     targets = (
-        ReframeTarget(x=0, y=0, width=608, height=1080),
-        ReframeTarget(x=0, y=0, width=600, height=1080),
+        ReframeTarget(x=0.0, y=0.0, width=608 / 1920, height=1.0),
+        ReframeTarget(x=0.0, y=0.0, width=600 / 1920, height=1.0),
     )
     with pytest.raises(ValueError, match="tamaño"):
-        _ = _crop_filter(targets, sample_fps=2.0)
+        _ = _crop_filter(targets, sample_fps=2.0, source_width=1920, source_height=1080)
 
 
 def test_boxes_from_result_normalizes_and_clamps() -> None:
@@ -870,23 +994,57 @@ def test_reframe_config_rejects_invalid(kwargs: dict[str, float], message: str) 
 
 def test_reframe_target_rejects_negative_x() -> None:
     with pytest.raises(ValidationError):
-        _ = ReframeTarget(x=-1, y=0, width=608, height=1080)
+        _ = ReframeTarget(x=-0.1, y=0.0, width=0.5, height=1.0)
 
 
 def test_reframe_target_rejects_zero_width() -> None:
     with pytest.raises(ValidationError):
-        _ = ReframeTarget(x=0, y=0, width=0, height=1080)
+        _ = ReframeTarget(x=0.0, y=0.0, width=0.0, height=1.0)
+
+
+def test_reframe_target_rejects_pixel_coordinates() -> None:
+    """La geometria es normalizada: un desplazamiento en pixeles no es valido.
+
+    656 px sobre una fuente de 1920 equivalen a 656/1920; aceptar el entero
+    reencontraria la dependencia de la resolucion que la escala normalizada
+    elimina.
+    """
+    with pytest.raises(ValidationError):
+        _ = ReframeTarget(x=656, y=0, width=608, height=1.0)
+
+
+def test_reframe_target_rejects_window_past_right_edge() -> None:
+    with pytest.raises(ValidationError):
+        _ = ReframeTarget(x=0.5, y=0.0, width=0.7, height=1.0)
+
+
+def test_reframe_target_rejects_window_past_bottom_edge() -> None:
+    with pytest.raises(ValidationError):
+        _ = ReframeTarget(x=0.0, y=0.75, width=1.0, height=0.5)
+
+
+def test_reframe_target_accepts_normalized_window() -> None:
+    target = ReframeTarget(x=0.1, y=0.2, width=0.5, height=0.5)
+    assert target.x == pytest.approx(0.1)
+    assert target.height == pytest.approx(0.5)
+
+
+def test_reframe_target_accepts_full_frame() -> None:
+    target = ReframeTarget(x=0.0, y=0.0, width=1.0, height=1.0)
+    assert target.width == pytest.approx(1.0)
 
 
 def test_reframe_target_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        _ = ReframeTarget.model_validate({"x": 0, "y": 0, "width": 608, "height": 1080, "extra": 1})
+        _ = ReframeTarget.model_validate(
+            {"x": 0.0, "y": 0.0, "width": 0.5, "height": 1.0, "extra": 1}
+        )
 
 
 def test_reframe_target_is_frozen() -> None:
-    target = ReframeTarget(x=0, y=0, width=608, height=1080)
+    target = ReframeTarget(x=0.0, y=0.0, width=0.5, height=1.0)
     with pytest.raises(ValidationError):
-        target.x = 5
+        target.x = 0.5
 
 
 def test_reframe_result_rejects_non_positive_source() -> None:
