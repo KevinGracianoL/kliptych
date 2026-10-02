@@ -100,6 +100,7 @@ _SLIDESHOW_FILTER = (
     f"pad={_SLIDESHOW_WIDTH}:{_SLIDESHOW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 )
 _CUT_DURATION_TOLERANCE_S = 0.5
+_MOMENTS_TIMEOUT_ENV = "KLIPTYCH_MOMENTS_TIMEOUT_S"
 
 
 class PipelineError(Exception):
@@ -1143,6 +1144,28 @@ def _is_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
 
 
+def _resolve_moments_timeout_s(render: RenderConfig) -> float:
+    """Resuelve el timeout de detección de momentos.
+
+    Args:
+        render: Configuración de render con el timeout base de ffmpeg.
+
+    Returns:
+        El valor positivo y finito de ``KLIPTYCH_MOMENTS_TIMEOUT_S`` cuando
+        está definido; en caso contrario ``render.timeout_s``.
+    """
+    raw = os.environ.get(_MOMENTS_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return render.timeout_s
+    try:
+        parsed = float(raw.strip())
+    except (TypeError, ValueError):
+        return render.timeout_s
+    if not math.isfinite(parsed) or parsed <= 0:
+        return render.timeout_s
+    return parsed
+
+
 def _resolve_dependencies(
     *,
     config: PipelineConfig,
@@ -1173,7 +1196,11 @@ def _resolve_dependencies(
             timeout_s=config.download_timeout_s,
             max_size_bytes=config.download_max_size_bytes,
         ),
-        detector=FFmpegMomentDetector() if detector is None else detector,
+        detector=(
+            FFmpegMomentDetector(timeout_s=_resolve_moments_timeout_s(config.render))
+            if detector is None
+            else detector
+        ),
         transcriber=(
             FasterWhisperTranscriber(language=config.contract.languages.language)
             if transcriber is None
@@ -1257,6 +1284,8 @@ def _resolve_source_stage(
         source_path = state.artifact_path(PipelineStage.DOWNLOAD) or destination
         if source_path.is_file() and source_path.stat().st_size > 0:
             if _is_url(url):
+                if os.environ.get("KLIPTYCH_SKIP_REMOTE_REVALIDATION") == "1":
+                    return source_path
                 return _revalidate_remote_source(
                     url,
                     source_path,

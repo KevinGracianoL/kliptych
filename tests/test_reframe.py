@@ -5,6 +5,7 @@ se simulan; ningún test ejecuta MediaPipe ni ffmpeg reales (eso vive en
 ``test_reframe_integration.py``).
 """
 
+import ast
 import io
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
@@ -408,6 +409,72 @@ def test_linear_expression_empty_raises() -> None:
 def test_linear_expression_mismatched_raises() -> None:
     with pytest.raises(ValueError, match="longitud"):
         _ = _linear_expression([0.0, 1.0], [0.0])
+
+
+def _max_paren_depth(expression: str) -> int:
+    depth = 0
+    max_depth = 0
+    for character in expression:
+        if character == "(":
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif character == ")":
+            depth -= 1
+    assert depth == 0
+    return max_depth
+
+
+def _evaluate_binop(op: ast.operator, left: float, right: float) -> float:
+    if isinstance(op, ast.Add):
+        return left + right
+    if isinstance(op, ast.Sub):
+        return left - right
+    if isinstance(op, ast.Mult):
+        return left * right
+    assert isinstance(op, ast.Div)
+    return left / right
+
+
+def _evaluate_node(node: ast.expr, moment: float) -> float:
+    if isinstance(node, ast.Constant):
+        assert isinstance(node.value, (int, float))
+        return float(node.value)
+    if isinstance(node, ast.Name):
+        assert node.id == "t"
+        return moment
+    if isinstance(node, ast.BinOp):
+        left = _evaluate_node(node.left, moment)
+        right = _evaluate_node(node.right, moment)
+        return _evaluate_binop(node.op, left, right)
+    assert isinstance(node, ast.Call)
+    assert isinstance(node.func, ast.Name)
+    evaluated = [_evaluate_node(arg, moment) for arg in node.args]
+    if node.func.id == "_ff_lt":
+        assert len(evaluated) == 2
+        return 1.0 if evaluated[0] < evaluated[1] else 0.0
+    assert node.func.id == "_ff_if"
+    assert len(evaluated) == 3
+    return evaluated[1] if evaluated[0] else evaluated[2]
+
+
+def _evaluate_ffmpeg(expression: str, moment: float) -> float:
+    python_source = expression.replace("if(", "_ff_if(").replace("lt(", "_ff_lt(")
+    parsed = ast.parse(python_source, mode="eval")
+    root: ast.expr = parsed.body
+    return _evaluate_node(root, moment)
+
+
+def test_linear_expression_many_targets_stays_shallow() -> None:
+    times = [index / 2.0 for index in range(120)]
+    values = [float(index * 10) for index in range(120)]
+    expression = _linear_expression(times, values)
+    assert expression
+    assert _max_paren_depth(expression) < 100
+    assert _evaluate_ffmpeg(expression, 0.0) == pytest.approx(0.0)
+    assert _evaluate_ffmpeg(expression, 0.25) == pytest.approx(5.0)
+    assert _evaluate_ffmpeg(expression, 10.0) == pytest.approx(200.0)
+    assert _evaluate_ffmpeg(expression, 59.5) == pytest.approx(1190.0)
+    assert _evaluate_ffmpeg(expression, 100.0) == pytest.approx(1190.0)
 
 
 def test_crop_filter_serializes_single_target() -> None:

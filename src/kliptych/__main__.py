@@ -69,8 +69,10 @@ _SEGMENT_SYSTEM_PROMPT = (
     "transcripción, los momentos candidatos y las cotas de duración, y "
     "devuelves ÚNICAMENTE un JSON con la forma "
     '{"segments": [{"start_s": float, "end_s": float}], "rationale": str}. '
-    "Reglas: cada segmento queda dentro del vídeo y respeta las duraciones "
-    "mínima y máxima; el rationale explica la selección en una frase."
+    "Reglas: identifica y extrae todos los momentos virales, divertidos, polémicos "
+    "o destacados que encuentres a lo largo del vídeo (lista con todos los segmentos "
+    "relevantes sin solaparse); cada segmento queda dentro del vídeo y respeta estrictamente "
+    "las duraciones mínima y máxima; el rationale explica la selección."
 )
 
 
@@ -201,10 +203,18 @@ class _DefaultVideoOrchestrator:
             raise CampaignManagerError(msg)
         track_path = _coerce_audio_track_path(audio_track_path)
         track_url = _coerce_audio_track_url(audio_track_url)
+        face_model_path = _resolve_face_model_path()
+        max_size_raw = os.environ.get("KLIPTYCH_MAX_DOWNLOAD_BYTES")
+        timeout_raw = os.environ.get("KLIPTYCH_DOWNLOAD_TIMEOUT_S")
+        download_max_size_bytes = int(max_size_raw) if max_size_raw is not None else 10 * 1024**3
+        download_timeout_s = float(timeout_raw) if timeout_raw is not None else 1800.0
         return orchestrator.PipelineConfig(
             output_dir=self._work_dir,
             contract=contract,
             render=self._render,
+            face_model_path=face_model_path,
+            download_timeout_s=download_timeout_s,
+            download_max_size_bytes=download_max_size_bytes,
             audio_locked=audio_locked,
             audio_track_path=track_path,
             audio_track_url=track_url,
@@ -297,6 +307,24 @@ def _coerce_audio_track_url(value: object) -> str | None:
         return value
     msg = f"audio_track_url debe ser str o None, no {type(value).__name__}"
     raise TypeError(msg)
+
+
+def _resolve_face_model_path() -> Path | None:
+    """Resuelve el modelo de caras para el reframe 9:16 con MediaPipe.
+
+    Returns:
+        La ruta al modelo ``.tflite`` si existe en ``KLIPTYCH_FACE_MODEL`` o en
+        la ubicación por defecto, o None si no hay modelo disponible.
+    """
+    env_value = os.environ.get("KLIPTYCH_FACE_MODEL")
+    if env_value:
+        env_path = Path(env_value)
+        if env_path.is_file():
+            return env_path
+    default_path = Path.home() / ".kliptych" / "models" / "blaze_face_short_range.tflite"
+    if default_path.is_file():
+        return default_path
+    return None
 
 
 def _run_slideshow_pipeline(

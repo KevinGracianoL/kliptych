@@ -444,3 +444,36 @@ def test_resume_invalidates_on_timestamp_range_change(
     _ = _run_resume(config_changed, deps, resume=True)
     assert counter.download_calls == 2
     assert counter.transcribe_calls == 2
+
+
+def test_resume_skip_remote_revalidation_env_skips_revalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KLIPTYCH_SKIP_REMOTE_REVALIDATION=1 omite _revalidate_remote_source en resume."""
+    box = _PayloadBox(b"server-bytes-v1")
+    config, deps, counter = _setup_resume(monkeypatch, tmp_path, box)
+    _ = _run_resume(config, deps, resume=False)
+    assert counter.download_calls == 1
+    assert (config.output_dir / "source.mp4").read_bytes() == b"server-bytes-v1"
+
+    box.data = b"server-bytes-v2-changed"
+    monkeypatch.setenv("KLIPTYCH_SKIP_REMOTE_REVALIDATION", "1")
+    revalidate_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _spy_revalidate(*args: object, **kwargs: object) -> Path:
+        revalidate_calls.append((args, kwargs))
+        source_arg = args[1] if len(args) > 1 else None
+        assert isinstance(source_arg, Path)
+        return source_arg
+
+    monkeypatch.setattr(
+        "kliptych.orchestrator._revalidate_remote_source",
+        _spy_revalidate,
+    )
+    result2 = _run_resume(config, deps, resume=True)
+
+    assert isinstance(result2, PipelineResult)
+    assert revalidate_calls == []
+    assert counter.download_calls == 1
+    assert (config.output_dir / "source.mp4").read_bytes() == b"server-bytes-v1"
+    assert counter.transcribe_calls == 1

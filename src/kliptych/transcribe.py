@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import site
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -324,6 +325,9 @@ class FasterWhisperTranscriber:
 
 
 def _load_model_factory() -> _ModelFactory:
+    # En Windows los DLLs CUDA (cublas/cudnn de nvidia-*) deben registrarse
+    # justo antes de importar faster-whisper/ctranslate2 o la carga falla.
+    _register_windows_cuda_dlls()
     # Import diferido: faster-whisper es una dependencia opcional.
     module = importlib.import_module("faster_whisper")
     factory = getattr(module, "WhisperModel", None)
@@ -349,40 +353,74 @@ def _register_windows_cuda_dlls() -> None:
     """Registra los DLLs CUDA del venv en Windows antes de cargar ctranslate2.
 
     En Windows, ``ctranslate2`` (backend de faster-whisper) necesita
-    ``cublas`` y ``cudnn`` de los paquetes ``nvidia-*``. Se añaden
-    ``nvidia/cublas/bin`` y ``nvidia/cudnn/bin`` del venv a ``PATH`` y a
-    ``os.add_dll_directory`` para que la carga no falle con DLL faltante.
+    ``cublas`` y ``cudnn`` de los paquetes ``nvidia-*``. Se recorren todos los
+    ``site-packages`` vía ``site.getsitepackages()`` (más ``sys.prefix`` como
+    respaldo) y se añaden ``nvidia/cublas/bin`` y ``nvidia/cudnn/bin`` a
+    ``PATH`` y a ``os.add_dll_directory`` para que la carga no falle con DLL
+    faltante. Debe ejecutarse justo antes de importar ``faster_whisper``.
 
     Es best-effort: si no hay venv o no existen los directorios, no hace nada.
     """
-    if sys.platform != "win32":
+    if os.name != "nt" and sys.platform != "win32":
         return
+    for bin_dir in _windows_cuda_candidates():
+        _register_single_cuda_bin_dir(bin_dir)
+
+
+def _windows_cuda_candidates() -> list[Path]:
+    """Lista los directorios CUDA candidatos (cublas/cudnn) en Windows.
+
+    Returns:
+        Los directorios ``nvidia/cublas/bin`` y ``nvidia/cudnn/bin``
+        de cada ``site-packages`` y del venv de ``sys.prefix``.
+    """
+    candidates: list[Path] = []
+    try:
+        site_dirs: list[str] = site.getsitepackages()
+    except (AttributeError, OSError, ValueError):
+        site_dirs = []
+    for site_packages in site_dirs:
+        base = Path(site_packages) / "nvidia"
+        candidates.extend((base / "cublas" / "bin", base / "cudnn" / "bin"))
+    prefix: Path | None
     try:
         prefix = Path(sys.prefix)
     except (ValueError, OSError):
+        prefix = None
+    if prefix is not None:
+        candidates.extend(
+            (
+                prefix / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin",
+                prefix / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin",
+            )
+        )
+    return candidates
+
+
+def _register_single_cuda_bin_dir(bin_dir: Path) -> None:
+    """Añade un directorio CUDA a ``PATH`` y a ``os.add_dll_directory``.
+
+    Args:
+        bin_dir: Directorio candidato con los DLLs CUDA.
+    """
+    try:
+        if not bin_dir.is_dir():
+            return
+    except OSError:
         return
-    candidates = (
-        prefix / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin",
-        prefix / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin",
-    )
-    for bin_dir in candidates:
-        try:
-            if not bin_dir.is_dir():
-                continue
-        except OSError:
-            continue
-        try:
-            current = os.environ.get("PATH", "")
-            if str(bin_dir) not in current:
-                os.environ["PATH"] = str(bin_dir) + os.pathsep + current
-        except (ValueError, OSError):
-            continue
-        add_dll = getattr(os, "add_dll_directory", None)
-        if callable(add_dll):
-            try:
-                _ = add_dll(str(bin_dir))
-            except (ValueError, OSError):
-                continue
+    try:
+        current = os.environ.get("PATH", "")
+        if str(bin_dir) not in current:
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + current
+    except (ValueError, OSError):
+        return
+    add_dll = getattr(os, "add_dll_directory", None)
+    if not callable(add_dll):
+        return
+    try:
+        _ = add_dll(str(bin_dir))
+    except (ValueError, OSError):
+        return
 
 
 def _patch_windows_symlinks() -> None:

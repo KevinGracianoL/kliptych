@@ -12,6 +12,7 @@ dependencias fuera de ffmpeg.
 """
 
 import math
+import os
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -25,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from kliptych.transcribe import Transcript
 
 _DEFAULT_TIMEOUT_S = 300.0
+_MOMENTS_TIMEOUT_ENV = "KLIPTYCH_MOMENTS_TIMEOUT_S"
 _DEFAULT_WINDOW_S = 2.0
 _DEFAULT_SCENE_THRESHOLD = 10.0
 _DEFAULT_SCENE_CHANGE = 0.3
@@ -157,6 +159,31 @@ class MomentDetector(Protocol):
         ...
 
 
+def _resolve_timeout_s(timeout_s: float) -> float:
+    """Resuelve el timeout efectivo dando prioridad a la variable de entorno.
+
+    Args:
+        timeout_s: Timeout solicitado por el llamador.
+
+    Returns:
+        El valor de ``KLIPTYCH_MOMENTS_TIMEOUT_S`` cuando ``timeout_s`` es
+        el valor por defecto y la variable contiene un número positivo y
+        finito; en cualquier otro caso ``timeout_s`` sin cambios.
+    """
+    if timeout_s != _DEFAULT_TIMEOUT_S:
+        return timeout_s
+    raw = os.environ.get(_MOMENTS_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return timeout_s
+    try:
+        parsed = float(raw.strip())
+    except (TypeError, ValueError):
+        return timeout_s
+    if not math.isfinite(parsed) or parsed <= 0:
+        return timeout_s
+    return parsed
+
+
 class FFmpegMomentDetector:
     """Detecta momentos con ffmpeg: escenas, energía RMS y densidad de chat."""
 
@@ -172,16 +199,19 @@ class FFmpegMomentDetector:
         Args:
             ffmpeg: Nombre o ruta del binario ffmpeg.
             timeout_s: Timeout máximo de cada pasada de ffmpeg, en segundos.
+                Cuando conserva el valor por defecto, la variable de entorno
+                ``KLIPTYCH_MOMENTS_TIMEOUT_S`` lo sustituye si es positiva.
             config: Umbrales y pesos de detección; por defecto los estándar.
 
         Raises:
             ValueError: Si el timeout no es positivo.
         """
-        if timeout_s <= 0:
-            msg = f"timeout inválido: {timeout_s}"
+        resolved = _resolve_timeout_s(timeout_s)
+        if resolved <= 0:
+            msg = f"timeout inválido: {resolved}"
             raise ValueError(msg)
         self._ffmpeg: str = ffmpeg
-        self._timeout_s: float = timeout_s
+        self._timeout_s: float = resolved
         self._config: DetectionConfig = DetectionConfig() if config is None else config
 
     def detect(

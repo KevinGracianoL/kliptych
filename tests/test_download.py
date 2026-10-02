@@ -4,8 +4,12 @@ Cubren la lógica de MediaDownloader con un runner falso y el
 SubprocessDownloadRunner real ejecutando subprocesos locales.
 """
 
+import io
+import math
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -17,6 +21,7 @@ from kliptych.download import (
     MediaDownloader,
     SubprocessDownloadRunner,
     is_kick_url,
+    resolve_kick_vod_stream_url,
 )
 from kliptych.environment import CommandResult
 
@@ -382,6 +387,8 @@ def test_build_ytdlp_argv_shape(tmp_path: Path) -> None:
         str(destination),
         "--format",
         "bestvideo+bestaudio",
+        "--merge-output-format",
+        "mp4",
         "--",
         "https://example.com/v",
     ]
@@ -606,3 +613,96 @@ def test_kick_url_validation_and_fail_closed_errors(tmp_path: Path) -> None:
     net_downloader = MediaDownloader(runner=net_runner)
     with pytest.raises(DownloadError, match=r"Kick.*red"):
         _ = net_downloader.download_video(url="https://kick.com/streamer", destination=destination)
+
+
+_KICK_VOD_URL = "https://kick.com/channel/videos/01a0f576-7018-73bf-9edd-883dac1a23a6"
+_KICK_M3U8_URL = "https://stream.kick.com/video/01a0f576-7018-73bf-9edd-883dac1a23a6/master.m3u8"
+
+
+def _kick_page_bytes(stream_url: str) -> bytes:
+    return f'<html><script>var src="{stream_url}";</script></html>'.encode()
+
+
+def test_resolve_kick_vod_stream_url_extracts_m3u8(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_urlopen(request: urllib.request.Request, timeout: float = 15.0) -> io.BytesIO:
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["user_agent"] = request.get_header("User-agent")
+        return io.BytesIO(_kick_page_bytes(_KICK_M3U8_URL))
+
+    monkeypatch.setattr("kliptych.download.urllib.request.urlopen", _fake_urlopen)
+    assert resolve_kick_vod_stream_url(_KICK_VOD_URL) == _KICK_M3U8_URL
+    assert captured["url"] == _KICK_VOD_URL
+    timeout = captured["timeout"]
+    assert isinstance(timeout, float)
+    assert math.isclose(timeout, 15.0)
+    user_agent = captured["user_agent"]
+    assert isinstance(user_agent, str)
+    assert "Mozilla/5.0" in user_agent
+
+
+def test_resolve_kick_vod_stream_url_returns_original_when_no_m3u8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_urlopen(request: urllib.request.Request, timeout: float = 15.0) -> io.BytesIO:
+        _ = (request, timeout)
+        return io.BytesIO(b"<html>sin playlist</html>")
+
+    monkeypatch.setattr("kliptych.download.urllib.request.urlopen", _fake_urlopen)
+    assert resolve_kick_vod_stream_url(_KICK_VOD_URL) == _KICK_VOD_URL
+
+
+def test_resolve_kick_vod_stream_url_returns_original_on_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_urlopen(request: urllib.request.Request, timeout: float = 15.0) -> io.BytesIO:
+        _ = (request, timeout)
+        msg = "red caída"
+        raise urllib.error.URLError(msg)
+
+    monkeypatch.setattr("kliptych.download.urllib.request.urlopen", _fake_urlopen)
+    assert resolve_kick_vod_stream_url(_KICK_VOD_URL) == _KICK_VOD_URL
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/video",
+        "https://kick.com/streamer",
+        "https://kick.com/channel/videos/abc/master.m3u8",
+    ],
+)
+def test_resolve_kick_vod_stream_url_passthrough_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    def _failing_urlopen(request: urllib.request.Request, timeout: float = 15.0) -> io.BytesIO:
+        _ = (request, timeout)
+        msg = "no debe pedir red para URLs no VOD"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("kliptych.download.urllib.request.urlopen", _failing_urlopen)
+    assert resolve_kick_vod_stream_url(url) == url
+
+
+def test_download_video_resolves_kick_vod_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _fake_urlopen(request: urllib.request.Request, timeout: float = 15.0) -> io.BytesIO:
+        _ = (request, timeout)
+        return io.BytesIO(_kick_page_bytes(_KICK_M3U8_URL))
+
+    monkeypatch.setattr("kliptych.download.urllib.request.urlopen", _fake_urlopen)
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    result = MediaDownloader(runner=runner).download_video(
+        url=_KICK_VOD_URL,
+        destination=destination,
+    )
+    assert result == destination
+    download = _download_calls(runner)[-1]
+    assert download[-2] == "--"
+    assert download[-1] == _KICK_M3U8_URL

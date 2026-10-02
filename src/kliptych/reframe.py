@@ -740,21 +740,31 @@ def _linear_expression(times: Sequence[float], values: Sequence[float]) -> str:
     if not times or len(times) != len(values):
         msg = "tiempos y valores deben ser no vacíos y de igual longitud"
         raise ValueError(msg)
-    expression = _num(values[-1])
-    for index in range(len(times) - 2, -1, -1):
-        start_time = times[index]
-        end_time = times[index + 1]
-        start_value = values[index]
-        end_value = values[index + 1]
-        if end_time <= start_time:
-            expression = f"if(lt(t,{_num(end_time)}),{_num(start_value)},{expression})"
-            continue
-        segment = (
-            f"{_num(start_value)}+({_num(end_value)}-{_num(start_value)})"
-            f"*(t-{_num(start_time)})/({_num(end_time)}-{_num(start_time)})"
-        )
-        expression = f"if(lt(t,{_num(end_time)}),{segment},{expression})"
-    return expression
+    if len(times) == 1:
+        return _num(values[0])
+
+    def _build_tree(i: int, j: int) -> str:
+        if j - i == 1:
+            start_t = times[i]
+            end_t = times[j]
+            start_v = values[i]
+            end_v = values[j]
+            if end_t <= start_t:
+                return f"if(lt(t,{_num(end_t)}),{_num(start_v)},{_num(end_v)})"
+            if start_v == end_v:
+                return _num(start_v)
+            segment = (
+                f"{_num(start_v)}+({_num(end_v)}-{_num(start_v)})"
+                f"*(t-{_num(start_t)})/({_num(end_t)}-{_num(start_t)})"
+            )
+            return f"if(lt(t,{_num(end_t)}),{segment},{_num(end_v)})"
+        mid = (i + j) // 2
+        mid_t = times[mid]
+        left = _build_tree(i, mid)
+        right = _build_tree(mid, j)
+        return f"if(lt(t,{_num(mid_t)}),{left},{right})"
+
+    return _build_tree(0, len(times) - 1)
 
 
 def _crop_filter(targets: Sequence[ReframeTarget], *, sample_fps: float) -> str:

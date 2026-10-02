@@ -14,14 +14,17 @@ esta llamada, incluidos los sidecars de yt-dlp; un archivo preexistente en
 
 import contextlib
 import glob
+import http.client
 import ipaddress
 import os
+import re
 import signal
 import subprocess
 import sys
+import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from kliptych.environment import CommandResult
@@ -49,6 +52,27 @@ _BLOCKED_NETWORKS = (
 
 _YTDLP_SIDECAR_SUFFIXES = (".part", ".ytdl")
 _YTDLP_FRAGMENT_PATTERNS = (".part-Frag*", ".f[0-9]*")
+_YTDLP_APPENDED_CONTAINER_SUFFIXES = (".webm", ".mkv", ".mp4")
+_YTDLP_FORMAT_ENV_VAR = "KLIPTYCH_YTDLP_FORMAT"
+_DEFAULT_YTDLP_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+
+_KICK_VOD_PATH_MARKER = "/videos/"
+_KICK_M3U8_SUFFIX = ".m3u8"
+_KICK_PAGE_MAX_BYTES = 5 * 1024 * 1024
+_KICK_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+_KICK_STREAM_PATTERN = re.compile(r"https://stream\.kick\.com/[^\"'\s]+\.m3u8")
+
+
+class _ReadablePage(Protocol):
+    """Página HTTP mínima para extraer la playlist de Kick."""
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Lee hasta ``size`` bytes de la página."""
+        ...
 
 
 class DownloadError(Exception):
@@ -244,11 +268,16 @@ class MediaDownloader:
                 descarga falla, excede el timeout o supera el tamaño máximo.
         """
         _validate_url(url)
+        resolved_url = resolve_kick_vod_stream_url(url)
+        if format_selector is not None:
+            effective_format = format_selector
+        else:
+            effective_format = os.environ.get(_YTDLP_FORMAT_ENV_VAR) or _DEFAULT_YTDLP_FORMAT
         argv = self.build_ytdlp_argv(
-            url=url,
+            url=resolved_url,
             destination=destination,
             max_size_bytes=self._max_size_bytes,
-            format_selector=format_selector,
+            format_selector=effective_format,
             section=section,
         )
         return self._run_download(argv, destination=destination, tool=_YTDLP)
@@ -358,6 +387,8 @@ class MediaDownloader:
                 "--merge-output-format",
                 "mp4",
             ]
+        if destination.suffix.lower() == ".mp4" and "--merge-output-format" not in argv:
+            argv += ["--merge-output-format", "mp4"]
         argv += ["--", url]
         return argv
 
@@ -436,13 +467,10 @@ class MediaDownloader:
         if not result.ok:
             _clean_download_artifacts(destination, preexisting=preexisting)
             _handle_download_failure(result, tool=tool, url=argv[-1] if argv else "")
-        try:
-            is_file = destination.is_file()
-            size = destination.stat().st_size if is_file else 0
-        except OSError as error:
-            _clean_download_artifacts(destination, preexisting=preexisting)
-            msg = f"no se pudo verificar el artefacto {destination}: {error}"
-            raise DownloadError(msg) from error
+        is_file, size = _stat_destination(destination, preexisting=preexisting)
+        if not is_file:
+            _recover_appended_container(destination, preexisting=preexisting)
+            is_file, size = _stat_destination(destination, preexisting=preexisting)
         if not is_file:
             _clean_download_artifacts(destination, preexisting=preexisting)
             msg = f"{tool} no produjo el artefacto esperado: {destination}"
@@ -498,6 +526,48 @@ def is_kick_url(url: str) -> bool:
     return bool(host and (host == "kick.com" or host.endswith(".kick.com")))
 
 
+def resolve_kick_vod_stream_url(url: str, timeout_s: float = 15.0) -> str:
+    """Resuelve la URL directa ``.m3u8`` de un VOD de Kick.
+
+    Kick retiró el endpoint ``/api/v1/video/{id}`` que usa el extractor de
+    yt-dlp, pero la página del VOD incrusta la playlist maestra HLS
+    (``https://stream.kick.com/.../master.m3u8``) en su HTML.
+
+    Args:
+        url: URL candidata; solo se intenta resolver si es de Kick, contiene
+            ``/videos/`` y no termina ya en ``.m3u8``.
+        timeout_s: Timeout en segundos para la petición de la página.
+
+    Returns:
+        La URL ``.m3u8`` encontrada en el HTML, o la URL original si no es un
+        VOD de Kick, ya es directa, no se encontró playlist o falló la red.
+    """
+    if not (
+        is_kick_url(url) and _KICK_VOD_PATH_MARKER in url and not url.endswith(_KICK_M3U8_SUFFIX)
+    ):
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme not in _ALLOWED_SCHEMES:
+        return url
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": _KICK_BROWSER_USER_AGENT})
+        with cast(
+            "contextlib.AbstractContextManager[_ReadablePage]",
+            urllib.request.urlopen(request, timeout=timeout_s),
+        ) as page:
+            raw = page.read(_KICK_PAGE_MAX_BYTES)
+            html = raw.decode("utf-8", errors="replace")
+        match = _KICK_STREAM_PATTERN.search(html)
+    except (OSError, ValueError, http.client.HTTPException):
+        return url
+    if match is None:
+        return url
+    return match.group(0)
+
+
 def _validate_url(url: str) -> None:
     # La URL entra a herramientas externas como último argumento; se rechaza
     # cualquier esquema que no sea http/https y cualquier destino local o
@@ -531,14 +601,53 @@ def _validate_url(url: str) -> None:
         raise DownloadError(msg)
 
 
+def _recover_appended_container(destination: Path, *, preexisting: frozenset[Path]) -> None:
+    # yt-dlp anexa el contenedor real cuando el merge no respetó el sufijo
+    # pedido (p. ej. ``destino.mp4.webm`` con VP9/Opus sin
+    # ``--merge-output-format mp4``). Si el destino falta pero existe el
+    # artefacto anexado, se consolida renombrándolo al destino esperado.
+    for appended_suffix in _YTDLP_APPENDED_CONTAINER_SUFFIXES:
+        candidate = Path(f"{destination}{appended_suffix}")
+        try:
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        try:
+            _ = candidate.rename(destination)
+        except OSError as error:
+            _clean_download_artifacts(destination, preexisting=preexisting)
+            msg = f"no se pudo consolidar el artefacto {candidate} en {destination}: {error}"
+            raise DownloadError(msg) from error
+        return
+
+
+def _stat_destination(destination: Path, *, preexisting: frozenset[Path]) -> tuple[bool, int]:
+    # Verifica el artefacto esperado sin lanzar si falta: devuelve
+    # ``(es_archivo, tamaño)`` y solo falla si la verificación de E/S falla.
+    try:
+        is_file = destination.is_file()
+        size = destination.stat().st_size if is_file else 0
+    except OSError as error:
+        _clean_download_artifacts(destination, preexisting=preexisting)
+        msg = f"no se pudo verificar el artefacto {destination}: {error}"
+        raise DownloadError(msg) from error
+    return is_file, size
+
+
 def _artifact_paths(destination: Path) -> set[Path]:
     # Rutas que yt-dlp puede dejar tras un fallo: el destino, sus sidecars
-    # conocidos y los fragmentos previos al merge. Nunca un glob amplio sobre
-    # ``destination.name`` que pudiera borrar archivos ajenos.
+    # conocidos, los fragmentos previos al merge y el contenedor anexado
+    # (p. ej. ``destino.mp4.webm`` cuando el merge no respetó el sufijo).
+    # Nunca un glob amplio sobre ``destination.name`` que pudiera borrar
+    # archivos ajenos.
     parent = destination.parent
     escaped = glob.escape(destination.name)
     paths = {destination}
     paths.update(parent / f"{destination.name}{suffix}" for suffix in _YTDLP_SIDECAR_SUFFIXES)
+    paths.update(
+        parent / f"{destination.name}{suffix}" for suffix in _YTDLP_APPENDED_CONTAINER_SUFFIXES
+    )
     for pattern in _YTDLP_FRAGMENT_PATTERNS:
         with contextlib.suppress(OSError):
             paths.update(parent.glob(f"{escaped}{pattern}"))
