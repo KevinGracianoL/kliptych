@@ -29,7 +29,10 @@ _CLASSIFY_SYSTEM_PROMPT = (
     '"rationale": str, "variations": [str]}. Reglas: KNOWN si el brief encaja '
     "limpio en el contrato; KNOWN_WITH_VARIATION si hay un valor nuevo dentro "
     "de un campo existente, listando cada variación; NEW_ARCHETYPE si el brief "
-    "exige algo que el contrato no puede representar. Nunca inventes campos."
+    "exige algo que el contrato no puede representar. Nunca inventes campos. "
+    "Las URLs de video o streaming (YouTube, Kick, Twitch, etc.) del brief son "
+    "entradas operacionales del pipeline y no campos del contrato; "
+    "clasifícalas como KNOWN si las reglas y plataformas coinciden."
 )
 
 

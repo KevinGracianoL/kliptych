@@ -158,6 +158,10 @@ ignore = [
     # download_video/download_stream/download_chat delegan en _run_download, que
     # es quien lanza DownloadError; la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
+    # resolve_kick_vod_stream_url solo abre URLs https de kick.com con
+    # /videos/ (esquema validado) y timeout/tamaño acotados; la URL resuelta
+    # se restringe por regex a https://stream.kick.com/...m3u8.
+    "suspicious-url-open-usage",
 ]
 "src/kliptych/gate/checks.py" = [
     # ffmpeg se invoca con lista de argumentos y shell=False para medir el
