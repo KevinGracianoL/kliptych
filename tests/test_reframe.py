@@ -417,6 +417,10 @@ def test_targets_round_trip_to_an_even_crop_inside_the_source() -> None:
             offset_y = _evaluate_ffmpeg(expression_y, moment)
             assert offset_x >= 0, crop
             assert offset_y >= 0, crop
+            # ffmpeg exige tambien offsets pares por el subsampling: sin esta
+            # asercion, quitar el _even de _denormalized_offset pasa la suite.
+            assert offset_x % 2 == 0, crop
+            assert offset_y % 2 == 0, crop
             assert offset_x + width <= source_width, crop
             assert offset_y + height <= source_height, crop
 
@@ -595,6 +599,20 @@ def test_crop_filter_coerces_denormalized_size_to_even_pixels() -> None:
     assert height % 2 == 0
 
 
+def test_crop_filter_coerces_offset_to_even_pixels() -> None:
+    """Los offsets también deben ser pares: 0.333 * 1000 = 333 es impar.
+
+    Sin este test, quitar el ``_even`` de ``_denormalized_offset`` deja pasar
+    la suite completa aunque emita ``x='333'``.
+    """
+    targets = (ReframeTarget(x=0.333, y=0.333, width=0.5, height=0.5),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=1000, source_height=1000)
+    offset_x, offset_y = _crop_offset_of(crop)
+    assert (offset_x, offset_y) == (332, 332)
+    assert offset_x % 2 == 0
+    assert offset_y % 2 == 0
+
+
 def test_crop_filter_keeps_edge_window_inside_source() -> None:
     """Una ventana pegada al borde derecho no puede desbordar el frame."""
     targets = (ReframeTarget(x=0.5, y=0.5, width=0.5, height=0.5),)
@@ -602,8 +620,42 @@ def test_crop_filter_keeps_edge_window_inside_source() -> None:
     width, height = _crop_geometry_of(crop)
     offset_x, offset_y = _crop_offset_of(crop)
     assert (width, height) == (500, 500)
+    assert offset_x % 2 == 0
+    assert offset_y % 2 == 0
     assert offset_x + width == 1000
     assert offset_y + height == 1000
+
+
+def test_crop_filter_clamps_externally_supplied_offset_inside_source() -> None:
+    """Una trayectoria ajena al módulo puede pedir un offset imposible.
+
+    ``_targets_from_faces`` ya acota el offset antes de normalizar, así que el
+    clamp solo se ejercita con ventanas construidas a mano (o cargadas de un
+    reframe.json externo) que son válidas en escala pero no en píxeles.
+    """
+    targets = (ReframeTarget(x=0.999, y=0.999, width=0.001, height=0.001),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=100, source_height=100)
+    width, height = _crop_geometry_of(crop)
+    offset_x, offset_y = _crop_offset_of(crop)
+    assert offset_x + width <= 100, crop
+    assert offset_y + height <= 100, crop
+    assert offset_x % 2 == 0, crop
+    assert offset_y % 2 == 0, crop
+
+
+def test_crop_filter_returns_zero_offset_when_no_room_remains() -> None:
+    """Con un frame impar el margen puede quedar en 0 px: el offset debe ser 0.
+
+    Ejercita la rama ``limit <= 0`` de ``_denormalized_offset``, que sin esto
+    queda sin cubrir: sobre 5 px el recorte ocupa 4 y ``_even(5 - 4) == 0``.
+    """
+    targets = (ReframeTarget(x=0.0, y=0.0, width=0.8, height=0.8),)
+    crop = _crop_filter(targets, sample_fps=2.0, source_width=5, source_height=5)
+    width, height = _crop_geometry_of(crop)
+    offset_x, offset_y = _crop_offset_of(crop)
+    assert (width, height) == (4, 4)
+    assert offset_x == 0
+    assert offset_y == 0
 
 
 def test_crop_filter_empty_raises() -> None:
@@ -1032,6 +1084,18 @@ def test_reframe_target_accepts_normalized_window() -> None:
 def test_reframe_target_accepts_full_frame() -> None:
     target = ReframeTarget(x=0.0, y=0.0, width=1.0, height=1.0)
     assert target.width == pytest.approx(1.0)
+
+
+def test_targets_reject_source_too_small_to_crop() -> None:
+    """Un frame de 1 px no admite un recorte de 2 px: falla en cerrado.
+
+    ``_crop_size`` acota el recorte a 2 px por el mínimo de ffmpeg, así que
+    sobre una fuente más estrecha la ventana normalizada sería mayor que 1.0.
+    Se prefiere el ``ValidationError`` explícito (que el orquestador traduce a
+    ``PipelineError``) a emitir un ``crop`` más ancho que el frame.
+    """
+    with pytest.raises(ValidationError, match="less than or equal to 1"):
+        _ = _targets_from_faces([()], source_width=1, source_height=480, config=ReframeConfig())
 
 
 def test_reframe_target_rejects_extra_fields() -> None:

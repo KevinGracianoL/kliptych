@@ -788,3 +788,21 @@ def test_emergency_format_override_is_honoured(
         url="https://example.com/v", destination=destination
     )
     assert _format_of(runner) == "best"
+
+
+def test_explicit_selector_beats_environment_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Con ambos fijados manda el selector del llamador, no el override global.
+
+    Sin este test, invertir la precedencia documentada pasaria la suite entera.
+    """
+    monkeypatch.setenv(_FORMAT_ENV_VAR, "worst")
+    destination = tmp_path / "video.mp4"
+    runner = _writing_runner(destination)
+    _ = MediaDownloader(runner=runner).download_video(
+        url="https://example.com/v",
+        destination=destination,
+        format_selector="bestvideo+bestaudio",
+    )
+    assert _format_of(runner) == "bestvideo+bestaudio"

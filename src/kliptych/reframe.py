@@ -46,10 +46,6 @@ _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_MIN_SUPPRESSION = 0.3
 _STDERR_TAIL = 400
 _DIMENSION_PARTS = 2
-# Tolerancia de la suma normalizada x+width / y+height: el round-trip por
-# float puede exceder 1.0 en unos pocos ulp, aunque la ventana en pixeles
-# entre exacto. No relaja el limite, solo absorbe el error de representacion.
-_NORMALIZED_SUM_EPS = 1e-9
 
 
 class ReframeError(Exception):
@@ -78,6 +74,12 @@ class ReframeTarget(BaseModel):
     def _window_stays_inside_frame(self) -> Self:
         """Rechaza ventanas que se salen del frame por la derecha o por abajo.
 
+        El limite es estricto, sin tolerancia: una ventana ``x + width <= 1.0``
+        escrita en decimal (por ejemplo 0.1 + 0.9) suma exactamente 1.0 o menos
+        en IEEE-754, y lo mismo para la trayectoria que produce
+        ``_targets_from_faces``, asi que un epsilon aqui solo relajaria el
+        limite sin absorber ningun error real.
+
         Returns:
             La propia ventana, si cabe dentro del frame normalizado.
 
@@ -85,11 +87,11 @@ class ReframeTarget(BaseModel):
             ValueError: Si ``x + width`` o ``y + height`` exceden 1.0.
         """
         right = self.x + self.width
-        if right > 1.0 + _NORMALIZED_SUM_EPS:
+        if right > 1.0:
             msg = f"la ventana se sale del frame por la derecha: x+width={right}"
             raise ValueError(msg)
         bottom = self.y + self.height
-        if bottom > 1.0 + _NORMALIZED_SUM_EPS:
+        if bottom > 1.0:
             msg = f"la ventana se sale del frame por abajo: y+height={bottom}"
             raise ValueError(msg)
         return self
