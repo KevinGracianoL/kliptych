@@ -353,7 +353,7 @@ class MediaDownloader:
         url: str,
         destination: Path,
         max_size_bytes: int,
-        format_selector: str | None = None,
+        format_selector: str = _DEFAULT_YTDLP_FORMAT,
         section: tuple[float, float] | None = None,
     ) -> list[str]:
         """Construye el argv de yt-dlp, con límite de tamaño nativo.
@@ -362,7 +362,13 @@ class MediaDownloader:
             url: URL del video.
             destination: Ruta del artefacto descargado.
             max_size_bytes: Tamaño máximo aceptado, en bytes.
-            format_selector: Selector de formato opcional.
+            format_selector: Selector de formato de yt-dlp. El defecto es el
+                selector con techo anti-4K, no ``None``: ``--format`` se emite
+                siempre, de modo que una llamada externa que omita este
+                argumento hereda la protección en vez de dejar que yt-dlp elija
+                el mejor formato disponible sin limite. Para una fuente sin
+                variante <=1080 se pasa el selector explícito o se define
+                ``KLIPTYCH_YTDLP_FORMAT``.
             section: Rango [start, end] en segundos para descarga quirúrgica con margen.
 
         Returns:
@@ -377,9 +383,9 @@ class MediaDownloader:
             str(max_size_bytes),
             "--output",
             str(destination),
+            "--format",
+            format_selector,
         ]
-        if format_selector is not None:
-            argv += ["--format", format_selector]
         if section is not None:
             start_sec, end_sec = section
             margin_start = max(0.0, start_sec - 10.0)

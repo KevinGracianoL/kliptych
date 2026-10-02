@@ -635,7 +635,20 @@ class FFmpegReframer:
 
 
 def _even(value: int) -> int:
-    return value if value % 2 == 0 else value - 1
+    """Redondea a la baja al par no negativo más cercano.
+
+    El clamp a 0 evita que un offset negativo sobreviva al redondeo hacia
+    abajo: ``_even(-3)`` sería -4, y ffmpeg leería un ``crop`` con x/y
+    negativo como un recorte fuera del frame en lugar de un offset inválido.
+
+    Args:
+        value: Valor a ajustar.
+
+    Returns:
+        El mayor par <= ``value`` que no es negativo.
+    """
+    floored = max(0, value)
+    return floored if floored % 2 == 0 else floored - 1
 
 
 def _clamp(value: float, low: float, high: float) -> float:

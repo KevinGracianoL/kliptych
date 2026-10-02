@@ -406,16 +406,34 @@ def test_build_ytdlp_argv_shape(tmp_path: Path) -> None:
     assert argv[-1] == "https://example.com/v"
 
 
-def test_build_ytdlp_argv_without_format(tmp_path: Path) -> None:
+def test_build_ytdlp_argv_inherits_capped_format_by_default(tmp_path: Path) -> None:
+    """Omitir ``format_selector`` ya no deja a yt-dlp sin techo.
+
+    El defecto del parámetro es el selector con techo, no ``None``: una llamada
+    externa que no pase el argumento hereda la protección anti-4K en vez de
+    dejar que yt-dlp elija el mejor formato disponible.
+    """
     argv = MediaDownloader.build_ytdlp_argv(
         url="https://example.com/v",
         destination=tmp_path / "video.mp4",
         max_size_bytes=2048,
     )
-    assert "--format" not in argv
+    assert argv[argv.index("--format") + 1] == _CAPPED_SELECTOR
     assert "--ignore-config" in argv
     assert argv[-2] == "--"
     assert argv[-1] == "https://example.com/v"
+
+
+def test_build_ytdlp_argv_never_emits_uncapped_selector(tmp_path: Path) -> None:
+    """Ninguna rama del selector por defecto puede quedarse sin techo."""
+    argv = MediaDownloader.build_ytdlp_argv(
+        url="https://example.com/v",
+        destination=tmp_path / "video.mp4",
+        max_size_bytes=2048,
+    )
+    selector = argv[argv.index("--format") + 1]
+    uncapped = [alt for alt in selector.split("/") if "height<=?1080" not in alt]
+    assert uncapped == []
 
 
 def test_build_streamlink_argv_shape(tmp_path: Path) -> None:

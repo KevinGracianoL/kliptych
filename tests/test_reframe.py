@@ -481,6 +481,29 @@ def test_targets_enforce_vertical_aspect() -> None:
         assert width / height == pytest.approx(9 / 16, abs=0.01)
 
 
+def test_even_never_returns_negative() -> None:
+    """`_even` redondea a la baja, así que sin clamparía devolvería negativos.
+
+    ``_even(-3)`` sin el clamp da -4, y ffmpeg leería un `crop` con offset
+    negativo como un recorte fuera del frame en lugar de un offset inválido.
+    """
+    for value in range(-10, 0):
+        assert _even(value) >= 0, value
+        assert _even(value) % 2 == 0, value
+
+
+def test_even_rounds_down_to_the_nearest_non_negative_even() -> None:
+    assert (_even(0), _even(1), _even(2), _even(3)) == (0, 0, 2, 2)
+    assert (_even(-1), _even(-2), _even(-3)) == (0, 0, 0)
+
+
+def test_crop_filter_rejects_non_positive_source() -> None:
+    """Un tamaño de origen inválido falla en cerrado, no con un crop absurdo."""
+    targets = (ReframeTarget(x=0.0, y=0.0, width=0.5, height=1.0),)
+    with pytest.raises(ValueError, match="dimensión de origen"):
+        _ = _crop_filter(targets, sample_fps=2.0, source_width=0, source_height=1080)
+
+
 def test_linear_expression_single_value() -> None:
     assert _linear_expression([0.0], [100.0]) == "100"
 
