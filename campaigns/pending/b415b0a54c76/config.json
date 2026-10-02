@@ -1,0 +1,92 @@
+{
+  "campaign_id": "b415b0a54c76",
+  "archetype": "NEW_ARCHETYPE",
+  "contract": {
+    "schema_version": "1.1",
+    "campaign_id": "youtube-test",
+    "format": "video",
+    "mode": "given_clips",
+    "platforms": {
+      "tiktok": {
+        "duration": {
+          "min_s": 15,
+          "max_s": 60
+        },
+        "caption_rules": {
+          "must_mention": [],
+          "first_line": null,
+          "forbidden": []
+        },
+        "audio_rule": "any",
+        "required_hashtags": [
+          "#LaCobra"
+        ],
+        "required_mentions": [
+          "@DiegoNavajas"
+        ],
+        "attribution": {
+          "type": "none",
+          "value": null
+        },
+        "link_rules": {
+          "link_in_bio": false
+        }
+      }
+    },
+    "languages": {
+      "source": "es",
+      "subtitles": null,
+      "caption": "es",
+      "voice": null,
+      "language": "es"
+    },
+    "official_audio": null,
+    "audio_policy": null,
+    "watermark": {
+      "required": false,
+      "asset_id": null,
+      "visible_full_video": false,
+      "position": "top_right",
+      "scale_ratio": 0.2,
+      "opacity": 1.0,
+      "min_width_ratio": 0.05
+    },
+    "spelling_locks": [],
+    "prohibitions": [],
+    "hook_keyword": null,
+    "brand_safety_required": false,
+    "brand_safety_citation": null,
+    "unmapped": [],
+    "timestamp_ranges": [],
+    "lyric_video": null,
+    "split_screen": null,
+    "rules": {
+      "hard": [
+        "caption.required_hashtag",
+        "caption.required_mention",
+        "duration.min",
+        "duration.max",
+        "artifact.integrity",
+        "artifact.video_stream"
+      ],
+      "recommended": [],
+      "manual_review": []
+    },
+    "assets": {
+      "required": [],
+      "optional": []
+    },
+    "segments": [],
+    "geo_target": null,
+    "min_views_for_payout": {
+      "value": null,
+      "enforcement": "post_publication_manual"
+    },
+    "analytics_proof_required": {
+      "value": false,
+      "enforcement": "post_publication_manual"
+    }
+  },
+  "variations": [],
+  "created_at": "2026-10-02T06:03:59.924239+00:00"
+}
