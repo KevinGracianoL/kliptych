@@ -14,7 +14,6 @@ fuerte) en vez de ``fail``. Sin watermark el mismo fondo no da señal
 
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import cv2
@@ -431,11 +430,27 @@ def test_textured_wrong_position_fails(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
-def test_full_video_twenty_seconds_completes_fast(tmp_path: Path) -> None:
+def test_full_video_twenty_seconds_detects_watermark(tmp_path: Path) -> None:
+    """El watermark se detecta en 20s de video real. Esa es la propiedad.
+
+    Este test NO afirma cuanto tarda. Antes lo hacia (``elapsed < 15.0``) y
+    por eso fallaba en CI sin que el codigo hubiera cambiado: el mismo commit
+    tardo 15.42s en un runner de Windows y paso en el run de 13 minutos antes.
+    Medir el reloj de pared dentro de una suite de correctitud no es una puerta,
+    es una moneda al aire: el resultado depende de quanta carga tenga el runner.
+
+    Un gate no determinista entrena al equipo a re-ejecutar, y eso destruye la
+    senal de todos los demas gates: cuando CI falla, la primera hipotesis pasa a
+    ser "el flaky" y no "mi cambio". El costo es mayor que la molestia de este
+    test.
+
+    Aqui queda solo la afirmacion determinista: el check detecta el watermark en
+    el video completo. La cifra de tiempo pasa a ser un dato medido, y se
+    registra en el camino de benchmark, no en una suite de correccion. Ese
+    camino todavia no existe (#56), asi que hasta que exista esta propiedad de
+    rendimiento esta SIN MEDIR, que no es lo mismo que "va bien".
+    """
     video = _textured(tmp_path, "long-marked", duration=20.0, opacity=1.0)
     context = _context(tmp_path, video, full_video=True, opacity=1.0, duration_s=20.0)
-    started = time.monotonic()
     outcome = check_watermark_full_video(context)
-    elapsed = time.monotonic() - started
     assert outcome.status is CheckStatus.PASS
-    assert elapsed < 15.0

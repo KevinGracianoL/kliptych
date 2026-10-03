@@ -71,6 +71,46 @@
   mismo que una regla no aplicable, y esa distinción está escrita en el motor
   para que nadie la generalice por error.
 - No cambia: `own_clip`, `_derive_status`, el resolver y el exportador.
+- **Se quita una aserción de reloj de pared de la suite de correctitud
+  (`#56`).** Tres cosas distintas, que conviene no mezclar:
+
+  1. **La propiedad de correctitud del watermark NO cambia.** El test sigue
+     afirmando `CheckStatus.PASS` sobre 20s de vídeo real con watermark
+     (4.893.366 bytes, 540x960, 20.000000s). Esa aserción sigue siendo
+     load-bearing: mutando el check para que devuelva `FAIL` sobre un vídeo que
+     sí lleva watermark, el test falla. Lo que se elimina es solo la afirmación
+     de tiempo, `elapsed < 15.0`, y su `time.monotonic()`.
+
+  2. **Se quita el umbral de reloj, con sus números medidos.** El mismo commit
+     tardó 15.42s en un runner de Windows y pasó en el run de 13 minutos antes.
+     Medido aquí cinco veces, cronometrando solo el check sobre vídeos de 20s
+     distintos: 4.99s, 3.94s, 3.91s, 3.93s, 3.95s → min 3.91s, max 4.99s, media
+     4.15s, spread 1.28x. Headroom sobre el umbral de 15.0s: **3.62x** con la
+     media, **3.00x** con la peor muestra. El umbral nunca fue cerrado; lo que
+     pasó es que el runner de CI era ~3.9x más lento que la mejor muestra local
+     y consumió todo el margen de golpe. Ese es el diagnóstico, y es distinto
+     del "umbral ajustado". Ojo al comparar la cifra equivocada: el test aislado
+     tarda ~9.6s de reloj pero solo cronometra ~4s, porque generar el vídeo de
+     20s ocurre antes de arrancar el cronómetro.
+
+  3. **El coste de `check_watermark_full_video` queda SIN MEDIR, no "va bien".**
+     No se afirma ninguna mejora de rendimiento porque no se midió ninguna. Es
+     una pérdida de cobertura declarada: hasta que exista `kliptych bench`, que
+     todavía no existe (Sprint A3), nadie vigila ese coste. Loergyó un gate que
+     fallaba por ruido, que era peor que no tenerlo.
+
+  Nota para quien lea el test después: es una aserción **positiva** (vídeo con
+  watermark → `PASS`), así que por construcción **no** detecta que el check
+  sobre-pase; mutarlo para que devuelva `PASS` siempre lo deja en verde. Esa
+  dirección la cubren los 10 tests negativos del mismo archivo
+  (`test_textured_wrong_position_fails`, `test_verdict_without_signal_fails`, los
+  fail-closed), que sí fallaron bajo esa mutación.
+
+  Por qué se quita en vez de relajar: un gate no determinista entrena al equipo
+  a re-ejecutar, y eso destruye la señal de todos los demás. Cuando CI falla, la
+  primera hipótesis pasa a ser "el flaky" y no "mi cambio". Subir el umbral sin
+  medir cambiaría una alarma ruidosa por una alarma muda, y el margen seguiría
+  siendo del runner y no del código.
 - `Campaign.brief` admite vacío; vacío es la señal del modo zero-contract.
   `campaign_id` sigue exigiendo valor porque nombra el directorio de entrega.
 - `run_repost` acepta `model` ausente: el modo repost no consulta el modelo.
