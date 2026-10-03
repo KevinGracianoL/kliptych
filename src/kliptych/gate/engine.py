@@ -173,12 +173,19 @@ class Gate:
                 else:
                     # CASO C: declarada en el contrato y sin ninguna plataforma
                     # que la pida. El contrato es incoherente, y una declaracion
-                    # incoherente NO se inventa: se despacha igual que antes del
-                    # scoping, para que su resultado sea IDENTICO al de base.
-                    # Omitirla en silencio seria un fail-open, y sustituirla por
-                    # un UNSUPPORTED fijo tambien: `_derive_status` solo escala
+                    # incoherente NO se inventa: se despacha. Omitirla en
+                    # silencio seria un fail-open, y sustituirla por un
+                    # UNSUPPORTED fijo tambien: `_derive_status` solo escala
                     # UNSUPPORTED cuando la fuerza es `hard`, asi que una regla
                     # recommended huerfana pasaria de `rejected` a `passed`.
+                    #
+                    # OJO: no hay un unico "igual que base", depende de la FORMA
+                    # de la regla. Sin validador (audio.no_trending,
+                    # audio.own_clip, audio.official_track) base ya la
+                    # despachaba y el resultado es identico. Con validador
+                    # (audio.present) base la omitia en silencio, o sea base
+                    # fallaba abierta, y aqui es MAS estricto. En ninguno de los
+                    # dos casos es menos estricto que base.
                     # Se registra siempre; anadir el motivo es ademas informativo.
                     dispatched = self._run_rule(rule_id, strength, context)
                     outcomes.append(

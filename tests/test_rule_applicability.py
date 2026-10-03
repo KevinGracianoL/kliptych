@@ -1,10 +1,10 @@
 """Aplicabilidad por plataforma de las reglas declaradas globalmente.
 
 ``contract.rules`` es global: una sola declaracion cubre todas las plataformas.
-Lo que describen es por plataforma. Estos tests fijan que una regla solo
-afecta a las plataformas que la declararon, en los DOS consumidores que dependen
-de la plataforma: el motor, al derivar el estado, y el exportador, al listar
-recordatorios.
+Lo que describen es por plataforma. Estos tests fijan que una regla solo afecta
+a las plataformas que la declararon, en el motor, que es el UNICO consumidor que
+consulta el predicado de aplicabilidad. El exportador NO lo consulta: sus
+recordatorios son planos por informe y no pueden expresar el caso B (#57).
 
 El riesgo que estos tests cubren no es que el motor pase de mas, sino que pase
 de menos: una plataforma que SI declara una regla tiene que seguir exigiendo su
