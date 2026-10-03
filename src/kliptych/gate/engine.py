@@ -19,10 +19,11 @@ from kliptych.gate.models import (
 from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_file
 
-# Predicados de aplicabilidad por plataforma, indexados por rule_id. Es la
-# UNICA tabla: la consultan el despacho de checks del motor y los recordatorios
-# del exportador. No debe existir una segunda copia de esta regla en ningun otro
-# sitio.
+# Predicados de aplicabilidad por plataforma, indexados por rule_id canonico.
+# Es la UNICA tabla de aplicabilidad: la consultan el despacho de checks y el
+# lookup de validadores, ambos del motor. El exportador NO la consulta: sus
+# recordatorios son planos por informe y no pueden expresar el caso B, asi que
+# siguen usando la lista global de manual_review (#57 abierto).
 _RULE_APPLICABILITY: dict[str, Callable[[PlatformRules], bool]] = {
     "audio.present": lambda rules: rules.audio_rule is not AudioRule.ANY,
     "audio.own_clip": lambda rules: rules.audio_rule is AudioRule.OWN_CLIP,
@@ -37,10 +38,9 @@ def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     Los ``rule_id`` de ``contract.rules`` son globales: una sola declaracion
     cubre todas las plataformas del contrato. Su contenido, en cambio, es por
     plataforma, asi que la misma regla puede tener requisitos en una plataforma
-    y en otra no. Este predicado es el unico lugar donde se decide eso, y lo
-    consultan los dos consumidores que dependen de la plataforma: el motor, al
-    decidir si despacha un check, y el exportador, al decidir si avisa de una
-    revision manual pendiente.
+    y en otra no. Este predicado es el unico lugar del motor donde se decide eso,
+    y lo consultan el despacho de checks y el lookup de validadores. El
+    exportador no lo consulta: sus recordatorios son planos por informe (#57).
 
     Ojo con la distincion que separa las dos situaciones:
 
@@ -226,7 +226,7 @@ class Gate:
         )
 
     def _run_rule(self, rule_id: str, strength: RuleStrength, context: GateContext) -> CheckResult:
-        validator = self._validators.get(rule_id)
+        validator = self._validators.get(canonical_rule_id(rule_id))
         if validator is None:
             citations = [
                 unmapped.quote for unmapped in context.contract.unmapped if unmapped.rule == rule_id

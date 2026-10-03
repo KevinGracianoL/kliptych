@@ -85,19 +85,29 @@
     - **B:** no aplica aquí pero aplica a otra plataforma del contrato → se omite
       para esta pieza y no se registra nada. Es la regla de esa otra.
     - **C:** está declarada y no aplica a NINGUNA plataforma → el contrato es
-      incoherente y se despacha **igual que antes del scoping**, con su
-      resultado idéntico al de `main` y una evidencia extra que lo dice.
+      incoherente y se despacha, registrándolo con una evidencia extra que lo
+      dice. **El caso C nunca es MENOS estricto que `main`.** Hay dos
+      situaciones y conviene no mezclarlas:
+      - **Regla SIN validador registrado** (`audio.no_trending`): `main` ya la
+        despachaba y daba `unsupported`. Aquí igual. Idéntico a `main`.
+      - **Regla CON validador registrado** (`audio.present`): `main` la
+        **omitía en silencio**, daba `passed` y exportaba sin firma. **_base
+        fallaba abierta_.** Aquí se despacha, da `unsupported` y bloquea con y
+        sin firma: **más estricto que `main`**.
   - **Por qué el caso C no se "arregla" con un `UNSUPPORTED` fijo:** porque
     `_derive_status` solo escala `UNSUPPORTED` cuando la fuerza es `hard`. Una
     regla `recommended` huérfana con `UNSUPPORTED` fijo pasaría de `rejected` a
-    `passed`, que es un fail-open. Se comprobó: esa implementación movía 2 de
-    las 12 celdas hacia más exportable, y por eso se descartó.
-  - **Medido, las 12 combinaciones de fuerza × status, caso C:** las 12 quedan
-    **sin cambio** frente a `main`. Cero fail-open.
-  - **Medido, caso B:** una plataforma con `audio_rule=any` en una campaña con
-    `no_trending` pasa de `pending_review`/`blocked` a `passed`/`exported` sin
-    firma. 5 de las 12 celdas cambian, todas hacia más exportabilidad, y todas
-    sobre una plataforma que no declaró la regla. Ese es el cambio pedido.
+    `passed`, que es un fail-open. Se medió esa variante: **2** de las 12
+    combinaciones quedaban más exportables y **4** menos exportables. El
+    descarte es correcto; la evidencia que lo motivó era unilateral y aquí se
+    dan las dos direcciones.
+  - **Caso B, sin un número único.** Cuántas combinaciones se mueven depende de
+    la forma del contrato, así que no hay una cifra honesta que valga para
+    todas: 7 sobre un contrato construido a mano, 9 y 6 sobre dos formas
+    resueltas por el resolver. **Lo que sí es independiente de la forma, y es lo
+    que importa:** toda combinación que se mueve está sobre una plataforma que
+    **no declaró** esa regla, y ninguna plataforma que declaró una regla se
+    mueve hacia más exportabilidad. Eso es lo que se verificó.
   - **Qué NO cambia:** una plataforma que declara la regla sigue exigiendo su
     firma, y también con `own_clip` y `official_required`. Un `FAIL` sigue
     rechazando con y sin aprobación. Una regla dura sin validador sigue

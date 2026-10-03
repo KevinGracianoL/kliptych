@@ -19,7 +19,15 @@ from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, contract_digest
 from kliptych.contract.schema import PlatformRules
 from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
-from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus, Piece
+from kliptych.gate import (
+    CheckOutcome,
+    CheckResult,
+    CheckStatus,
+    Gate,
+    GateResult,
+    GateStatus,
+    Piece,
+)
 from tests.support import (
     FakeProbe,
     make_contract,
@@ -376,6 +384,37 @@ def test_alias_rule_ids_scope_the_same_as_the_canonical_one(
 
     assert alias not in [check.id for check in result.checks]
     assert result.status is not GateStatus.PENDING_REVIEW
+
+
+@pytest.mark.parametrize("alias", ["audio.official_selection", "audio.rule"])
+def test_validator_registered_under_canonical_id_is_reached_by_every_spelling(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    """El lookup de validadores canoniza, no solo el predicado.
+
+    Si solo canonicalizara la tabla de aplicabilidad, el primer validador que se
+    registrara bajo ``audio.official_track`` seria esquivado por cualquier
+    alias, que pasaria a caer en la rama de "sin validador" y a mostrar un
+    motivo equivocado. Se registra bajo el id canonico y se despacha por alias.
+    """
+    contract = make_contract(audio_rule="any", hard=["artifact.integrity", "duration.min", alias])
+    gate = Gate(FakeProbe(info=make_media(has_audio=True, has_video=True)))
+    gate.register_validator(
+        "audio.official_track",
+        lambda _context: CheckOutcome(
+            status=CheckStatus.MANUAL_REVIEW, evidence={"canonico": True}
+        ),
+    )
+
+    result = gate.run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    check = _check(result, alias)
+    assert check.evidence.get("canonico") is True
 
 
 def test_rule_declared_but_claimed_by_no_platform_is_recorded_and_blocks(
