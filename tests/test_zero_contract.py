@@ -5,17 +5,24 @@ sintetizado en memoria, de modo que ``--url`` basta para procesar un vídeo sin
 ninguna llamada a la API del LLM ni credenciales ``KLIPTYCH_LLM_*``.
 """
 
+import argparse
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+
 import pytest
 
 from kliptych import __main__ as cli
-from kliptych.campaign_manager import CampaignManager, CampaignOutcome
+from kliptych import campaign_manager, orchestrator
+from kliptych.campaign_manager import (
+    CampaignManager,
+    CampaignManagerError,
+    CampaignOutcome,
+)
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import (
     AudioPolicy,
@@ -25,6 +32,7 @@ from kliptych.contract import (
     vanilla_contract,
 )
 from kliptych.contract.schema import GlobalRestrictions, active_restriction_rules
+from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS
 from kliptych.gate.engine import Gate
 from kliptych.gate.models import GateStatus
@@ -57,12 +65,33 @@ def _private(name: str) -> object:
 _build_campaign_manager = cast(
     "Callable[..., CampaignManager]", _private("_build_campaign_manager")
 )
+_ignored_zero_contract_flags = cast(
+    "Callable[[argparse.Namespace], list[str]]", _private("_ignored_zero_contract_flags")
+)
 
 
 @pytest.fixture
 def _no_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _LLM_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+def _module_private(module: object, name: str) -> object:
+    """Accede a un símbolo privado de un módulo, como hace ``test_reframe``.
+
+    Returns:
+        El atributo pedido del módulo.
+    """
+    return cast("object", getattr(module, name))
+
+
+# ``CampaignOutcome`` declara ``PipelineResult``, ``SlideshowResult`` y
+# ``PullRequest``, que viven en el orquestador y en git_proposals; esa
+# resolución la dispara el primer ``CampaignManager.process`` real y queda
+# cacheada a nivel de módulo. Sin ella, los tests que usan el doble
+# ``_CapturingManager`` dependen de que otro archivo se haya ejecutado antes y
+# fallan cuando este corre aislado. Se resuelve al importar el módulo.
+cast("Callable[[], None]", _module_private(campaign_manager, "_resolve_outcome_model"))()
 
 
 class _ExplodingClassifier:
@@ -177,8 +206,8 @@ def test_vanilla_contract_declares_only_artifact_rules() -> None:
 
     No hay regla de audio: la plataforma usa ``PlatformRules()``, cuyo
     ``audio_rule`` es ``ANY``, y el resolver solo añade ``audio.present``
-    cuando alguna plataforma exige audio (``resolver.py:1782``). Declararla
-    aquí sería una aserción que el gate no puede sostener.
+    cuando alguna plataforma exige audio. Declararla aquí sería una aserción
+    que el gate no puede sostener.
     """
     contract = vanilla_contract(campaign_id="abc123def456")
     assert tuple(contract.rules.hard) == _AV_HARD_RULES
@@ -291,8 +320,8 @@ def test_gate_passes_vanilla_contract_on_artifact_rules(tmp_path: Path) -> None:
 
     ``artifact.integrity`` y ``artifact.video_stream`` cubren la integridad
     estándar del A/V: el artefacto existe, es legible y tiene video. No se
-    comprueba la presencia de audio porque no hay regla que la exija
-    (``audio_rule=ANY`` no activa ninguna, según ``resolver.py:1782``).
+    comprueba la presencia de audio porque no hay regla que la exija: con
+    ``audio_rule=ANY`` el resolver no añade ``audio.present``.
     """
     artifact = tmp_path / "final.mp4"
     _ = artifact.write_bytes(b"media-bytes")
@@ -354,9 +383,10 @@ def test_zero_contract_runs_with_no_classifier_configured() -> None:
     """La ausencia de clasificador es una configuración legítima, no un descuido.
 
     El modo zero-contract no tiene brief que clasificar, así que el gestor se
-    construye sin clasificador. Antes esto no era posible: ``classifier`` era
-    obligatorio y la CLI cableaba un ``VanillaClassifier`` que la ruta
-    zero-contract nunca llamaba, porque el gestor cortocircuitaba antes.
+    construye sin clasificador. Antes ``classifier`` era obligatorio y la CLI
+    cableaba un clasificador trivial que la ruta zero-contract nunca llamaba,
+    porque el gestor cortocircuitaba antes: código que existía solo para
+    satisfacer el tipo.
     """
     orchestrator = _StubOrchestrator()
     outcome = _manager(None, orchestrator).process(
@@ -592,16 +622,26 @@ def test_cli_campaign_manager_still_requires_llm_env_by_default() -> None:
         _ = _build_campaign_manager()
 
 
+class _DownloadAttemptedError(Exception):
+    """Se lanza en lugar de descargar, para detener la corrida sin red."""
+
+
 @pytest.mark.usefixtures("_no_llm_env")
-def test_zero_contract_makes_no_network_connection(
+def test_zero_contract_cli_opens_no_socket_before_building_the_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """El modo promete cero llamadas al LLM: aquí se comprueba a nivel de socket.
+    """Sin brief, la ruta del CLI no abre sockets antes de construir el gestor.
 
-    Es la garantía central del modo, y hasta ahora solo se probaba que el
-    manager se construyera sin credenciales. Bloquear ``socket.connect``
-    convierte esa promesa en algo verificable: cualquier intento de red, de
-    cualquier destino, hace fallar el test.
+    Qué verifica: que ``cli.main`` con ``--url`` y sin ``--brief`` llega a
+    construir el manager sin abrir un socket en el proceso de pytest.
+
+    Qué NO verifica, y no pretende: el pipeline no se ejecuta, porque el
+    manager inyectado devuelve sin procesar nada. Tampoco cubre el egress por
+    subproceso: ``yt-dlp`` corre en otro proceso, donde este parche no llega. Y
+    el parche solo cubre ``socket.socket.connect``: ``getaddrinfo`` y
+    ``connect_ex`` lo esquivan. Para esas capas está
+    ``test_zero_contract_runs_no_llm_client``, que intercepta las fronteras
+    reales del LLM.
     """
     attempts: list[object] = []
 
@@ -618,3 +658,188 @@ def test_zero_contract_makes_no_network_connection(
     )
     assert exit_code == 0
     assert attempts == []
+
+
+@pytest.mark.usefixtures("_no_llm_env")
+def test_zero_contract_runs_no_llm_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ninguna frontera de LLM se toca al construir y ejecutar el modo real.
+
+    A diferencia del test del socket, aquí se construye el gestor de verdad con
+    ``require_llm=False`` y se ejecuta ``CampaignManager.process`` sobre una
+    campaña zero-contract. Las tres fronteras del LLM están parcheadas para
+    explotar si se tocan:
+
+    - ``OpenAIChatModel.__init__``: no debe construirse ningún backend de chat.
+    - ``LLMCampaignClassifier.__init__``: no debe construirse ningún clasificador.
+    - ``UrllibTransport.post_json``: no debe salir ninguna petición al LLM.
+
+    La descarga se sustituye por una excepción para cortar la corrida antes de
+    la red: el egress de ``yt-dlp`` es un subproceso y no es interceptable desde
+    aquí, pero no es una llamada al LLM, y el modo zero-contract sí descarga el
+    vídeo del usuario. Lo que este test cubre es exactamente la promesa: cero
+    clientes de LLM y cero peticiones al LLM en el camino real.
+    """
+    llm_touched: list[str] = []
+
+    def _boom_llm_backend(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        llm_touched.append("OpenAIChatModel.__init__")
+        msg = "el modo zero-contract no debe construir un backend de chat"
+        raise AssertionError(msg)
+
+    def _boom_llm_classifier(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        llm_touched.append("LLMCampaignClassifier.__init__")
+        msg = "el modo zero-contract no debe construir un clasificador"
+        raise AssertionError(msg)
+
+    def _boom_llm_post(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        llm_touched.append("UrllibTransport.post_json")
+        msg = "el modo zero-contract no debe llamar al LLM"
+        raise AssertionError(msg)
+
+    def _stop_at_download(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        msg = "descarga"
+        raise _DownloadAttemptedError(msg)
+
+    monkeypatch.setattr(
+        "kliptych.runtime.openai_compatible.OpenAIChatModel.__init__", _boom_llm_backend
+    )
+    monkeypatch.setattr(
+        "kliptych.intelligence.LLMCampaignClassifier.__init__", _boom_llm_classifier
+    )
+    monkeypatch.setattr("kliptych.runtime.transport.UrllibTransport.post_json", _boom_llm_post)
+    monkeypatch.setattr("kliptych.download.MediaDownloader.download_video", _stop_at_download)
+
+    manager = _build_campaign_manager(require_llm=False, destination=tmp_path / "delivery")
+    campaign = Campaign(
+        campaign_id="abc123def456",
+        brief="",
+        contract=vanilla_contract(campaign_id="abc123def456"),
+    )
+    outcome = manager.process(campaign, mode="long_video", url="https://example.com/v")
+
+    # El sentinel de descarga prueba que el pipeline REAL se ejecuto y llego a
+    # la etapa de descarga: no es un atajo ni un doble de test.
+    assert outcome.error is not None
+    assert "descarga" in outcome.error, outcome.error
+    assert llm_touched == []
+
+
+class _VideoOrchestratorUnderTest(Protocol):
+    """La parte del orquestador de video que ejercitan estos tests."""
+
+    def run_long_video(self, url: str, **kwargs: object) -> object:
+        """Lanza el pipeline long_video del orquestador.
+
+        Returns:
+            El resultado del pipeline.
+        """
+        ...
+
+
+def _build_video_orchestrator(
+    *,
+    work_dir: Path,
+    model: object | None,
+) -> _VideoOrchestratorUnderTest:
+    """Construye el orquestador real de la CLI con o sin modelo.
+
+    Se accede al nombre privado por el mismo motivo y con el mismo patrón que
+    usa ``test_audit_campaign_flow`` con ``_make_default_campaign_manager``:
+    la clase no está exportada y el comportamiento que hay que cubrir es suyo.
+    El tipo de retorno declarado es el Protocol de arriba, no la clase, para
+    no importar un nombre privado.
+
+    Returns:
+        Un orquestador listo para ``run_long_video``.
+    """
+    factory = cast(
+        "Callable[..., _VideoOrchestratorUnderTest]", _private("_DefaultVideoOrchestrator")
+    )
+    return factory(work_dir=work_dir, model=model, render=RenderConfig())
+
+
+def test_video_orchestrator_without_model_rejects_non_repost_modes(tmp_path: Path) -> None:
+    """Sin backend LLM, los modos que seleccionan segmentos fallan con nombre.
+
+    Es alcanzable: ``_build_campaign_manager(require_llm=False)`` deja el
+    orquestador sin modelo, y cualquier llamador que le pase una campaña CON
+    brief y ``mode="long_video"`` llega aquí. Por CLI no ocurre, porque la ruta
+    zero-contract fuerza repost y la ruta con brief exige credenciales; pero la
+    clase se construye con ``model=None`` en esa configuración y no debe
+    depender del cableado del CLI para fallar con un error entendible.
+    """
+    orchestrator = _build_video_orchestrator(work_dir=tmp_path, model=None)
+    contract = vanilla_contract(campaign_id="abc123def456")
+    with pytest.raises(CampaignManagerError, match="no hay backend LLM configurado"):
+        _ = orchestrator.run_long_video(
+            "https://example.com/v",
+            contract=contract,
+            mode="long_video",
+        )
+
+
+def test_video_orchestrator_without_model_lets_repost_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La contraparte: repost no consulta el modelo, así que el guard no corta.
+
+    Se sustituye ``run_repost`` por un doble para comprobar que la llamada
+    llega, en vez de dejar que el pipeline real intente descargar.
+    """
+    seen: dict[str, object] = {}
+    sentinel = object()
+
+    def _fake_run_repost(url: str, **kwargs: object) -> object:
+        seen["url"] = url
+        seen["model"] = kwargs.get("model")
+        return sentinel
+
+    monkeypatch.setattr(orchestrator, "run_repost", _fake_run_repost)
+    orchestrator_obj = _build_video_orchestrator(work_dir=tmp_path, model=None)
+    contract = vanilla_contract(campaign_id="abc123def456")
+    result = orchestrator_obj.run_long_video(
+        "https://example.com/v",
+        contract=contract,
+        mode="repost_ugc",
+    )
+    assert result is sentinel
+    assert seen["url"] == "https://example.com/v"
+    assert seen["model"] is None
+
+
+@pytest.mark.parametrize("mode", ["slideshow", "audio_locked"])
+def test_zero_contract_warns_about_modes_it_cannot_run(
+    mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``slideshow`` y ``audio_locked`` se avisan: el modo efectivo es repost.
+
+    Sin aviso, el operador recibía exit 0 con una entrega de repost cuando
+    pidió un slideshow o una pista de audio externa.
+    """
+    _ = caplog
+    namespace = argparse.Namespace(
+        contract_draft=None,
+        audio_track_path=None,
+        audio_track_url=None,
+        mode=mode,
+    )
+    assert f"--mode {mode}" in _ignored_zero_contract_flags(namespace)
+
+
+@pytest.mark.parametrize("mode", ["long_video", "repost", "repost_ugc"])
+def test_zero_contract_does_not_warn_about_modes_that_run(mode: str) -> None:
+    """Ni el defecto del parser ni los modos que coinciden con el efectivo."""
+    namespace = argparse.Namespace(
+        contract_draft=None,
+        audio_track_path=None,
+        audio_track_url=None,
+        mode=mode,
+    )
+    assert _ignored_zero_contract_flags(namespace) == []

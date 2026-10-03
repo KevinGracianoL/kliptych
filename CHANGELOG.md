@@ -22,12 +22,9 @@
 ### Changed
 - `Campaign.brief` admite vacío; vacío es la señal del modo zero-contract.
   `campaign_id` sigue exigiendo valor porque nombra el directorio de entrega.
-- `build_ytdlp_argv` usa el selector con techo anti-4K por defecto en lugar de
-  `None`, así que las llamadas externas heredan el techo.
 - `run_repost` acepta `model` ausente: el modo repost no consulta el modelo.
-
-### Fixed
-- `_even` ya no puede devolver un offset negativo al redondear a la baja.
+- `build_ytdlp_argv` y el clamp de `_even` **no** se listan aquí: entraron en
+  `main` con #52 y no forman parte de este trabajo.
 
 ## [1.1.0] — 2026-09-30
 
