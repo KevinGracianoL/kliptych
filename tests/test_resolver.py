@@ -12,6 +12,7 @@ from kliptych.contract import (
     Segment,
     UnmappedRule,
 )
+from kliptych.contract.enums import AudioRule
 from kliptych.gate import CheckResult, CheckStatus, Gate, GateResult, GateStatus
 from kliptych.resolver import (
     IssueCode,
@@ -692,6 +693,16 @@ def test_base_rule_cannot_be_downgraded_to_manual_review(tmp_path: Path) -> None
 
 
 def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
+    """``audio.present`` se declara global pero solo aplica a quien exige audio.
+
+    ``_base_rules`` declara ``audio.present`` una sola vez si alguna plataforma
+    exige audio. Para la plataforma que declara ``audio_rule=any`` no hay
+    requisito que verificar, asi que el motor no debe emitir ningun outcome:
+    hacerlo como ``UNSUPPORTED`` dejaria la pieza permanentemente inexportable
+    y sin salida humana, que es peor que el defecto que corrige. La regla
+    ``audio.no_trending`` de tiktok si se aplica, porque es de la plataforma que
+    la exige.
+    """
     draft = make_draft(
         platforms={
             "tiktok": {
@@ -716,8 +727,32 @@ def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
         assets=AssetRegistry(tmp_path),
     )
     assert gate_result.status is GateStatus.PENDING_REVIEW
-    assert _check(gate_result, "audio.present").status is CheckStatus.PASS
+    assert "audio.present" not in [check.id for check in gate_result.checks]
     assert _check(gate_result, "audio.no_trending").status is CheckStatus.MANUAL_REVIEW
+
+
+def test_audio_present_is_not_declared_when_no_platform_requires_audio(tmp_path: Path) -> None:
+    """Si ninguna plataforma exige audio, el resolver no declara la regla.
+
+    Es la otra mitad del scoping: el motor omite audio.present cuando la
+    plataforma declara ``any``, y el resolver no lo declara cuando NADIE
+    exige audio. Ambas mitades tienen que ser coherentes, o el gate tendria una
+    regla huerfana que no aplica a ninguna plataforma.
+    """
+    draft = make_draft(
+        platforms={
+            "tiktok": {"duration": {"min_s": candidate(8)}},
+            "instagram_reels": {"duration": {"min_s": candidate(8)}},
+        },
+        rules=None,
+    )
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+    contract = result.contract
+    assert contract is not None
+    assert all(
+        platform_rules.audio_rule is AudioRule.ANY for platform_rules in contract.platforms.values()
+    )
+    assert "audio.present" not in contract.rules.hard
 
 
 def test_nul_uri_on_registered_asset_is_rejected(tmp_path: Path) -> None:

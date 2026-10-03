@@ -12,7 +12,13 @@ from kliptych.contract import Contract
 from kliptych.exporter import ExportStatus, export_delivery
 from kliptych.gate import CheckStatus, Gate, GateStatus
 from kliptych.gate.checks import DEFAULT_VALIDATORS, CheckOutcome, GateContext
-from tests.support import ALL_HARD_RULES, FakeProbe, make_contract, make_media, make_piece
+from tests.support import (
+    ALL_HARD_RULES_WITHOUT_AUDIO,
+    FakeProbe,
+    make_contract,
+    make_media,
+    make_piece,
+)
 
 
 def _probe_15s() -> FakeProbe:
@@ -26,7 +32,7 @@ def _artifact(tmp_path: Path) -> Path:
 
 
 def _hal_contract() -> Contract:
-    hard = [rule for rule in ALL_HARD_RULES if rule != "caption.required_mention"]
+    hard = [rule for rule in ALL_HARD_RULES_WITHOUT_AUDIO if rule != "caption.required_mention"]
     return make_contract(
         hard=hard,
         manual_review=["caption.required_mention"],
@@ -76,7 +82,7 @@ def test_manual_review_without_fail_stays_approvable(tmp_path: Path) -> None:
         validators={**DEFAULT_VALIDATORS, "watermark.present": _needs_human_eyes},
     )
     contract = make_contract(
-        hard=[*ALL_HARD_RULES],
+        hard=[*ALL_HARD_RULES_WITHOUT_AUDIO],
         manual_review=["watermark.present"],
         audio_rule="any",
     )

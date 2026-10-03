@@ -20,6 +20,8 @@ from kliptych.contract import (
     Platform,
     contract_digest,
 )
+from kliptych.contract.enums import AudioRule
+from kliptych.contract.schema import PlatformRules
 from kliptych.exporter import (
     DeliveryReport,
     ExportError,
@@ -43,6 +45,7 @@ from tests.support import (
     make_contract,
     make_media,
     make_piece,
+    with_platform,
     write_fixture_clip,
 )
 
@@ -318,6 +321,44 @@ def test_partial_delivery_exports_only_passing_pieces(tmp_path: Path) -> None:
     assert [piece.piece_id for piece in report.rejected] == ["piece-02"]
     assert report.published_dir is None
     assert not destination.exists()
+
+
+def test_unverifiable_audio_rule_blocks_without_signature_and_exports_with_one(
+    tmp_path: Path,
+) -> None:
+    """Con own_clip y official_required, el peor estado aplicable gobierna.
+
+    ``own_clip`` se verifica y pasa; ``official_required`` no se puede verificar
+    y para en MANUAL_REVIEW. Al declararse ``audio.present`` como dura, ese
+    MANUAL_REVIEW es el que gobierna: la pieza NO se exporta sin firma y SI con
+    firma. Antes de este cambio ``official_required`` pasaba solo y la pieza
+    salia sin revision de nadie.
+    """
+    contract = with_platform(
+        make_contract(
+            audio_rule="official_required",
+            official_audio_url="https://example.test/sounds/oficial",
+            hard=["artifact.integrity", "audio.present", "duration.min"],
+            manual_review=("audio.own_clip",),
+        ),
+        Platform.INSTAGRAM_REELS,
+        PlatformRules(audio_rule=AudioRule.OWN_CLIP),
+    )
+    reels = make_piece(_artifact(tmp_path, "reels.mp4"), platform=Platform.INSTAGRAM_REELS)
+
+    blocked = _export(tmp_path, contract=contract, pieces=[reels], approve_manual_review=False)
+    assert blocked.status is ExportStatus.BLOCKED
+    assert blocked.rejected[0].gate_status is GateStatus.PENDING_REVIEW
+
+    approved = _export(
+        tmp_path,
+        contract=contract,
+        pieces=[reels],
+        destination=tmp_path / "delivery_approved",
+        approve_manual_review=True,
+    )
+    assert approved.status is ExportStatus.EXPORTED
+    assert approved.exported[0].gate_status is GateStatus.PENDING_REVIEW
 
 
 def test_rejects_unsafe_campaign_id(tmp_path: Path) -> None:

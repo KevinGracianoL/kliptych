@@ -17,7 +17,13 @@ from kliptych.assets import AssetRegistry
 from kliptych.contract import AudioPolicy, Contract, Platform
 from kliptych.gate import CheckStatus, Gate, GateStatus
 from kliptych.gate.checks import GateContext, check_audio_silence
-from tests.support import ALL_HARD_RULES, FakeProbe, make_contract, make_media, make_piece
+from tests.support import (
+    ALL_HARD_RULES_WITHOUT_AUDIO,
+    FakeProbe,
+    make_contract,
+    make_media,
+    make_piece,
+)
 
 _SILENT_STDERR = (
     "[Parsed_volumedetect_0 @ 0x7fab] n: 48000 | mean_volume: -91.0 dB | max_volume: -91.0 dB"
@@ -245,7 +251,7 @@ def _silence_contract() -> Contract:
     return make_contract(
         audio_rule="any",
         audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND,
-        hard=[*ALL_HARD_RULES, "audio.policy", "audio.silence"],
+        hard=[*ALL_HARD_RULES_WITHOUT_AUDIO, "audio.policy", "audio.silence"],
     )
 
 

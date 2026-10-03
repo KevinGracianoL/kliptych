@@ -19,7 +19,29 @@ from kliptych.contract import (
     SplitScreenConfig,
     TimestampRange,
 )
+from kliptych.contract.schema import PlatformRules
 from kliptych.gate import MediaInfo, Piece, ProbeError, SubtitleSegment
+
+
+def with_platform(contract: Contract, platform: Platform, rules: PlatformRules) -> Contract:
+    """Añade una plataforma al contrato revalidando el contrato completo.
+
+    Revalida en vez de usar ``model_copy`` para que los invariantes del schema,
+    en particular "toda restriccion declarada tiene regla clasificada", sigan
+    mandando sobre el fixture.
+
+    Args:
+        contract: Contrato de partida.
+        platform: Plataforma a añadir o sustituir.
+        rules: Reglas de esa plataforma.
+
+    Returns:
+        El contrato con la plataforma añadida.
+    """
+    payload = contract.model_dump(mode="json")
+    payload["platforms"][platform.value] = rules.model_dump(mode="json")
+    return Contract.model_validate(payload)
+
 
 ALL_HARD_RULES = (
     "artifact.integrity",
@@ -29,9 +51,12 @@ ALL_HARD_RULES = (
     "duration.min",
 )
 
+ALL_HARD_RULES_WITHOUT_AUDIO = tuple(r for r in ALL_HARD_RULES if r != "audio.present")
+
 _AUDIO_MANUAL_RULES = {
     "own_clip": "audio.own_clip",
     "no_trending": "audio.no_trending",
+    "official_required": "audio.official_track",
 }
 
 
@@ -145,12 +170,54 @@ def _build_timestamp_payload(
     return payload
 
 
+def _resolve_hard_rules(hard: Sequence[str] | None, audio_rule: str) -> list[str]:
+    """Reglas duras del contrato, segun lo que pidio el llamador.
+
+    ``hard=None`` significa "el conjunto por defecto", y ese conjunto depende de
+    ``audio_rule`` porque el resolver depende de el (``_base_rules`` solo declara
+    ``audio.present`` si alguna plataforma exige audio). Es una definicion de
+    default, no una reparacion: el default es lo que el resolver emitiria.
+
+    Un ``hard`` explicito NO se toca jamas. Si el llamador declara
+    ``audio.present`` con ``audio_rule="any"``, eso es un contrato incoherente
+    que el pipeline real no puede emitir, y falla aqui en vez de construir en
+    silencio un contrato distinto del pedido. Un fixture que repara la entrada
+    del llamador hace que cada test construido encima afirme algo que nadie
+    pidio.
+
+    Args:
+        hard: Reglas duras explicitas, o None para usar el conjunto por defecto.
+        audio_rule: Valor de ``audio_rule`` de la plataforma.
+
+    Returns:
+        Las reglas duras efectivas.
+
+    Raises:
+        ValueError: Si ``hard`` declara ``audio.present`` con
+            ``audio_rule="any"``, combinacion que el resolver no produce.
+    """
+    if hard is None:
+        return [*ALL_HARD_RULES_WITHOUT_AUDIO] if audio_rule == "any" else [*ALL_HARD_RULES]
+    if audio_rule == "any" and "audio.present" in hard:
+        msg = (
+            "make_contract no puede construir un contrato con audio_rule='any' y "
+            "'audio.present' en rules.hard: el resolver solo declara audio.present "
+            "si alguna plataforma exige audio (_base_rules), asi que ese contrato no "
+            "es reproducible con el pipeline real. Si la pieza no exige audio, no "
+            "pases 'audio.present' en hard. Si necesitas la regla a mano para "
+            "probar el camino de 'any' en el gate, construyela explicitamente "
+            "como hace _hand_declared_audio_contract en tests/test_gate_checks.py."
+        )
+        raise ValueError(msg)
+    return [*hard]
+
+
 def make_contract(
     *,
     format_: str | Format = "video",
     mode: str = "given_clips",
     lyric_video: dict[str, object] | LyricConfig | None = None,
-    hard: Sequence[str] = ALL_HARD_RULES,
+    hard: Sequence[str] | None = None,
     recommended: Sequence[str] = (),
     manual_review: Sequence[str] = (),
     min_s: int | None = 8,
@@ -170,6 +237,7 @@ def make_contract(
     watermark_opacity: float = 1.0,
     watermark_min_width_ratio: float = 0.05,
     audio_rule: str = "own_clip",
+    official_audio_url: str | None = None,
     language: str | None = None,
     audio_policy: AudioPolicy | None = None,
     hook_keyword: str | None = None,
@@ -179,9 +247,9 @@ def make_contract(
     timestamp_ranges: Sequence[TimestampRange | tuple[float, float] | list[float]] = (),
     split_screen: dict[str, object] | SplitScreenConfig | None = None,
 ) -> Contract:
-    plan = [*hard]
+    plan = _resolve_hard_rules(hard, audio_rule)
     manual = [*manual_review]
-    classified = {*hard, *recommended, *manual_review}
+    classified = {*plan, *recommended, *manual_review}
     if brand_safety_required and "brand.safety" not in classified:
         plan.append("brand.safety")
         classified.add("brand.safety")
@@ -252,7 +320,9 @@ def make_contract(
                 "voice": None,
                 "language": language,
             },
-            "official_audio": None,
+            "official_audio": (
+                {"tiktok_url": official_audio_url} if official_audio_url is not None else None
+            ),
             "watermark": {
                 "required": watermark_required,
                 "asset_id": "wm-marca" if watermark_required else None,

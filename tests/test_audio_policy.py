@@ -24,7 +24,7 @@ from kliptych.orchestrator import PipelineConfig, compute_long_video_fingerprint
 from kliptych.resolver import resolve_contract
 from kliptych.subtitles import SubtitleRenderer
 from tests.support import (
-    ALL_HARD_RULES,
+    ALL_HARD_RULES_WITHOUT_AUDIO,
     FakeProbe,
     candidate,
     make_contract,
@@ -104,7 +104,7 @@ def test_internal_official_sound_in_hard_is_never_unsupported(tmp_path: Path) ->
     contract = make_contract(
         audio_rule="any",
         audio_policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND,
-        hard=[*ALL_HARD_RULES, "audio.policy"],
+        hard=[*ALL_HARD_RULES_WITHOUT_AUDIO, "audio.policy"],
     )
     result = _run(contract, _piece(_artifact(tmp_path)), tmp_path)
     assert _check(result, "audio.policy").status is CheckStatus.MANUAL_REVIEW
@@ -154,7 +154,7 @@ def test_non_internal_policies_pass(tmp_path: Path, policy: AudioPolicy | None) 
     contract = make_contract(
         audio_rule="any",
         audio_policy=policy,
-        hard=[*ALL_HARD_RULES, "audio.policy"],
+        hard=[*ALL_HARD_RULES_WITHOUT_AUDIO, "audio.policy"],
     )
     result = _run(contract, _piece(_artifact(tmp_path)), tmp_path)
     assert _check(result, "audio.policy").status is CheckStatus.PASS

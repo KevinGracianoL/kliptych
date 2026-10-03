@@ -318,6 +318,7 @@ def test_contract_with_attribution_triggers_pending_review(tmp_path: Path) -> No
         update={
             "platforms": {
                 Platform.TIKTOK: PlatformRules(
+                    audio_rule=AudioRule.OWN_CLIP,
                     attribution=Attribution(type=AttributionType.TAG, value="@creador"),
                     required_mentions=["@marca"],
                     required_hashtags=["#marca"],
@@ -338,6 +339,7 @@ def test_contract_with_link_in_bio_triggers_pending_review(tmp_path: Path) -> No
         update={
             "platforms": {
                 Platform.TIKTOK: PlatformRules(
+                    audio_rule=AudioRule.OWN_CLIP,
                     link_rules=LinkRules(link_in_bio=True),
                     required_mentions=["@marca"],
                     required_hashtags=["#marca"],
