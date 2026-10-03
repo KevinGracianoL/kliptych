@@ -7,11 +7,14 @@
   un vídeo sin `brief.md`. Sin brief no hay nada que extraer, así que no se
   llama al LLM y el contrato se sintetiza en memoria con `vanilla_contract`
   (`brand_safety_required=False`, sin prohibiciones léxicas,
-  `audio_policy=original_audio`). El modo se fuerza a `repost_ugc`, el único
-  camino del orquestador que no selecciona segmentos con el LLM, y no exige
-  `KLIPTYCH_LLM_*`.
-- `campaign_id` sin brief se deriva de `brief_key(url)[:12]`: determinista y
-  sin colisiones entre URLs distintas en el directorio de entrega.
+  `audio_policy=original_audio`). El modo se fuerza a `repost_ugc`, el camino
+  que omite la selección de segmentos con el LLM y solo necesita la URL, y no
+  exige `KLIPTYCH_LLM_*`.
+- `campaign_id` sin brief se deriva de `brief_key(url)[:12]`: es determinista,
+  la misma URL produce siempre el mismo identificador. Es el sha256 de la URL
+  truncado a 12 dígitos hexadecimales, 48 bits, así que dos URLs distintas
+  pueden acabar en el mismo directorio de entrega con probabilidad baja, no con
+  certeza nula.
 - El contrato zero-contract declara solo `artifact.integrity` y
   `artifact.video_stream` en `rules.hard`. No declara reglas de audio: la
   plataforma usa `audio_rule=any`, así que no hay audio que exigir ni que

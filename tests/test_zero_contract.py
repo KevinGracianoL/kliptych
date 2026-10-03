@@ -622,6 +622,9 @@ def test_cli_campaign_manager_still_requires_llm_env_by_default() -> None:
         _ = _build_campaign_manager()
 
 
+_DOWNLOAD_SENTINEL = "SENTINEL_ZEROCONTRACT_DESCARGA"
+
+
 class _DownloadAttemptedError(Exception):
     """Se lanza en lugar de descargar, para detener la corrida sin red."""
 
@@ -704,7 +707,7 @@ def test_zero_contract_runs_no_llm_client(
 
     def _stop_at_download(*args: object, **kwargs: object) -> object:
         _ = (args, kwargs)
-        msg = "descarga"
+        msg = _DOWNLOAD_SENTINEL
         raise _DownloadAttemptedError(msg)
 
     monkeypatch.setattr(
@@ -724,10 +727,12 @@ def test_zero_contract_runs_no_llm_client(
     )
     outcome = manager.process(campaign, mode="long_video", url="https://example.com/v")
 
-    # El sentinel de descarga prueba que el pipeline REAL se ejecuto y llego a
-    # la etapa de descarga: no es un atajo ni un doble de test.
+    # El token prueba que el pipeline REAL llego al downloader: no es un atajo
+    # ni un doble de test. No se busca la palabra "descarga" porque el nombre de
+    # la etapa va embebido en cualquier fallo de descarga, con lo que un
+    # parche que dejara de aplicar pasaria igual haciendo egress real.
     assert outcome.error is not None
-    assert "descarga" in outcome.error, outcome.error
+    assert _DOWNLOAD_SENTINEL in outcome.error, outcome.error
     assert llm_touched == []
 
 
@@ -841,5 +846,61 @@ def test_zero_contract_does_not_warn_about_modes_that_run(mode: str) -> None:
         audio_track_path=None,
         audio_track_url=None,
         mode=mode,
+    )
+    assert _ignored_zero_contract_flags(namespace) == []
+
+
+_IGNORED_FLAG_ATTRS = cast("tuple[tuple[str, str], ...]", _private("_ZERO_CONTRACT_IGNORED_FLAGS"))
+# Se escribe a mano en vez de derivarse de la constante de producción:
+# parametrizar sobre la propia guarda sería circular, porque al quitarle una
+# entrada el caso desaparece en lugar de fallar y la suite sigue en verde.
+_EXPECTED_IGNORED_FLAGS = (
+    ("contract_draft", "--contract-draft"),
+    ("audio_track_path", "--audio-track-path"),
+    ("audio_track_url", "--audio-track-url"),
+)
+
+
+def test_zero_contract_ignored_flags_match_the_documented_set() -> None:
+    """La guarda de flags ignorados es exactamente esta lista.
+
+    Ancla el conjunto de forma independiente del código de producción: sin esta
+    aserción, borrar una entrada de la guarda se reduce el número de casos
+    parametrizados y nada falla, dejando esa puerta sin protección.
+    """
+    assert _IGNORED_FLAG_ATTRS == _EXPECTED_IGNORED_FLAGS
+
+
+@pytest.mark.parametrize(("attribute", "flag"), _EXPECTED_IGNORED_FLAGS)
+def test_zero_contract_warns_about_every_ignored_flag(attribute: str, flag: str) -> None:
+    """Cada flag que el modo zero-contract no puede honrar avisa.
+
+    Antes solo ``--mode`` estaba protegido y dos de las tres puertas no tenían
+    red de seguridad: quitar ``--contract-draft`` de la guarda no rompía nada.
+    """
+    values = {
+        "contract_draft": None,
+        "audio_track_path": None,
+        "audio_track_url": None,
+        "mode": "long_video",
+    }
+    values[attribute] = "valor-de-prueba"
+    assert flag in _ignored_zero_contract_flags(argparse.Namespace(**values))
+
+
+@pytest.mark.parametrize(("attribute", "flag"), _EXPECTED_IGNORED_FLAGS)
+def test_zero_contract_stays_silent_when_no_flag_is_passed(attribute: str, flag: str) -> None:
+    """Sin el flag presente no hay nada que avisar.
+
+    Args:
+        attribute: Nombre del atributo del flag en el namespace.
+        flag: Nombre del flag, para la aserción del mensaje de fallo.
+    """
+    _ = (attribute, flag)
+    namespace = argparse.Namespace(
+        contract_draft=None,
+        audio_track_path=None,
+        audio_track_url=None,
+        mode="long_video",
     )
     assert _ignored_zero_contract_flags(namespace) == []
