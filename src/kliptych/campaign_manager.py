@@ -14,6 +14,7 @@ el primer uso.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
 _MAX_PIECE_ID_LENGTH: int = 64
+_ZERO_CONTRACT_MODE: str = "repost_ugc"
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CampaignManagerError(Exception):
@@ -142,7 +145,7 @@ class CampaignManager:
     def __init__(
         self,
         *,
-        classifier: CampaignClassifier,
+        classifier: CampaignClassifier | None = None,
         proposal_engine: ProposalEngine,
         video_orchestrator: VideoOrchestrator | None = None,
         slideshow_orchestrator: SlideshowOrchestrator | None = None,
@@ -154,7 +157,11 @@ class CampaignManager:
         """Configura el controlador y sus dependencias.
 
         Args:
-            classifier: Clasificador de arquetipos de campaña.
+            classifier: Clasificador de arquetipos de campaña. Opcional porque el
+                modo zero-contract no tiene brief que clasificar y la ruta
+                zero-contract nunca consulta el clasificador, vaya o no exista.
+                Con brief, su ausencia hace que ``process`` falle en cerrado en
+                vez de clasificar sin poder hacerlo.
             proposal_engine: Motor que materializa propuestas de Pull Request.
             video_orchestrator: Motor de video largo y slideshow; opcional.
             slideshow_orchestrator: Motor de slideshow alternativo; opcional.
@@ -163,7 +170,7 @@ class CampaignManager:
             destination: Directorio de destino del paquete de entrega; opcional.
             model: Modelo o backend LLM con soporte chat_json; opcional.
         """
-        self._classifier: CampaignClassifier = classifier
+        self._classifier: CampaignClassifier | None = classifier
         self._proposal_engine: ProposalEngine = proposal_engine
         self._video_orchestrator: VideoOrchestrator | None = video_orchestrator
         self._slideshow_orchestrator: SlideshowOrchestrator | None = slideshow_orchestrator
@@ -234,33 +241,50 @@ class CampaignManager:
                 f"la campaña {campaign.campaign_id} no tiene contrato validado",
                 Archetype.NEW_ARCHETYPE,
             )
-        try:
-            classification = self._classifier.classify(campaign.brief, contract)
-        except Exception as error:
+        if campaign.is_zero_contract:
+            # El orden importa: la ausencia de brief se resuelve antes de
+            # mirar el clasificador, así la garantía de "cero llamadas al LLM"
+            # no depende de cómo se cableó el gestor. Con un brief la
+            # clasificación es obligatoria y sin clasificador se falla cerrado.
+            logger.info(
+                "campaña %s en modo zero-contract: sin brief no se clasifica y se fuerza repost",
+                campaign.campaign_id,
+            )
+            mode = _ZERO_CONTRACT_MODE
+        elif self._classifier is None:
             return _error_outcome(
                 campaign,
-                f"falló la clasificación de la campaña {campaign.campaign_id}: {error}",
+                "la campaña tiene brief pero el gestor no tiene clasificador configurado",
                 Archetype.NEW_ARCHETYPE,
             )
-        if classification.archetype is Archetype.KNOWN:
-            return self._process_known(
-                campaign,
-                mode=mode,
-                url=url,
-                images=images,
-                resume=resume,
-                gate=gate,
-                assets=assets,
-                destination=destination,
-                caption=caption,
-                hashtags=hashtags,
-                platform=platform,
-                approve_manual_review=approve_manual_review,
-                approved_by=approved_by,
-                audio_track_path=audio_track_path,
-                audio_track_url=audio_track_url,
-            )
-        return self._process_proposal(campaign, contract, classification)
+        else:
+            try:
+                classification = self._classifier.classify(campaign.brief, contract)
+            except Exception as error:
+                return _error_outcome(
+                    campaign,
+                    f"falló la clasificación de la campaña {campaign.campaign_id}: {error}",
+                    Archetype.NEW_ARCHETYPE,
+                )
+            if classification.archetype is not Archetype.KNOWN:
+                return self._process_proposal(campaign, contract, classification)
+        return self._process_known(
+            campaign,
+            mode=mode,
+            url=url,
+            images=images,
+            resume=resume,
+            gate=gate,
+            assets=assets,
+            destination=destination,
+            caption=caption,
+            hashtags=hashtags,
+            platform=platform,
+            approve_manual_review=approve_manual_review,
+            approved_by=approved_by,
+            audio_track_path=audio_track_path,
+            audio_track_url=audio_track_url,
+        )
 
     def _process_known(
         self,

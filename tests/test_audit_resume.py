@@ -20,6 +20,7 @@ from kliptych.moments import ChatMessage, Moment, MomentDetector, MomentSource
 from kliptych.orchestrator import (
     LongVideoModel,
     PipelineConfig,
+    PipelineError,
     PipelineResult,
     Reframer,
     SubtitleBurner,
@@ -426,6 +427,57 @@ def test_run_audio_locked_and_repost_full_pipeline(
     assert isinstance(repost_result, PipelineResult)
     assert repost_result.transcript is None
     assert repost_result.final_video.is_file()
+
+
+def test_long_video_without_model_fails_closed_outside_repost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin modelo, la ruta que selecciona segmentos con el LLM falla en cerrado.
+
+    Es el guard de ``_resolve_intelligence_stages``. Se ejerce por la vía
+    pública: ``run_long_video`` con un ``PipelineConfig`` normal, no repost, y
+    ``model=None``. El guard existe porque ``model`` es opcional en la firma
+    (el modo zero-contract lo ejecuta sin backend), así que el fallo tiene que
+    ser un ``PipelineError`` con nombre, no un ``AttributeError`` más abajo.
+    """
+    config, deps, _ = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"source-bytes"))
+    assert config.repost_mode is False
+    with pytest.raises(PipelineError, match="modelo de runtime"):
+        _ = run_long_video(
+            _URL,
+            model=None,
+            config=config,
+            detector=deps.detector,
+            transcriber=deps.transcriber,
+            selector=deps.selector,
+            reframer=deps.reframer,
+            subtitle_renderer=deps.subtitle_renderer,
+        )
+
+
+def test_repost_without_model_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El contrato de A1: repost no necesita modelo y no debe lanzar.
+
+    Es la contraparte positiva del guard anterior y la razón por la que
+    ``model`` es opcional en la firma.
+    """
+    config, deps, _ = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"source-bytes"))
+    repost_config = replace(config, repost_mode=True)
+    result = run_repost(
+        _URL,
+        model=None,
+        config=repost_config,
+        detector=deps.detector,
+        transcriber=deps.transcriber,
+        selector=deps.selector,
+        reframer=deps.reframer,
+        subtitle_renderer=deps.subtitle_renderer,
+    )
+    assert isinstance(result, PipelineResult)
+    assert result.transcript is None
+    assert result.final_video.is_file()
 
 
 def test_resume_invalidates_on_timestamp_range_change(

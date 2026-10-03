@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Sprint A1 — Modo zero-contract:** `campaign --url <URL> --out <DIR>` procesa
+  un vídeo sin `brief.md`. Sin brief no hay nada que extraer, así que no se
+  llama al LLM y el contrato se sintetiza en memoria con `vanilla_contract`
+  (`brand_safety_required=False`, sin prohibiciones léxicas,
+  `audio_policy=original_audio`). El modo se fuerza a `repost_ugc`, el camino
+  que omite la selección de segmentos con el LLM y solo necesita la URL, y no
+  exige `KLIPTYCH_LLM_*`.
+- `campaign_id` sin brief se deriva de `brief_key(url)[:12]`: es determinista,
+  la misma URL produce siempre el mismo identificador. Es el sha256 de la URL
+  truncado a 12 dígitos hexadecimales, 48 bits, así que dos URLs distintas
+  pueden acabar en el mismo directorio de entrega con probabilidad baja, no con
+  certeza nula.
+- El contrato zero-contract declara solo `artifact.integrity` y
+  `artifact.video_stream` en `rules.hard`. No declara reglas de audio: la
+  plataforma usa `audio_rule=any`, así que no hay audio que exigir ni que
+  verificar, y el resolver tampoco lo haría. No están ahí por decoración:
+  `_derive_status` devuelve `passed` sobre cero checks, y sin ellas el gate
+  aprobaría en vacío incluso con el artefacto ausente.
+
+### Changed
+- `Campaign.brief` admite vacío; vacío es la señal del modo zero-contract.
+  `campaign_id` sigue exigiendo valor porque nombra el directorio de entrega.
+- `run_repost` acepta `model` ausente: el modo repost no consulta el modelo.
+- `build_ytdlp_argv` y el clamp de `_even` **no** se listan aquí: entraron en
+  `main` con #52 y no forman parte de este trabajo.
+
 ## [1.1.0] — 2026-09-30
 
 ### Added

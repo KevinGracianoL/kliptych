@@ -140,3 +140,25 @@ def test_run_repost_delegates_to_long_video(
     assert result is sentinel
     assert seen["config"] is config
     assert seen["resume"] is False
+
+
+def test_run_repost_accepts_no_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_repost`` admite la ausencia de modelo: el modo no lo consulta.
+
+    Es lo que permite al modo zero-contract ejecutar el pipeline sin backend
+    LLM configurado. El modelo llega sin tocar a ``run_long_video``, que solo
+    lo usa para la selección de segmentos, y esa etapa no se alcanza en repost.
+    """
+    seen: dict[str, object] = {}
+    sentinel = SimpleNamespace()
+
+    def _fake_run_long_video(url: str, **kwargs: object) -> object:
+        _ = url
+        seen.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(orchestrator_module, "run_long_video", _fake_run_long_video)
+    config = _config(tmp_path, repost_mode=True)
+    result = run_repost(_URL, config=config)
+    assert result is sentinel
+    assert seen["model"] is None

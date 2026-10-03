@@ -61,16 +61,26 @@ def test_campaign_forbids_extra_fields() -> None:
         _ = Campaign.model_validate({"campaign_id": "camp-01", "brief": "brief", "invented": True})
 
 
-@pytest.mark.parametrize(
-    ("field_name", "payload"),
-    [
-        ("campaign_id", {"campaign_id": "", "brief": "brief"}),
-        ("brief", {"campaign_id": "camp-01", "brief": ""}),
-    ],
-)
-def test_campaign_requires_non_empty_text(field_name: str, payload: dict[str, str]) -> None:
-    with pytest.raises(ValidationError, match=field_name):
-        _ = Campaign.model_validate(payload)
+def test_campaign_requires_non_empty_campaign_id() -> None:
+    with pytest.raises(ValidationError, match="campaign_id"):
+        _ = Campaign.model_validate({"campaign_id": "", "brief": "brief"})
+
+
+def test_campaign_allows_empty_brief_for_zero_contract() -> None:
+    """Brief vacío es legal y es la única señal del modo zero-contract.
+
+    El modo zero-contract procesa una ``--url`` sin brief, así que la campaña
+    se construye sin texto; exigirlo impediría ese modo. ``campaign_id``
+    sigue siendo obligatorio porque nombra el directorio de entrega.
+    """
+    campaign = Campaign.model_validate({"campaign_id": "camp-01", "brief": ""})
+    assert not campaign.brief
+    assert campaign.is_zero_contract is True
+
+
+def test_campaign_with_brief_is_not_zero_contract() -> None:
+    campaign = Campaign.model_validate({"campaign_id": "camp-01", "brief": "brief"})
+    assert campaign.is_zero_contract is False
 
 
 @pytest.mark.parametrize(

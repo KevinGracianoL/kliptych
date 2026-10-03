@@ -62,6 +62,7 @@ from kliptych.contract.schema import (
     contract_digest,
     contract_mutes_audio,
     prompt_languages,
+    vanilla_contract,
 )
 
 __all__ = [
@@ -124,4 +125,5 @@ __all__ = [
     "contract_digest",
     "contract_mutes_audio",
     "prompt_languages",
+    "vanilla_contract",
 ]
