@@ -48,6 +48,7 @@ from kliptych.gate import (
     GateStatus,
     Piece,
 )
+from kliptych.gate.engine import rule_applies
 from kliptych.hashing import sha256_bytes
 from kliptych.naming import is_safe_segment
 
@@ -544,6 +545,26 @@ def _rejection_reason(gate_result: GateResult) -> str:
 
 
 def _reminders(contract: Contract) -> tuple[Reminder, ...]:
+    """Construye los recordatorios del informe de entrega.
+
+    Los recordatorios de ``manual_review`` se filtran por plataforma con
+    ``rule_applies``, el MISMO predicado que usa el motor al despachar checks. No
+    es un segundo mecanismo: si aqui se decidiera la aplicabilidad por otra via,
+    el informe podria avisar de revisiones que el gate no pide, o callarlas
+    cuando el gate las exige.
+
+    El alcance es el conjunto de plataformas del CONTRATO, no el de las piezas
+    exportadas: ``DeliveryReport.reminders`` es una lista plana de todo el
+    informe, no una por pieza, asi que no hay forma de suprimir el recordatorio
+    para una plataforma y mantenerlo para otra dentro del mismo informe. Lo que
+    si se suprime es lo que no le aplica a NINGUNA plataforma del contrato.
+
+    Args:
+        contract: Contrato que declara las reglas.
+
+    Returns:
+        Los recordatorios del informe.
+    """
     reminders: list[Reminder] = []
     geo = contract.geo_target
     if geo is not None:
@@ -573,5 +594,6 @@ def _reminders(contract: Contract) -> tuple[Reminder, ...]:
     reminders.extend(
         Reminder(kind="manual_review", detail=f"revisión manual pendiente: {rule_id}")
         for rule_id in contract.rules.manual_review
+        if any(rule_applies(rule_id, rules) for rules in contract.platforms.values())
     )
     return tuple(reminders)

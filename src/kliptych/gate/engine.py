@@ -19,20 +19,28 @@ from kliptych.gate.models import (
 from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_file
 
-# Predicados de aplicabilidad por plataforma, indexados por rule_id.
-# Semilla: audio.present solo aplica a las plataformas que exigen audio.
+# Predicados de aplicabilidad por plataforma, indexados por rule_id. Es la
+# UNICA tabla: la consultan el despacho de checks del motor y los recordatorios
+# del exportador. No debe existir una segunda copia de esta regla en ningun otro
+# sitio.
 _RULE_APPLICABILITY: dict[str, Callable[[PlatformRules], bool]] = {
     "audio.present": lambda rules: rules.audio_rule is not AudioRule.ANY,
+    "audio.own_clip": lambda rules: rules.audio_rule is AudioRule.OWN_CLIP,
+    "audio.no_trending": lambda rules: rules.audio_rule is AudioRule.NO_TRENDING,
+    "audio.official_track": lambda rules: rules.audio_rule is AudioRule.OFFICIAL_REQUIRED,
 }
 
 
-def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
+def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     """Indica si la regla tiene requisitos que verificar en esta plataforma.
 
     Los ``rule_id`` de ``contract.rules`` son globales: una sola declaracion
     cubre todas las plataformas del contrato. Su contenido, en cambio, es por
     plataforma, asi que la misma regla puede tener requisitos en una plataforma
-    y en otra no. Este predicado es el unico lugar donde se decide eso.
+    y en otra no. Este predicado es el unico lugar donde se decide eso, y lo
+    consultan los dos consumidores que dependen de la plataforma: el motor, al
+    decidir si despacha un check, y el exportador, al decidir si avisa de una
+    revision manual pendiente.
 
     Ojo con la distincion que separa las dos situaciones:
 
@@ -44,6 +52,13 @@ def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
       plataforma con ``audio_rule=any``) no tiene nada que evaluar y no debe
       producir ningun outcome: hacerlo emitiria un estado, y un ``UNSUPPORTED``
       por regla dura deja la pieza inexportable sin salida humana.
+
+    Las reglas ``audio.own_clip``, ``audio.no_trending`` y
+    ``audio.official_track`` son ``manual_review`` y no tienen validador
+    mecanico a proposito: ``manual_review`` significa que decide una persona, y
+    eso no se automatiza. No tienen que emitir evidencia mecanica; lo que no
+    pueden es exigir la revision manual de una plataforma que no declaro esa
+    regla de audio.
 
     Generalizar esto a "omitir todo check sin requisitos" seria incorrecto y
     borraria la evidencia de los checks que si deben constancia. Solo se omite
@@ -123,7 +138,7 @@ class Gate:
             El resultado del gate, con un check por regla declarada que aplique
             a la plataforma de la pieza. Una regla declarada globalmente pero
             no aplicable a esta plataforma queda omitida, sin emitir outcome:
-            ver ``_rule_applies`` para el criterio y el motivo.
+            ver ``rule_applies`` para el criterio y el motivo.
 
         Raises:
             GateError: Si la plataforma de la pieza no está en el contrato.
@@ -150,7 +165,7 @@ class Gate:
             outcomes.extend(
                 (strength, self._run_rule(rule_id, strength, context))
                 for rule_id in rule_ids
-                if _rule_applies(rule_id, context.rules)
+                if rule_applies(rule_id, context.rules)
             )
         if contract.unmapped:
             colliding = [

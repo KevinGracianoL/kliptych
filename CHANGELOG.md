@@ -71,6 +71,47 @@
   mismo que una regla no aplicable, y esa distinción está escrita en el motor
   para que nadie la generalice por error.
 - No cambia: `own_clip`, `_derive_status`, el resolver y el exportador.
+- **Las reglas declaradas globalmente solo afectan a las plataformas que las
+  declararon (`#59`, `#57`).** `contract.rules` es global: una sola declaración
+  cubre todas las plataformas del contrato. Lo que describe es por plataforma,
+  y dos consumidores lo leían como si fuera global.
+  - **Qué estaba bloqueado y ahora no:** una plataforma con `audio_rule=any` en
+    una campaña donde otra declara `no_trending` exigía una firma que no había
+    pedido. Medido: esa pieza salía `blocked` sin firma y ahora sale `exported`
+    sin firma, con gate `passed` en vez de `pending_review`.
+  - **Qué NO cambia:** cualquier plataforma que declare la regla sigue
+    exigiendo su firma. Un `FAIL` sigue rechazando, con y sin aprobación. Una
+    regla dura sin validador sigue bloqueando como `unsupported`, también con
+    firma. Verificado con mutaciones: invertir los predicados mata el test de
+    no-regresión, así que el scope no puede degradarse en sobre-aplicación.
+  - **Una sola tabla de aplicabilidad.** El predicado `rule_applies` del motor
+    es la única fuente y ahora cubre también `audio.own_clip`,
+    `audio.no_trending` y `audio.official_track`. El exportador consulta ese
+    MISMO predicado para sus recordatorios; no hay un segundo mecanismo.
+  - **`audio.no_trending` sigue sin validador a propósito.** Es una regla
+    `manual_review`: `manual_review` significa que decide una persona, y eso no
+    se automatiza. No emite evidencia mecánica y **no se le añade un validador**
+    para "arreglarla". Lo que se corrige es que no pueda exigir revisión a una
+    plataforma que no declaró esa regla de audio.
+  - **El motor SINTETIZA un check `manual_review` para una regla
+    `manual_review` sin validador registrado**, en vez de no ejecutar nada. Por
+    eso `PENDING_REVIEW` lo fuerzan **dos** cosas a la vez: la fuerza de la
+    regla y el status del check. Filtrar solo una de las dos no habría arreglado
+    `#59`. Queda escrito para el siguiente.
+  - **Un test de `#58` cambia de significado aquí, a propósito.**
+    `test_audio_rule_is_scoped_per_platform` afirmaba que `audio.no_trending`
+    se emitía para la plataforma con `audio_rule=any`: es decir, documentaba
+    este defecto bajo un nombre de scoping. Ahora afirma que **no** se emite y
+    que el gate queda en `passed`. Es un cambio deliberado, no deriva: la
+    aserción nueva es más fuerte, porque fija la ausencia del outcome. El
+    defecto era del `#58`, donde se aprobó ese test sin preguntar si las reglas
+    `manual_review` globales también tenían aplicabilidad por plataforma.
+  - **Lo que NO se arregla:** `reminders` es plano por informe. Los
+    recordatorios `manual_review` son por plataforma en intención pero planos en
+    forma, así que un contrato mixto sigue mostrando el aviso. Hacerlos por
+    pieza es un cambio de schema de `DeliveryReport`, y queda diferido a la lista
+    de piezas de Studio, que es el primer consumidor real. Es ruido consultivo,
+    no un agujero de cumplimiento: el gate ya es correcto. `#57` sigue abierto.
 - **Se quita una aserción de reloj de pared de la suite de correctitud
   (`#56`).** Tres cosas distintas, que conviene no mezclar:
 

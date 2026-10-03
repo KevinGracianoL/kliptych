@@ -699,9 +699,9 @@ def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
     exige audio. Para la plataforma que declara ``audio_rule=any`` no hay
     requisito que verificar, asi que el motor no debe emitir ningun outcome:
     hacerlo como ``UNSUPPORTED`` dejaria la pieza permanentemente inexportable
-    y sin salida humana, que es peor que el defecto que corrige. La regla
-    ``audio.no_trending`` de tiktok si se aplica, porque es de la plataforma que
-    la exige.
+    y sin salida humana, que es peor que el defecto que corrige. Lo mismo vale
+    para ``audio.no_trending``: es la regla de tiktok, y a instagram_reels no le
+    aplica aunque se declare globalmente.
     """
     draft = make_draft(
         platforms={
@@ -726,9 +726,13 @@ def test_audio_rule_is_scoped_per_platform(tmp_path: Path) -> None:
         piece=make_piece(artifact, caption="libre", platform=Platform.INSTAGRAM_REELS),
         assets=AssetRegistry(tmp_path),
     )
-    assert gate_result.status is GateStatus.PENDING_REVIEW
-    assert "audio.present" not in [check.id for check in gate_result.checks]
-    assert _check(gate_result, "audio.no_trending").status is CheckStatus.MANUAL_REVIEW
+    assert gate_result.status is GateStatus.PASSED
+    emitted = [check.id for check in gate_result.checks]
+    assert "audio.present" not in emitted
+    # Las tres reglas de audio son por plataforma. instagram_reels declara
+    # audio_rule=any, asi que audio.no_trending tampoco le aplica: exigirla su
+    # revision manual era el defecto de #59, no una precaution.
+    assert "audio.no_trending" not in emitted
 
 
 def test_audio_present_is_not_declared_when_no_platform_requires_audio(tmp_path: Path) -> None:
