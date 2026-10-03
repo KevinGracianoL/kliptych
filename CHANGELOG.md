@@ -38,7 +38,7 @@
   no se puede verificar no puede atestiguar que se verificó.
 - **Scoping por plataforma:** los `rule_id` de `contract.rules` son globales,
   pero `audio.present` solo aplica a las plataformas que exigen audio. El motor
-  (`_rule_applies`) omite el check cuando la plataforma de la pieza declara
+  (`rule_applies`) omite el check cuando la plataforma de la pieza declara
   `audio_rule=any`, en vez de emitir un estado.
   - **ANTES de este cambio:** `audio.present` con `audio_rule=any` devolvía
     `PASS` con evidencia `{"audio_rule": "any"}`, una atestestación de que el
@@ -58,7 +58,7 @@
   - Lo que fuerza el `pending_review` es `_derive_status` leyendo
     `RuleStrength.MANUAL_REVIEW` del `contract.rules.manual_review`, que es
     **global**, mientras que las reglas son por plataforma.
-  - El predicado `_rule_applies` de este cambio arregla el **despacho de
+  - El predicado `rule_applies` de este cambio arregla el **despacho de
     checks**; no toca la **agregación de fuerzas**. Mismo defecto, un nivel más
     arriba, y por eso el `any` no queda libre.
   El resultado exportable de esa pieza es el mismo que antes de este cambio: lo
@@ -70,7 +70,8 @@
   `{"required": [], "missing": []}`). Un conjunto de requisitos vacío no es lo
   mismo que una regla no aplicable, y esa distinción está escrita en el motor
   para que nadie la generalice por error.
-- No cambia: `own_clip`, `_derive_status`, el resolver y el exportador.
+- No cambia en el arreglo anterior: `_derive_status`, el resolver y el
+  exportador.
 - **Scoping por plataforma para las reglas de AUDIO (`#59`, `#57`).**
   `contract.rules` es global: una sola declaración cubre todas las plataformas.
   Los requisitos de audio, no. El predicado `rule_applies` del motor es la única
@@ -90,17 +91,21 @@
       situaciones y conviene no mezclarlas:
       - **Regla SIN validador registrado** (`audio.no_trending`): `main` ya la
         despachaba y daba `unsupported`. Aquí igual. Idéntico a `main`.
-      - **Regla CON validador registrado** (`audio.present`): `main` la
-        **omitía en silencio**, daba `passed` y exportaba sin firma. **_base
-        fallaba abierta_.** Aquí se despacha, da `unsupported` y bloquea con y
-        sin firma: **más estricto que `main`**.
+      - **Regla CON validador registrado** (`audio.present` es la única):
+        `main` la **omitía en silencio**, daba `passed` y exportaba sin firma.
+        **_base fallaba abierta_.** Aquí se despacha, da `unsupported` y
+        bloquea con y sin firma: **más estricto que `main**.
+      - `audio.own_clip`, `audio.no_trending` y `audio.official_track` **no
+        tienen validador registrado** (`DEFAULT_VALIDATORS` solo contiene
+        `audio.present`, `audio.policy` y `audio.silence`). Las tres caen en el
+        primer caso: idénticas a `main`.
   - **Por qué el caso C no se "arregla" con un `UNSUPPORTED` fijo:** porque
     `_derive_status` solo escala `UNSUPPORTED` cuando la fuerza es `hard`. Una
     regla `recommended` huérfana con `UNSUPPORTED` fijo pasaría de `rejected` a
-    `passed`, que es un fail-open. Se medió esa variante: **2** de las 12
-    combinaciones quedaban más exportables y **4** menos exportables. El
-    descarte es correcto; la evidencia que lo motivó era unilateral y aquí se
-    dan las dos direcciones.
+    `passed`, que es un fail-open. El descarte es correcto. La medición que lo
+    motivó era unilateral y **no se reproduce aquí**: aquel recuento venía de
+    un banco de pruebas descartado junto con la variante, así que no queda
+    artefacto en el repo que lo respalde y no se cita ninguna cifra.
   - **Caso B, sin un número único.** Cuántas combinaciones se mueven depende de
     la forma del contrato, así que no hay una cifra honesta que valga para
     todas: 7 sobre un contrato construido a mano, 9 y 6 sobre dos formas
