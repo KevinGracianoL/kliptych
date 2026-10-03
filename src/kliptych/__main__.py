@@ -646,7 +646,6 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     out_dir = cast("str", getattr(args, "out", ""))
     dest_path = Path(out_dir) if out_dir else None
     url = cast("str | None", getattr(args, "url", None))
-    mode = cast("str", getattr(args, "mode", "long_video"))
 
     if not brief_path:
         return _cmd_campaign_zero_contract(
@@ -654,7 +653,6 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
             manager=manager,
             destination=dest_path,
             url=url,
-            mode=mode,
         )
 
     try:
@@ -702,13 +700,41 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
     return _handle_campaign_result(_process_campaign(active_manager, campaign, args))
 
 
+_ZERO_CONTRACT_IGNORED_FLAGS = (
+    ("contract_draft", "--contract-draft"),
+    ("audio_track_path", "--audio-track-path"),
+    ("audio_track_url", "--audio-track-url"),
+)
+
+
+def _ignored_zero_contract_flags(args: argparse.Namespace) -> list[str]:
+    """Lista los flags que el modo zero-contract acepta pero no puede honrar.
+
+    Sin brief el contrato se sintetiza, así que ``--contract-draft`` no tiene
+    sobre qué actuar; y el modo efectivo es repost, que no recibe pista de
+    audio externa. Aceptarlos en silencio devolvería exit 0 con una entrega
+    distinta de la pedida, así que se avisa en vez de descartarlos.
+
+    Args:
+        args: Argumentos parseados del subcomando ``campaign``.
+
+    Returns:
+        Los nombres de los flags presentes, en el orden de la constante.
+    """
+    ignored: list[str] = []
+    for attribute, flag in _ZERO_CONTRACT_IGNORED_FLAGS:
+        value = getattr(args, attribute, None)
+        if value not in {None, ""}:
+            ignored.append(flag)
+    return ignored
+
+
 def _cmd_campaign_zero_contract(
     args: argparse.Namespace,
     *,
     manager: _CampaignManagerProtocol | None,
     destination: Path | None,
     url: str | None,
-    mode: str,
 ) -> int:
     """Procesa la campaña sin brief: contrato vainilla y ninguna llamada al LLM.
 
@@ -722,7 +748,6 @@ def _cmd_campaign_zero_contract(
         manager: Manager inyectado, si la prueba lo provee.
         destination: Directorio de salida resuelto de ``--out``.
         url: URL del vídeo fuente.
-        mode: Modo pedido; el gestor lo fuerza a repost por ser zero-contract.
 
     Returns:
         ``0`` si la campaña se procesó, ``1`` si falta la URL o falla la config.
@@ -730,13 +755,18 @@ def _cmd_campaign_zero_contract(
     if url is None or not url.strip():
         logger.error("Se requiere --url cuando no se pasa la ruta del brief")
         return 1
+    ignored = _ignored_zero_contract_flags(args)
+    if ignored:
+        logger.warning(
+            "el modo zero-contract ignora %s: sin brief no hay contrato que sobreescribir",
+            ", ".join(ignored),
+        )
     campaign_id = brief_key(url.strip())[:12]
     logger.info(
-        "Modo zero-contract: sin brief, contrato vainilla para la campaña %s (modo %s)",
+        "Modo zero-contract: contrato vainilla para la campaña %s, modo efectivo repost_ugc",
         campaign_id,
-        mode,
     )
-    logger.info("Directorio de salida: %s", destination or "")
+    logger.info("Directorio de salida: %s", destination if destination is not None else "")
     campaign = Campaign(
         campaign_id=campaign_id,
         brief="",

@@ -648,7 +648,7 @@ def _validate_audio_combination(config: PipelineConfig) -> None:
 def run_long_video(
     url: str,
     *,
-    model: LongVideoModel,
+    model: LongVideoModel | None = None,
     config: PipelineConfig,
     detector: MomentDetector | None = None,
     transcriber: Transcriber | None = None,
@@ -1655,7 +1655,7 @@ def _resolve_selection_stage(
 def _resolve_intelligence_stages(
     source: Path,
     *,
-    model: LongVideoModel,
+    model: LongVideoModel | None,
     config: PipelineConfig,
     dependencies: _Dependencies,
     state: PipelineStateManager,
@@ -1663,6 +1663,11 @@ def _resolve_intelligence_stages(
 ) -> tuple[Transcript | None, tuple[Moment, ...], SegmentSelection]:
     if config.repost_mode:
         return None, (), _full_video_selection(source, render=config.render)
+    if model is None:
+        # El modo repost devuelve antes de necesitar el modelo; cualquier otro
+        # modo selecciona segmentos con el LLM y no admite la ausencia.
+        msg = "la selección de segmentos fuera del modo repost exige un modelo de runtime"
+        raise PipelineError(msg)
     transcript = _resolve_transcript_stage(
         source,
         config=config,
@@ -2101,7 +2106,7 @@ def _render_all_segments(
 def _run_stages(
     url: str,
     *,
-    model: LongVideoModel,
+    model: LongVideoModel | None,
     config: PipelineConfig,
     dependencies: _Dependencies,
     registry: _CleanupRegistry,

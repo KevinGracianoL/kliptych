@@ -239,8 +239,7 @@ class CampaignManager:
             )
         if campaign.is_zero_contract:
             logger.info(
-                "campaña %s en modo zero-contract: sin brief no se clasifica y se "
-                "fuerza repost, el único modo que no llama al LLM",
+                "campaña %s en modo zero-contract: sin brief no se clasifica y se fuerza repost",
                 campaign.campaign_id,
             )
             mode = _ZERO_CONTRACT_MODE

@@ -591,6 +591,11 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 _ZERO_CONTRACT_AV_RULES = (
     "artifact.integrity",
     "artifact.video_stream",
+    # Declarada por completitud del catálogo, no porque verifique algo:
+    # ``check_audio_present`` aprueba de inmediato con ``audio_rule='any'``, que
+    # es el único valor que no activa una regla de audio sin validador
+    # registrado. Su evidencia en el gate.json dice ``{"audio_rule": "any"}``,
+    # no que haya audio.
     "audio.present",
 )
 _ZERO_CONTRACT_LANGUAGE = "es"
@@ -631,8 +636,10 @@ def vanilla_contract(
         Un ``Contract`` válido, sin reglas de campaña.
 
     Raises:
-        ValueError: Si ``campaign_id`` está vacío o no es un segmento seguro,
-            o si ``language`` no cumple el patrón de locale del schema.
+        ValueError: Si ``campaign_id`` está vacío. El schema no valida que sea
+            un segmento de ruta seguro ni que ``language`` sea un locale: el
+            llamador de la CLI deriva el identificador de un hash, así que
+            ninguno de los dos valores alcanza una ruta.
     """
     if not campaign_id:
         msg = "vanilla_contract exige un campaign_id no vacío"

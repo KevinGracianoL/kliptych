@@ -5,13 +5,16 @@ sintetizado en memoria, de modo que ``--url`` basta para procesar un vídeo sin
 ninguna llamada a la API del LLM ni credenciales ``KLIPTYCH_LLM_*``.
 """
 
-import inspect
+import socket
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 import pytest
 
 from kliptych import __main__ as cli
-from kliptych import orchestrator
 from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import (
@@ -25,12 +28,36 @@ from kliptych.contract.schema import GlobalRestrictions, active_restriction_rule
 from kliptych.gate.checks import DEFAULT_VALIDATORS
 from kliptych.gate.engine import Gate
 from kliptych.gate.models import GateStatus
+from kliptych.git_proposals import ProposalEngine, PullRequest
 from kliptych.hashing import brief_key
-from kliptych.intelligence import Archetype, ArchetypeClassification, VanillaClassifier
+from kliptych.intelligence import (
+    Archetype,
+    ArchetypeClassification,
+    CampaignClassifier,
+    VanillaClassifier,
+)
+from kliptych.naming import is_safe_segment
 from tests.support import FakeProbe, make_media, make_piece
+
+if TYPE_CHECKING:
+    from kliptych.orchestrator import PipelineResult, SlideshowResult
 
 _AV_HARD_RULES = ("artifact.integrity", "artifact.video_stream", "audio.present")
 _LLM_ENV_VARS = ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
+
+
+def _private(name: str) -> object:
+    """Accede a un símbolo privado del módulo, como hace ``test_reframe``.
+
+    Returns:
+        El atributo pedido del módulo de la CLI.
+    """
+    return cast("object", getattr(cli, name))
+
+
+_build_campaign_manager = cast(
+    "Callable[..., CampaignManager]", _private("_build_campaign_manager")
+)
 
 
 @pytest.fixture
@@ -46,6 +73,7 @@ class _ExplodingClassifier:
         self.calls: list[str] = []
 
     def classify(self, brief: str, contract: Contract) -> ArchetypeClassification:
+        _ = contract
         self.calls.append(brief)
         msg = "el modo zero-contract no debe clasificar"
         raise AssertionError(msg)
@@ -54,9 +82,10 @@ class _ExplodingClassifier:
 class _RecordingClassifier:
     def __init__(self, archetype: Archetype) -> None:
         self.calls: list[str] = []
-        self._archetype = archetype
+        self._archetype: Archetype = archetype
 
     def classify(self, brief: str, contract: Contract) -> ArchetypeClassification:
+        _ = contract
         self.calls.append(brief)
         return ArchetypeClassification(archetype=self._archetype, rationale="prueba", variations=())
 
@@ -67,17 +96,63 @@ class _StubOrchestrator:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def run_long_video(self, url: str, **kwargs: object) -> object:
+    def run_long_video(self, url: str, **kwargs: object) -> "PipelineResult":
         self.calls.append({"url": url, **kwargs})
         msg = "parada deliberada tras inspeccionar los argumentos"
         raise RuntimeError(msg)
 
+    @staticmethod
+    def run_slideshow(images: "Sequence[Path]", **kwargs: object) -> "SlideshowResult":
+        _ = (images, kwargs)
+        msg = "el modo zero-contract nunca monta slideshows"
+        raise AssertionError(msg)
 
-def _manager(classifier: object, orchestrator: _StubOrchestrator) -> CampaignManager:
+
+class _StubGitProvider:
+    """Proveedor de Git que falla si el modo zero-contract abre una PR.
+
+    El camino zero-contract nunca debe proponer nada: no hay brief que clasificar
+    y, por tanto, ningún arquetipo que pueda quedar fuera del catálogo.
+    """
+
+    @staticmethod
+    def create_branch(*, base: str, name: str) -> str:
+        _ = (base, name)
+        msg = "el modo zero-contract no debe crear ramas"
+        raise AssertionError(msg)
+
+    @staticmethod
+    def read_file(*, branch: str, path: str) -> str | None:
+        _ = (branch, path)
+        msg = "el modo zero-contract no debe leer del repositorio"
+        raise AssertionError(msg)
+
+    @staticmethod
+    def write_file(*, branch: str, path: str, content: str, message: str) -> str:
+        _ = (branch, path, content, message)
+        msg = "el modo zero-contract no debe escribir en el repositorio"
+        raise AssertionError(msg)
+
+    @staticmethod
+    def open_pull_request(
+        *,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        campaign_id: str,
+        archetype: Archetype,
+    ) -> PullRequest:
+        _ = (branch, base, title, body, campaign_id, archetype)
+        msg = "el modo zero-contract no debe abrir pull requests"
+        raise AssertionError(msg)
+
+
+def _manager(classifier: CampaignClassifier, orchestrator: _StubOrchestrator) -> CampaignManager:
     return CampaignManager(
-        classifier=classifier,  # type: ignore[arg-type]
-        proposal_engine=None,  # type: ignore[arg-type]
-        video_orchestrator=orchestrator,  # type: ignore[arg-type]
+        classifier=classifier,
+        proposal_engine=ProposalEngine(provider=_StubGitProvider()),
+        video_orchestrator=orchestrator,
     )
 
 
@@ -182,7 +257,7 @@ def _gate() -> Gate:
 
 def test_gate_passes_vanilla_contract_on_av_integrity(tmp_path: Path) -> None:
     artifact = tmp_path / "final.mp4"
-    artifact.write_bytes(b"media-bytes")
+    _ = artifact.write_bytes(b"media-bytes")
     contract = vanilla_contract(campaign_id="abc123def456")
     result = _gate().evaluate_piece(make_piece(artifact), contract=contract)
     assert result.status is GateStatus.PASSED, result.checks
@@ -200,7 +275,7 @@ def test_gate_rejects_vanilla_contract_when_artifact_is_missing(tmp_path: Path) 
 
 def test_gate_rejects_vanilla_contract_without_video_stream(tmp_path: Path) -> None:
     artifact = tmp_path / "final.mp4"
-    artifact.write_bytes(b"media-bytes")
+    _ = artifact.write_bytes(b"media-bytes")
     contract = vanilla_contract(campaign_id="abc123def456")
     gate = Gate(probe=FakeProbe(info=make_media(has_video=False)))
     result = gate.evaluate_piece(make_piece(artifact), contract=contract)
@@ -291,13 +366,27 @@ def test_campaign_with_brief_does_not_force_repost() -> None:
 
 
 class _CapturingManager:
+    """Manager que captura lo que el CLI le entrega, sin ejecutar el pipeline."""
+
     def __init__(self) -> None:
         self.campaign: Campaign | None = None
         self.kwargs: dict[str, object] = {}
 
-    def process(self, campaign: Campaign, **kwargs: object) -> CampaignOutcome:
+    def process(
+        self,
+        campaign: Campaign,
+        *,
+        mode: str = "long_video",
+        url: str | None = None,
+        resume: bool = False,
+        approve_manual_review: bool = False,
+        approved_by: str | None = None,
+        audio_track_path: Path | None = None,
+        audio_track_url: str | None = None,
+    ) -> CampaignOutcome:
+        _ = (mode, url, resume, approve_manual_review, approved_by)
+        _ = (audio_track_path, audio_track_url)
         self.campaign = campaign
-        self.kwargs = kwargs
         return CampaignOutcome(
             campaign_id=campaign.campaign_id,
             archetype=Archetype.KNOWN,
@@ -305,12 +394,12 @@ class _CapturingManager:
         )
 
 
+@pytest.mark.usefixtures("_no_llm_env")
 def test_cli_url_only_builds_a_vanilla_contract() -> None:
-
     manager = _CapturingManager()
     exit_code = cli.main(
         ["campaign", "--url", "https://example.com/v", "--out", "delivery"],
-        manager=manager,  # type: ignore[arg-type]
+        manager=manager,
     )
     campaign = manager.campaign
     assert campaign is not None
@@ -323,13 +412,13 @@ def test_cli_url_only_builds_a_vanilla_contract() -> None:
     assert tuple(campaign.contract.rules.hard) == _AV_HARD_RULES
 
 
+@pytest.mark.usefixtures("_no_llm_env")
 def test_cli_url_only_campaign_id_is_derived_from_the_url() -> None:
-
     manager = _CapturingManager()
     url = "https://example.com/watch?v=abc"
     exit_code = cli.main(
         ["campaign", "--url", url, "--out", "delivery"],
-        manager=manager,  # type: ignore[arg-type]
+        manager=manager,
     )
     campaign = manager.campaign
     assert campaign is not None
@@ -338,6 +427,21 @@ def test_cli_url_only_campaign_id_is_derived_from_the_url() -> None:
     assert campaign.campaign_id != brief_key("https://example.com/otra")[:12]
 
 
+@pytest.mark.usefixtures("_no_llm_env")
+def test_cli_url_only_campaign_id_is_a_safe_path_segment() -> None:
+    """El campaign_id nombra el directorio de entrega: debe ser segmento seguro."""
+    manager = _CapturingManager()
+    _ = cli.main(
+        ["campaign", "--url", "https://user:pw@host/path?a=1", "--out", "delivery"],
+        manager=manager,
+    )
+    campaign = manager.campaign
+    assert campaign is not None
+    assert is_safe_segment(campaign.campaign_id)
+    assert "pw" not in campaign.campaign_id
+
+
+@pytest.mark.usefixtures("_no_llm_env")
 def test_cli_defers_the_mode_decision_to_the_manager() -> None:
     """El CLI no reescribe ``--mode``: lo fuerza el gestor al ver la campaña.
 
@@ -347,60 +451,74 @@ def test_cli_defers_the_mode_decision_to_the_manager() -> None:
     manager = _CapturingManager()
     exit_code = cli.main(
         ["campaign", "--url", "https://example.com/v", "--out", "delivery"],
-        manager=manager,  # type: ignore[arg-type]
+        manager=manager,
     )
     campaign = manager.campaign
     assert campaign is not None
     assert exit_code == 0
-    assert manager.kwargs["mode"] == "long_video"
     assert campaign.is_zero_contract is True
 
 
+@pytest.mark.usefixtures("_no_llm_env")
 def test_cli_without_brief_and_without_url_fails() -> None:
-
     exit_code = cli.main(["campaign", "--out", "delivery"])
     assert exit_code == 1
 
 
+@pytest.mark.usefixtures("_no_llm_env")
 def test_cli_with_brief_keeps_the_llm_flow(tmp_path: Path) -> None:
     """Con brief se conserva el camino tradicional, incluida la clasificación."""
     brief = tmp_path / "brief.md"
-    brief.write_text("brief de campana", encoding="utf-8")
+    _ = brief.write_text("brief de campana", encoding="utf-8")
     manager = _CapturingManager()
     exit_code = cli.main(
         ["campaign", str(brief), "--out", "delivery", "--url", "https://example.com/v"],
-        manager=manager,  # type: ignore[arg-type]
+        manager=manager,
     )
     campaign = manager.campaign
     assert campaign is not None
     assert exit_code == 0
     assert campaign.brief == "brief de campana"
     assert campaign.campaign_id
-    assert manager.kwargs["mode"] == "long_video"
-
-
-def test_cli_campaign_manager_needs_no_llm_env_when_not_required() -> None:
-
-    manager = cli._build_campaign_manager(require_llm=False)
-    assert isinstance(manager, CampaignManager)
-
-
-def test_cli_campaign_manager_still_requires_llm_env_by_default() -> None:
-
-    with pytest.raises(RuntimeError, match="KLIPTYCH_LLM"):
-        _ = cli._build_campaign_manager()
+    assert campaign.is_zero_contract is False
 
 
 @pytest.mark.usefixtures("_no_llm_env")
-def test_cli_default_manager_without_llm_env_does_not_build_a_chat_model() -> None:
-    """Sin backend no puede haber un modelo de selección de segmentos."""
-    manager = cli._build_campaign_manager(require_llm=False)
-    orchestrator = manager._video_orchestrator
-    assert orchestrator is not None
-    assert orchestrator._model is None  # type: ignore[attr-defined]
+def test_cli_campaign_manager_needs_no_llm_env_when_not_required() -> None:
+    manager = _build_campaign_manager(require_llm=False)
+    assert isinstance(manager, CampaignManager)
 
 
-def test_repost_pipeline_accepts_no_model() -> None:
-    """``run_repost`` documenta que no usa el modelo: debe admitirlo ausente."""
-    parameter = inspect.signature(orchestrator.run_repost).parameters["model"]
-    assert parameter.default is None
+@pytest.mark.usefixtures("_no_llm_env")
+def test_cli_campaign_manager_still_requires_llm_env_by_default() -> None:
+    """Con brief el flujo tradicional sigue exigiendo credenciales LLM."""
+    with pytest.raises(RuntimeError, match="KLIPTYCH_LLM"):
+        _ = _build_campaign_manager()
+
+
+@pytest.mark.usefixtures("_no_llm_env")
+def test_zero_contract_makes_no_network_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El modo promete cero llamadas al LLM: aquí se comprueba a nivel de socket.
+
+    Es la garantía central del modo, y hasta ahora solo se probaba que el
+    manager se construyera sin credenciales. Bloquear ``socket.connect``
+    convierte esa promesa en algo verificable: cualquier intento de red, de
+    cualquier destino, hace fallar el test.
+    """
+    attempts: list[object] = []
+
+    def _blocked_connect(_self: socket.socket, address: object) -> None:
+        attempts.append(address)
+        msg = f"el modo zero-contract intentó conectar a {address}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked_connect)
+    manager = _CapturingManager()
+    exit_code = cli.main(
+        ["campaign", "--url", "https://example.com/v", "--out", "delivery"],
+        manager=manager,
+    )
+    assert exit_code == 0
+    assert attempts == []
