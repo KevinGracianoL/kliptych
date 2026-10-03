@@ -36,7 +36,6 @@ from kliptych.intelligence import (
     Archetype,
     CampaignClassifier,
     LLMCampaignClassifier,
-    VanillaClassifier,
 )
 from kliptych.logging_setup import setup_logging
 from kliptych.pipeline import PipelineError, RunOutcome, RunRequest, RunResult, run_given_clips
@@ -981,7 +980,7 @@ def _make_default_campaign_manager(
         RuntimeError: Si ``require_llm`` y falta alguna variable ``KLIPTYCH_LLM_*``.
     """
     source = os.environ
-    classifier: CampaignClassifier
+    classifier: CampaignClassifier | None
     backend: OpenAIChatModel | None
     if require_llm:
         missing = [
@@ -1003,7 +1002,7 @@ def _make_default_campaign_manager(
             model=source["KLIPTYCH_LLM_MODEL"],
         )
     else:
-        classifier = VanillaClassifier()
+        classifier = None
         backend = None
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)

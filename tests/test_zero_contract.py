@@ -34,7 +34,6 @@ from kliptych.intelligence import (
     Archetype,
     ArchetypeClassification,
     CampaignClassifier,
-    VanillaClassifier,
 )
 from kliptych.naming import is_safe_segment
 from tests.support import FakeProbe, make_media, make_piece
@@ -148,7 +147,10 @@ class _StubGitProvider:
         raise AssertionError(msg)
 
 
-def _manager(classifier: CampaignClassifier, orchestrator: _StubOrchestrator) -> CampaignManager:
+def _manager(
+    classifier: CampaignClassifier | None,
+    orchestrator: _StubOrchestrator,
+) -> CampaignManager:
     return CampaignManager(
         classifier=classifier,
         proposal_engine=ProposalEngine(provider=_StubGitProvider()),
@@ -167,11 +169,16 @@ def _zero_contract_campaign() -> Campaign:
 # --- Contrato vainilla -------------------------------------------------------
 
 
-def test_vanilla_contract_declares_only_av_integrity() -> None:
-    """Exactamente las dos reglas de integridad A/V, y nada más.
+def test_vanilla_contract_declares_only_artifact_rules() -> None:
+    """Exactamente las dos reglas de integridad del artefacto, y nada más.
 
     ``artifact.integrity`` verifica que el artefacto exista y sea legible;
-    ``artifact.video_stream`` que tenga flujo de video. No hay una tercera.
+    ``artifact.video_stream`` que tenga flujo de video.
+
+    No hay regla de audio: la plataforma usa ``PlatformRules()``, cuyo
+    ``audio_rule`` es ``ANY``, y el resolver solo añade ``audio.present``
+    cuando alguna plataforma exige audio (``resolver.py:1782``). Declararla
+    aquí sería una aserción que el gate no puede sostener.
     """
     contract = vanilla_contract(campaign_id="abc123def456")
     assert tuple(contract.rules.hard) == _AV_HARD_RULES
@@ -279,7 +286,14 @@ def _gate() -> Gate:
     return Gate(probe=FakeProbe(info=make_media()))
 
 
-def test_gate_passes_vanilla_contract_on_av_integrity(tmp_path: Path) -> None:
+def test_gate_passes_vanilla_contract_on_artifact_rules(tmp_path: Path) -> None:
+    """El gate aprueba exactamente las dos reglas de artefacto, sin audio.
+
+    ``artifact.integrity`` y ``artifact.video_stream`` cubren la integridad
+    estándar del A/V: el artefacto existe, es legible y tiene video. No se
+    comprueba la presencia de audio porque no hay regla que la exija
+    (``audio_rule=ANY`` no activa ninguna, según ``resolver.py:1782``).
+    """
     artifact = tmp_path / "final.mp4"
     _ = artifact.write_bytes(b"media-bytes")
     contract = vanilla_contract(campaign_id="abc123def456")
@@ -336,12 +350,43 @@ def test_vanilla_contract_cannot_pass_without_a_video_stream(tmp_path: Path) -> 
 # --- Clasificador y enrutado -------------------------------------------------
 
 
-def test_vanilla_classifier_reports_known_without_a_model() -> None:
-    contract = vanilla_contract(campaign_id="abc123def456")
-    classification = VanillaClassifier().classify("brief", contract)
-    assert classification.archetype is Archetype.KNOWN
-    assert classification.variations == ()
-    assert classification.rationale
+def test_zero_contract_runs_with_no_classifier_configured() -> None:
+    """La ausencia de clasificador es una configuración legítima, no un descuido.
+
+    El modo zero-contract no tiene brief que clasificar, así que el gestor se
+    construye sin clasificador. Antes esto no era posible: ``classifier`` era
+    obligatorio y la CLI cableaba un ``VanillaClassifier`` que la ruta
+    zero-contract nunca llamaba, porque el gestor cortocircuitaba antes.
+    """
+    orchestrator = _StubOrchestrator()
+    outcome = _manager(None, orchestrator).process(
+        _zero_contract_campaign(), mode="long_video", url="https://example.com/v"
+    )
+    assert outcome.error is not None
+    assert "parada deliberada" in outcome.error
+    assert orchestrator.calls[0]["repost_mode"] is True
+
+
+def test_campaign_with_brief_and_no_classifier_fails_closed() -> None:
+    """Con brief y sin clasificador el gestor falla en cerrado, con un motivo.
+
+    Sin este contrato, un clasificador ausente seIeakaba como
+    ``'NoneType' object has no attribute 'classify'`` envuelto en el
+    ``except Exception`` genérico: un error que no dice qué falta ni por qué.
+    """
+    orchestrator = _StubOrchestrator()
+    campaign = Campaign(
+        campaign_id="abc123def456",
+        brief="brief real",
+        contract=vanilla_contract(campaign_id="abc123def456"),
+    )
+    outcome = _manager(None, orchestrator).process(
+        campaign, mode="repost", url="https://example.com/v"
+    )
+    assert outcome.error is not None
+    assert "clasificador" in outcome.error
+    assert "NoneType" not in outcome.error
+    assert orchestrator.calls == []
 
 
 def test_zero_contract_skips_the_classifier() -> None:
