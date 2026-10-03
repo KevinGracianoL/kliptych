@@ -7,6 +7,8 @@ import pytest
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Platform, contract_digest
+from kliptych.contract.enums import AudioRule
+from kliptych.contract.schema import PlatformRules
 from kliptych.gate import (
     DEFAULT_VALIDATORS,
     CheckOutcome,
@@ -19,7 +21,14 @@ from kliptych.gate import (
     GateStatus,
     ProbeError,
 )
-from tests.support import ALL_HARD_RULES, FakeProbe, make_contract, make_media, make_piece
+from tests.support import (
+    ALL_HARD_RULES,
+    FakeProbe,
+    make_contract,
+    make_media,
+    make_piece,
+    with_platform,
+)
 
 
 def _artifact(tmp_path: Path) -> Path:
@@ -44,14 +53,19 @@ def _always_manual_review(_context: GateContext) -> CheckOutcome:
 
 def test_all_checks_pass_yields_passed(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
+    contract = make_contract(audio_rule="any")
     result = _gate().run(
-        contract=make_contract(audio_rule="any"),
+        contract=contract,
         piece=make_piece(artifact),
         assets=AssetRegistry(tmp_path),
     )
     assert result.status is GateStatus.PASSED
     assert result.passed is True
-    assert [check.id for check in result.checks] == list(ALL_HARD_RULES)
+    # Se contrasta contra las reglas que el contrato declara de verdad, no
+    # contra ALL_HARD_RULES: con audio_rule="any" el resolver no declara
+    # audio.present, asi que el fixture tampoco, y afirmar el conjunto completo
+    # seria exigir una regla que un contrato real no lleva.
+    assert [check.id for check in result.checks] == list(contract.rules.hard)
     assert all(check.status is CheckStatus.PASS for check in result.checks)
     assert result.artifact_sha256 == sha256(b"video").hexdigest()
     expected_contract_hash = contract_digest(make_contract(audio_rule="any"))
@@ -173,3 +187,60 @@ def test_gate_result_round_trips_through_json(tmp_path: Path) -> None:
     )
     restored = GateResult.model_validate_json(result.model_dump_json())
     assert restored == result
+
+
+def test_audio_present_runs_for_every_platform_that_requires_audio(tmp_path: Path) -> None:
+    """Con dos plataformas que exigen audio, el check se emite para las dos.
+
+    ``own_clip`` se verifica de verdad con ``has_audio``; ``no_trending`` no se
+    puede verificar y para en MANUAL_REVIEW. El scoping solo omite cuando la
+    plataforma no declara requisitos.
+    """
+    artifact = _artifact(tmp_path)
+    contract = with_platform(
+        make_contract(audio_rule="no_trending", manual_review=("audio.own_clip",)),
+        Platform.INSTAGRAM_REELS,
+        PlatformRules(audio_rule=AudioRule.OWN_CLIP),
+    )
+    gate = Gate(FakeProbe(info=make_media(has_audio=True)))
+
+    tiktok = gate.run(
+        contract=contract,
+        piece=make_piece(artifact),
+        assets=AssetRegistry(tmp_path),
+    )
+    reels = gate.run(
+        contract=contract,
+        piece=make_piece(artifact, platform=Platform.INSTAGRAM_REELS),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    assert _check(tiktok, "audio.present").status is CheckStatus.MANUAL_REVIEW
+    assert _check(reels, "audio.present").status is CheckStatus.PASS
+    assert _check(reels, "audio.present").evidence == {"has_audio": True}
+
+
+def test_empty_requirement_set_keeps_emitting_its_evidence(tmp_path: Path) -> None:
+    """Un conjunto de requisitos VACIO no es una regla no aplicable.
+
+    ``caption.required_mention`` se declara global porque tiktok exige @marca,
+    pero instagram no exige ninguna. El check debe seguir ejecutandose en
+    instagram y dejar constancia de que se evaluo. Si el motor empieza a omitir
+    reglas con requisitos vacios, esta evidencia desaparece y con ella la
+    prueba de que la regla se considero.
+    """
+    artifact = _artifact(tmp_path)
+    contract = with_platform(
+        make_contract(hard=["caption.required_mention"]),
+        Platform.INSTAGRAM_REELS,
+        PlatformRules(),
+    )
+    result = _gate().run(
+        contract=contract,
+        piece=make_piece(artifact, caption="sin menciones", platform=Platform.INSTAGRAM_REELS),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    check = _check(result, "caption.required_mention")
+    assert check.status is CheckStatus.PASS
+    assert check.evidence == {"required": [], "missing": []}

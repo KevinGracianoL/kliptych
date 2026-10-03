@@ -2,27 +2,112 @@
 
 import json
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from kliptych.assets import AssetRegistry
-from kliptych.contract import KNOWN_VALIDATOR_RULES, Contract
+from kliptych.contract import KNOWN_VALIDATOR_RULES, Contract, Platform
+from kliptych.contract.enums import AudioRule
 from kliptych.gate import (
     CheckResult,
     CheckStatus,
     Gate,
+    GateContext,
     GateResult,
     GateStatus,
     MediaInfo,
     Piece,
 )
-from kliptych.gate.checks import DEFAULT_VALIDATORS
-from tests.support import FakeProbe, make_asset_ref, make_contract, make_media, make_piece
+from kliptych.gate.checks import DEFAULT_VALIDATORS, check_audio_present
+from tests.support import (
+    ALL_HARD_RULES,
+    ALL_HARD_RULES_WITHOUT_AUDIO,
+    FakeProbe,
+    make_asset_ref,
+    make_contract,
+    make_media,
+    make_piece,
+)
+
+
+def _hand_declared_audio_contract(audio_rule: str) -> Contract:
+    """Construye un contrato que declara ``audio.present`` a mano.
+
+    ``make_contract`` ya no hace esa combinacion cuando ``audio_rule`` es
+    ``any``, porque el resolver no la produce nunca. Este helper existe para
+    fijar que hace el check si alguien lo invoca igualmente, que es justo el
+    caso que tiene que ser ``UNSUPPORTED`` en vez de un ``PASS`` sin comprobar.
+    El motor ya no llega aqui por su cuenta: omite ``audio.present`` para una
+    plataforma con ``any`` (ver ``_rule_applies``).
+
+    Args:
+        audio_rule: Valor de ``audio_rule`` de la plataforma.
+
+    Returns:
+        Un contrato valido con ``audio.present`` en reglas duras.
+    """
+    base = make_contract(audio_rule=audio_rule)
+    payload = base.model_dump(mode="json")
+    payload["rules"]["hard"] = [*payload["rules"]["hard"], "audio.present"]
+    return Contract.model_validate(payload)
 
 
 def _artifact(tmp_path: Path, content: bytes = b"video") -> Path:
     path = tmp_path / "piece.mp4"
     _ = path.write_bytes(content)
     return path
+
+
+def test_make_contract_rejects_hand_declared_audio_rule_with_any() -> None:
+    """Un ``hard`` explicito incoherente falla en vez de repararse en silencio.
+
+    Este es el contrato del fixture: si el llamador pide ``audio.present`` y a la
+    vez ``audio_rule="any"``, esa combinacion no la produce el resolver, asi que
+    el fixture dice que no en vez de quietly quitar la regla y devolver un
+    contrato distinto del pedido. Un fixture que repara su entrada hace que
+    cada test construido encima afirme algo que nadie pidio.
+    """
+    with pytest.raises(ValueError, match=r"audio_rule='any'.*audio\.present"):
+        _ = make_contract(audio_rule="any", hard=[*ALL_HARD_RULES])
+
+
+def test_make_contract_accepts_explicit_hard_without_audio_rule() -> None:
+    """El inverso exacto: el mismo ``hard`` sin ``audio.present`` si se acepta.
+
+    Comprueba que el raise discrimina la incoherencia y no simply la presencia
+    de ``audio_rule="any"``, que es una combinacion legitima y frecuente.
+    """
+    contract = make_contract(audio_rule="any", hard=[*ALL_HARD_RULES_WITHOUT_AUDIO])
+
+    assert "audio.present" not in contract.rules.hard
+
+
+def test_make_contract_default_hard_with_any_is_not_an_error() -> None:
+    """``hard=None`` con ``audio_rule="any"`` es legitimo: es el default.
+
+    El conjunto por defecto si depende de ``audio_rule``, porque el resolver
+    tambien depende de el. Eso es una definicion de default, no una reparacion:
+    lo que nunca se toca es un ``hard`` explicito.
+    """
+    contract = make_contract(audio_rule="any")
+
+    assert "audio.present" not in contract.rules.hard
+    assert make_contract().rules.hard != contract.rules.hard
+
+
+def test_hand_declared_audio_contract_is_the_documented_way_in() -> None:
+    """La salida que el error senala existe y construye el contrato.
+
+    El mensaje del ``ValueError`` apunta a este helper, asi que si el helper
+    dejara de funcionar el mensaje estaria mandando a nadie a un sitio que no
+    existe.
+    """
+    contract = _hand_declared_audio_contract("any")
+
+    assert "audio.present" in contract.rules.hard
+    assert contract.platforms[Platform.TIKTOK].audio_rule is AudioRule.ANY
 
 
 def _result(
@@ -197,15 +282,6 @@ def test_missing_audio_track_fails(tmp_path: Path) -> None:
     assert _check(result, "audio.present").status is CheckStatus.FAIL
 
 
-def test_audio_not_required_when_platform_rule_is_any(tmp_path: Path) -> None:
-    contract = make_contract(hard=["audio.present"], audio_rule="any")
-    media = make_media(has_audio=False)
-    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
-    check = _check(result, "audio.present")
-    assert check.status is CheckStatus.PASS
-    assert check.evidence == {"audio_rule": "any"}
-
-
 def test_video_stream_required_for_video_format(tmp_path: Path) -> None:
     contract = make_contract(hard=["artifact.video_stream"])
     media = make_media(has_video=False)
@@ -349,3 +425,126 @@ def test_full_video_watermark_without_png_is_fail_closed(tmp_path: Path) -> None
 
 def test_known_validator_rules_matches_default_validators() -> None:
     assert frozenset(DEFAULT_VALIDATORS.keys()) == KNOWN_VALIDATOR_RULES
+
+
+# --- D2: reglas de audio sin validador mecanico no pueden pasar ---------------
+
+
+def test_audio_rule_no_trending_is_not_a_pass(tmp_path: Path) -> None:
+    """``no_trending`` no se verifica: el gate no puede emitir PASS.
+
+    Este check solo sabe mirar si existe un stream de audio. Eso no dice que
+    el audio no sea trending, que es lo que la regla exige. Brief §5.1: sin
+    validador aplicable, nunca PASS.
+    """
+    contract = make_contract(hard=["audio.present"], audio_rule="no_trending")
+    media = make_media(has_audio=True)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    check = _check(result, "audio.present")
+    assert check.status is not CheckStatus.PASS, check
+
+
+def test_audio_rule_official_required_is_not_a_pass(tmp_path: Path) -> None:
+    """``official_required`` tampoco: un stream existente no es el oficial.
+
+    Brief §5.2 dice literal para el audio oficial: si el fingerprint contra el
+    asset oficial no está implementado, el resultado es MANUAL_REVIEW.
+    """
+    contract = make_contract(
+        hard=["audio.present"],
+        audio_rule="official_required",
+        official_audio_url="https://www.tiktok.com/music/official",
+    )
+    media = make_media(has_audio=True)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    check = _check(result, "audio.present")
+    assert check.status is not CheckStatus.PASS, check
+
+
+def test_audio_rule_any_is_unsupported_when_checked_directly(tmp_path: Path) -> None:
+    """``any`` no tiene nada que verificar: el resultado es UNSUPPORTED.
+
+    Se invoca el validador directamente, saltandose el motor a proposito. Por la
+    via normal no se llega: el motor omite ``audio.present`` cuando la
+    plataforma declara ``any`` (ver ``_rule_applies``). Este test fija que debe
+    hacer el check si alguien lo invoca igualmente, para que no degrade a un
+    PASS con evidencia que parece una atestaci�n de audio verificado.
+    """
+    contract = _hand_declared_audio_contract("any")
+    piece = make_piece(_artifact(tmp_path))
+    media = make_media(has_audio=True)
+    context = GateContext(
+        contract=contract,
+        rules=contract.platforms[piece.platform],
+        piece=piece,
+        artifact_sha256=sha256(b"video").hexdigest(),
+        media=media,
+        assets=AssetRegistry(tmp_path),
+    )
+
+    outcome = check_audio_present(context)
+
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert outcome.evidence["audio_rule"] == "any"
+    assert outcome.evidence["verifiable"] is False
+    assert "has_audio" not in outcome.evidence
+
+
+def test_audio_rule_any_is_not_a_fail_when_there_is_no_audio(tmp_path: Path) -> None:
+    """``any`` con un artefacto sin pista tampoco puede ser FAIL.
+
+    Rama hermana de la anterior, y la que mas importa: el motor omite
+    ``audio.present`` para una plataforma con ``any``, asi que esta rama no se
+    alcanza por la via normal. Es la ultima linea de defensa si el predicado
+    ``_rule_applies`` se rompe alguna vez, y tiene que impedir las dos
+    respuestas incorrectas. Un FAIL rechazaria la pieza por exigir audio que
+    nadie pidio; un PASS con ``{"has_audio": false}`` atestiguaria una
+    comprobacion que no ocurrio.
+    """
+    contract = _hand_declared_audio_contract("any")
+    piece = make_piece(_artifact(tmp_path))
+    context = GateContext(
+        contract=contract,
+        rules=contract.platforms[piece.platform],
+        piece=piece,
+        artifact_sha256=sha256(b"video").hexdigest(),
+        media=make_media(has_audio=False),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    outcome = check_audio_present(context)
+
+    assert outcome.status is not CheckStatus.PASS
+    assert outcome.status is not CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "has_audio" not in outcome.evidence
+
+
+def test_unverifiable_audio_rule_says_so_in_its_evidence(tmp_path: Path) -> None:
+    """La evidencia dice LITERALMENTE que no se verificó y qué faltaría.
+
+    Un ``{"has_audio": true}`` en un PASS de una regla que nadie comprobó es
+    exactamente la mentira que este cambio quita.
+    """
+    contract = make_contract(
+        hard=["audio.present"],
+        audio_rule="official_required",
+        official_audio_url="https://www.tiktok.com/music/official",
+    )
+    media = make_media(has_audio=True)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    evidence = _check(result, "audio.present").evidence
+    assert "has_audio" not in evidence, evidence
+    assert evidence["verifiable"] is False
+    assert evidence["audio_rule"] == "official_required"
+    assert evidence["missing_validator"], evidence
+
+
+def test_verifiable_audio_rule_never_claims_to_be_unverified(tmp_path: Path) -> None:
+    """``own_clip`` sí se verifica: su evidencia debe decirlo."""
+    contract = make_contract(hard=["audio.present"], audio_rule="own_clip")
+    media = make_media(has_audio=True)
+    result = _result(tmp_path, contract, make_piece(_artifact(tmp_path)), media=media)
+    check = _check(result, "audio.present")
+    assert check.status is CheckStatus.PASS
+    assert check.evidence == {"has_audio": True}

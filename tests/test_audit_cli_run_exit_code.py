@@ -59,6 +59,17 @@ class _CopyAssembler(PieceAssembler):
 
 def _hal_draft() -> ContractDraft:
     return make_draft(
+        # El draft declara audio.present como regla dura, asi que alguna
+        # plataforma tiene que exigir audio de verdad: con audio_rule="any" la
+        # regla no es verificable y el gate bloquea en lugar de aprobar.
+        platforms={
+            "tiktok": {
+                "duration": {"min_s": candidate(8)},
+                "required_hashtags": candidate(["#marca"]),
+                "required_mentions": candidate(["@marca"]),
+                "audio_rule": candidate("own_clip"),
+            }
+        },
         rules={
             "hard": candidate(
                 [

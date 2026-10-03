@@ -57,6 +57,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import assert_never
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
 from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, SplitScreenConfig
@@ -130,6 +131,30 @@ def _unsupported(reason: str) -> CheckOutcome:
     return CheckOutcome(status=CheckStatus.UNSUPPORTED, evidence={"reason": reason})
 
 
+def _unverifiable(audio_rule: AudioRule, missing_validator: str) -> CheckOutcome:
+    """MANUAL_REVIEW para una regla que exige audio y aqui no se puede comprobar.
+
+    La evidencia dice literalmente que no se verifico y que validador falta,
+    para que ``gate.json`` no se lea como una atestación de audio verificado
+    (brief §5.1: sin validador aplicable nunca PASS).
+
+    Args:
+        audio_rule: Regla de audio de la plataforma, sin verificar.
+        missing_validator: Qué haría falta para poder verificarla.
+
+    Returns:
+        El outcome en MANUAL_REVIEW con la evidencia del motivo.
+    """
+    return CheckOutcome(
+        status=CheckStatus.MANUAL_REVIEW,
+        evidence={
+            "audio_rule": audio_rule.value,
+            "verifiable": False,
+            "missing_validator": missing_validator,
+        },
+    )
+
+
 def check_artifact_integrity(context: GateContext) -> CheckOutcome:
     """Verifica que el artefacto exista y su hash sea calculable.
 
@@ -168,20 +193,79 @@ def check_duration_max(context: GateContext) -> CheckOutcome:
     return _duration_outcome(context, context.rules.duration.max_s, minimum=False)
 
 
-def check_audio_present(context: GateContext) -> CheckOutcome:
-    """Verifica que el artefacto tenga pista de audio.
+# El veredicto por regla de audio va en el `match` de check_audio_present, no en
+# tablas: un valor nuevo de AudioRule tiene que romper el type-check, no aparecer
+# en runtime como KeyError con el VOD ya descargado.
 
-    La exigencia es por plataforma: ``audio_rule=any`` no exige audio.
+
+def check_audio_present(context: GateContext) -> CheckOutcome:
+    """Verifica que el artefacto tenga pista de audio, si la plataforma lo exige.
+
+    Solo ``audio_rule=own_clip`` es comprobable aqui, y se comprueba que exista
+    la pista. Las demas reglas no tienen validador mecanico implementado en este
+    modulo:
+
+    - ``official_required`` exigiria comparar la pista con el asset oficial, y
+      un stream existente no demuestra eso (brief §5.2 pide MANUAL_REVIEW si el
+      fingerprint no esta implementado).
+    - ``no_trending`` exigiria detectar audio trending, que ffprobe no expone.
+    - ``any`` no exige nada: no hay nada que verificar.
+
+    Las dos reglas que SI exigen audio pero no se pueden comprobar aqui van a
+    ``MANUAL_REVIEW``: en una regla dura ``MANUAL_REVIEW`` deriva en
+    ``GateStatus.PENDING_REVIEW``, que frena la exportacion y se desbloquea con
+    ``--approve-manual-review --approved-by``, de modo que el fallo sigue siendo
+    fail-closed (nunca ``PASSED``) pero conserva una salida humana. Su evidencia
+    dice literalmente que no se verifico (``verifiable: false``) y que
+    validador falta, para que ``gate.json`` no se lea como una atestestacion de
+    audio verificado.
+
+    ``any`` va a ``UNSUPPORTED`` porque no es un fallo de verificacion sino la
+    ausencia de requisitos: en una regla dura ``UNSUPPORTED`` deriva en
+    ``GateStatus.UNSUPPORTED``, que no es exportable y no tiene salida humana.
+    Por eso el motor ni siquiera invoca este check para una plataforma con
+    ``any``; ver ``kliptych.gate.engine._rule_applies``. La rama de aqui fija
+    que hace el check si alguien lo invoca igualmente, por ejemplo declarando la
+    regla a mano.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si la plataforma no exige audio o el artefacto tiene pista;
-        FAIL si lo exige y no la tiene; UNSUPPORTED sin probe.
+        PASS si la regla es verificable y el artefacto tiene pista; FAIL si la
+        regla es verificable y no la tiene; MANUAL_REVIEW si la regla exige algo
+        que aqui no se puede comprobar; UNSUPPORTED para ``any`` o sin probe.
     """
-    if context.rules.audio_rule is AudioRule.ANY:
-        return _pass(audio_rule="any")
+    audio_rule = context.rules.audio_rule
+    match audio_rule:
+        case AudioRule.OWN_CLIP:
+            pass
+        case AudioRule.OFFICIAL_REQUIRED:
+            return _unverifiable(
+                audio_rule,
+                (
+                    "fingerprint del audio contra el asset oficial (official_audio) y "
+                    "comparacion con la pista del artefacto"
+                ),
+            )
+        case AudioRule.NO_TRENDING:
+            return _unverifiable(
+                audio_rule,
+                "deteccion de audio trending en la pista del artefacto",
+            )
+        case AudioRule.ANY:
+            return CheckOutcome(
+                status=CheckStatus.UNSUPPORTED,
+                evidence={
+                    "audio_rule": audio_rule.value,
+                    "verifiable": False,
+                    "missing_validator": (
+                        "la regla 'any' no exige audio: no hay nada que verificar"
+                    ),
+                },
+            )
+        case _:
+            assert_never(audio_rule)
     if context.media is None:
         return _unsupported("no se pudo inspeccionar el artefacto")
     if context.media.has_audio:
@@ -196,6 +280,14 @@ def check_audio_policy(context: GateContext) -> CheckOutcome:
     exige aprobación humana explícita. Las demás políticas (o la ausencia de
     política) no imponen revisión por sí mismas; el audio por plataforma lo
     siguen gobernando ``audio.present`` y las reglas de ``audio_rule``.
+
+    Ojo con el reparto: esta comprobación es la de la CAMPAÑA
+    (``contract.audio_policy``), no la de la plataforma. Que aquí no imponga
+    revisión no significa que el audio quede verificado. Lo que exige la
+    plataforma lo decide ``audio.present``, que desde D2 solo devuelve ``PASS``
+    para ``own_clip``; ``no_trending`` y ``official_required`` paran en
+    ``MANUAL_REVIEW`` aunque la política de campaña sea permisiva, y no las
+    exime nadie.
 
     Args:
         context: Contexto resuelto del gate.

@@ -23,6 +23,54 @@
   aprobaría en vacío incluso con el artefacto ausente.
 
 ### Changed
+- **Gate de audio verificable (D2):** `check_audio_present` solo emite `PASS`
+  cuando el audio se ha comprobado de verdad, es decir con `audio_rule=own_clip`
+  mediante `media.has_audio`. Ese camino no cambia: sigue siendo idéntico byte a
+  byte. Antes, `audio_rule` de `no_trending` y de `official_required` devolvía
+  `PASS` con evidencia `{"has_audio": true}`, una atestestación de audio
+  verificado que nadie había comprobado; ahora devuelven `MANUAL_REVIEW` con
+  evidencia que dice literalmente que no se verificó (`verifiable: false`) y qué
+  validador falta. `any` devuelve `UNSUPPORTED` con el motivo escrito.
+- **Consecuencia para el operador:** en campañas `no_trending` u
+  `official_required`, el gate **ya no pasa solo**. La pieza para en
+  `pending_review` y necesita firma (`--approve-manual-review --approved-by`).
+  Antes salía sin revisión de nadie. Es el sentido del cambio: una regla dura que
+  no se puede verificar no puede atestiguar que se verificó.
+- **Scoping por plataforma:** los `rule_id` de `contract.rules` son globales,
+  pero `audio.present` solo aplica a las plataformas que exigen audio. El motor
+  (`_rule_applies`) omite el check cuando la plataforma de la pieza declara
+  `audio_rule=any`, en vez de emitir un estado.
+  - **ANTES de este cambio:** `audio.present` con `audio_rule=any` devolvía
+    `PASS` con evidencia `{"audio_rule": "any"}`, una atestestación de que el
+    audio estaba verificado sin haber comprobado nada.
+  - **DESPUÉS, sin el scoping:** el check nuevo devuelve `UNSUPPORTED` ("aquí no
+    hay nada que verificar"), lo que en una regla dura deriva en
+    `GateStatus.UNSUPPORTED`: inexportable y sin salida humana, por una regla que
+    no le aplicaba a esa plataforma.
+  - **DESPUÉS, con el scoping:** para la plataforma `any` no se emite ningún
+    outcome. Ese es el estado final.
+- **Lo que ese scoping NO arregla, y por qué:** una plataforma `any` en una
+  campaña donde otra declara `no_trending` **sigue parando en `pending_review`**
+  y sigue necesitando firma. No es el mismo defecto un nivel más arriba, y es
+  preexistente (idéntico en `main`):
+  - `audio.no_trending` no está en `DEFAULT_VALIDATORS`, así que no ejecuta
+    ningún check.
+  - Lo que fuerza el `pending_review` es `_derive_status` leyendo
+    `RuleStrength.MANUAL_REVIEW` del `contract.rules.manual_review`, que es
+    **global**, mientras que las reglas son por plataforma.
+  - El predicado `_rule_applies` de este cambio arregla el **despacho de
+    checks**; no toca la **agregación de fuerzas**. Mismo defecto, un nivel más
+    arriba, y por eso el `any` no queda libre.
+  El resultado exportable de esa pieza es el mismo que antes de este cambio: lo
+  que desaparece es la atestestación falsa en `gate.json`, no el freno. Corregir
+  el freno es otro arreglo y no entra aquí. Como sobre-bloquea y no
+  sub-bloquea, no es un agujero de cumplimiento.
+- No cambia: los checks con requisitos vacíos siguen ejecutándose y siguen
+  emitiendo su evidencia (por ejemplo `caption.required_mention` con
+  `{"required": [], "missing": []}`). Un conjunto de requisitos vacío no es lo
+  mismo que una regla no aplicable, y esa distinción está escrita en el motor
+  para que nadie la generalice por error.
+- No cambia: `own_clip`, `_derive_status`, el resolver y el exportador.
 - `Campaign.brief` admite vacío; vacío es la señal del modo zero-contract.
   `campaign_id` sigue exigiendo valor porque nombra el directorio de entrega.
 - `run_repost` acepta `model` ausente: el modo repost no consulta el modelo.

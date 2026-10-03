@@ -1,10 +1,12 @@
 """Motor del gate: ejecuta validadores y deriva el estado fail-closed."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
+from kliptych.contract.enums import AudioRule
+from kliptych.contract.schema import PlatformRules
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -16,6 +18,46 @@ from kliptych.gate.models import (
 )
 from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_file
+
+# Predicados de aplicabilidad por plataforma, indexados por rule_id.
+# Semilla: audio.present solo aplica a las plataformas que exigen audio.
+_RULE_APPLICABILITY: dict[str, Callable[[PlatformRules], bool]] = {
+    "audio.present": lambda rules: rules.audio_rule is not AudioRule.ANY,
+}
+
+
+def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
+    """Indica si la regla tiene requisitos que verificar en esta plataforma.
+
+    Los ``rule_id`` de ``contract.rules`` son globales: una sola declaracion
+    cubre todas las plataformas del contrato. Su contenido, en cambio, es por
+    plataforma, asi que la misma regla puede tener requisitos en una plataforma
+    y en otra no. Este predicado es el unico lugar donde se decide eso.
+
+    Ojo con la distincion que separa las dos situaciones:
+
+    - Un conjunto de requisitos VACIO (por ejemplo ``caption.required_mention``
+      sin menciones exigidas) NO es lo mismo que una regla NO APLICABLE. El
+      check debe seguir ejecutandose y emitir su evidencia, vacia pero util,
+      para que exista constancia de que se evaluo.
+    - Una regla NO APLICABLE (por ejemplo ``audio.present`` sobre una
+      plataforma con ``audio_rule=any``) no tiene nada que evaluar y no debe
+      producir ningun outcome: hacerlo emitiria un estado, y un ``UNSUPPORTED``
+      por regla dura deja la pieza inexportable sin salida humana.
+
+    Generalizar esto a "omitir todo check sin requisitos" seria incorrecto y
+    borraria la evidencia de los checks que si deben constancia. Solo se omite
+    lo que tiene un predicado declarado aqui.
+
+    Args:
+        rule_id: Identificador de la regla declarada en el contrato.
+        rules: Reglas de la plataforma de la pieza, ya resueltas.
+
+    Returns:
+        True si la regla aplica a esta plataforma.
+    """
+    predicate = _RULE_APPLICABILITY.get(rule_id)
+    return True if predicate is None else predicate(rules)
 
 
 class GateError(Exception):
@@ -78,7 +120,10 @@ class Gate:
             assets: Registro de assets del workspace.
 
         Returns:
-            El resultado del gate, con un check por regla declarada.
+            El resultado del gate, con un check por regla declarada que aplique
+            a la plataforma de la pieza. Una regla declarada globalmente pero
+            no aplicable a esta plataforma queda omitida, sin emitir outcome:
+            ver ``_rule_applies`` para el criterio y el motivo.
 
         Raises:
             GateError: Si la plataforma de la pieza no está en el contrato.
@@ -103,7 +148,9 @@ class Gate:
             (RuleStrength.MANUAL_REVIEW, contract.rules.manual_review),
         ):
             outcomes.extend(
-                (strength, self._run_rule(rule_id, strength, context)) for rule_id in rule_ids
+                (strength, self._run_rule(rule_id, strength, context))
+                for rule_id in rule_ids
+                if _rule_applies(rule_id, context.rules)
             )
         if contract.unmapped:
             colliding = [
