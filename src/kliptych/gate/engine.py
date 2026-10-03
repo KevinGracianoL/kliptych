@@ -204,6 +204,11 @@ class Gate:
                         )
                     )
         if contract.unmapped:
+            # Estas dos comparaciones (esta y la de `citations` mas abajo) NO
+            # canonicalizan el rule_id, a proposito. Canonizarlas no seria un
+            # cambio sin efecto: una entrada `unmapped` escrita con un alias
+            # pasaria a encontrar su validador y a degradar de `manual_review`
+            # a `fail`. Se dejan como estan, con su comportamiento de siempre.
             colliding = [
                 entry.rule for entry in contract.unmapped if entry.rule in self._validators
             ]
