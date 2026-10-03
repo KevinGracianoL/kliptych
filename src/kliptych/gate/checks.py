@@ -224,7 +224,7 @@ def check_audio_present(context: GateContext) -> CheckOutcome:
     ausencia de requisitos: en una regla dura ``UNSUPPORTED`` deriva en
     ``GateStatus.UNSUPPORTED``, que no es exportable y no tiene salida humana.
     Por eso el motor ni siquiera invoca este check para una plataforma con
-    ``any``; ver ``kliptych.gate.engine._rule_applies``. La rama de aqui fija
+    ``any``; ver ``kliptych.gate.engine.rule_applies``. La rama de aqui fija
     que hace el check si alguien lo invoca igualmente, por ejemplo declarando la
     regla a mano.
 

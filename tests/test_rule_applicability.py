@@ -13,6 +13,8 @@ firma. Por eso hay tests de no-regresion explicitos.
 
 from pathlib import Path
 
+import pytest
+
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, contract_digest
 from kliptych.contract.schema import PlatformRules
@@ -201,21 +203,22 @@ def test_single_platform_requiring_audio_behaves_exactly_as_before(
     assert approved.status is ExportStatus.EXPORTED
 
 
-def test_reminder_is_not_emitted_when_no_platform_declares_the_rule(
-    tmp_path: Path,
-) -> None:
-    """T4: cierra la parte vigente de #57.
+def test_reminder_is_still_emitted_for_a_rule_no_platform_claims(tmp_path: Path) -> None:
+    """El recordatorio NO se puede acotar por plataforma en este PR.
 
-    ``audio.no_trending`` esta declarada globalmente a mano, pero NINGUNA
-    plataforma del contrato la pidio: las dos declaran ``audio_rule=any``. El
-    recordatorio se suprime porque no le aplica a ninguna plataforma.
+    Se intentó y se revirtió, por dos motivos medidos:
 
-    Lo que NO se arregla aqui, y conviene saber: cuando una plataforma si lo
-    pide y otra no, el recordatorio sigue apareciendo en el informe. ``
-    DeliveryReport.reminders`` es una lista plana de todo el informe, no una por
-    pieza, asi que no hay forma de mostrarlo para tiktok y callarlo para
-    instagram dentro del mismo informe. Eso exigiria recordatorios por pieza,
-    que es un cambio de schema y no cabe aqui.
+    - Con el aviso acotado a las piezas exportadas, un paquete bloqueado se
+      quedaba sin recordatorios y rompia
+      ``test_report_lists_post_publication_reminders``.
+    - Acotarlo a nivel de contrato solo puede suprimir el caso C (una regla que
+      ninguna plataforma reclama), que es justo cuando el aviso SÍ es verdad.
+      El caso B necesita saber qué piezas hay en el paquete, y
+      ``DeliveryReport.reminders`` es una lista plana sin ese contexto.
+
+    Este test fija el comportamiento que queda: si la regla está declarada, el
+    aviso sale. Es lo mismo que ``main``, y es la razón por la que el consumidor
+    del exportador queda fuera de este arreglo.
     """
     contract = make_contract(
         audio_rule="any",
@@ -224,10 +227,10 @@ def test_reminder_is_not_emitted_when_no_platform_declares_the_rule(
     )
     piece = make_piece(_artifact(tmp_path))
 
-    result = _export(tmp_path, contract=contract, pieces=[piece], approve=False, tag="t4")
+    result = _export(tmp_path, contract=contract, pieces=[piece], approve=True, tag="t4")
 
-    assert result.status is ExportStatus.EXPORTED
-    assert [r for r in result.reminders if r.kind == "manual_review"] == []
+    manual = [r.detail for r in result.reminders if r.kind == "manual_review"]
+    assert any("audio.no_trending" in detail for detail in manual)
 
 
 def test_reminder_is_still_emitted_for_the_platform_that_declares_the_rule(
@@ -268,7 +271,12 @@ def test_recommended_rule_with_unsupported_check_is_unaffected(tmp_path: Path) -
 
 
 def test_contract_without_manual_review_rules_exports_clean(tmp_path: Path) -> None:
-    """T7: sin reglas manual_review no hay nada que revisar ni que recordar."""
+    """T7: sin reglas manual_review no hay nada que revisar ni que recordar.
+
+    Este test NO es cobertura de aplicabilidad: con cero reglas declaradas el
+    filtro no tiene nada que filtrar. Lo que fija es que un contrato sin
+    revisiones pendientes sale limpio y sin atribuir aprobaciones.
+    """
     contract = make_contract(audio_rule="any", hard=["artifact.integrity", "duration.min"])
     piece = make_piece(_artifact(tmp_path))
 
@@ -277,3 +285,145 @@ def test_contract_without_manual_review_rules_exports_clean(tmp_path: Path) -> N
     assert result.status is ExportStatus.EXPORTED
     assert [r for r in result.reminders if r.kind == "manual_review"] == []
     assert result.approved_by is None
+
+
+def _two_platforms(declaring_rule: str) -> Contract:
+    """Contrato donde tiktok declara ``declaring_rule`` y reels declara ``any``.
+
+    Args:
+        declaring_rule: ``audio_rule`` de la plataforma que si exige audio.
+
+    Returns:
+        El contrato de dos plataformas.
+    """
+    return with_platform(
+        make_contract(
+            audio_rule=declaring_rule,
+            official_audio_url=(
+                "https://example.test/official" if declaring_rule == "official_required" else None
+            ),
+            hard=_AUDIO_HARD,
+        ),
+        Platform.INSTAGRAM_REELS,
+        PlatformRules(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("audio_rule", "rule_id"),
+    [
+        ("no_trending", "audio.no_trending"),
+        ("own_clip", "audio.own_clip"),
+        ("official_required", "audio.official_track"),
+    ],
+)
+def test_each_seeded_predicate_scopes_its_own_rule(
+    tmp_path: Path,
+    audio_rule: str,
+    rule_id: str,
+) -> None:
+    """Un test por predicado sembrado, para que borrar cualquiera se note.
+
+    Cada predicado de la tabla tiene aqui su propio caso. Sin esto, borrar
+    ``audio.own_clip`` o ``audio.official_track`` de la tabla no rompia nada y
+    la tabla podia afirmar cobertura que no tenia.
+    """
+    contract = _two_platforms(audio_rule)
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+    tiktok = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    gate = _gate()
+    reels_result = gate.run(contract=contract, piece=reels, assets=AssetRegistry(tmp_path))
+    tiktok_result = gate.run(contract=contract, piece=tiktok, assets=AssetRegistry(tmp_path))
+
+    # La plataforma que no lo pidio no lo carga: ni el check, ni el estado.
+    assert rule_id not in [check.id for check in reels_result.checks]
+    assert reels_result.status is not GateStatus.PENDING_REVIEW
+    # La que si lo pidio lo carga y por eso sigue pidiendo firma.
+    assert rule_id in [check.id for check in tiktok_result.checks]
+    assert tiktok_result.status is GateStatus.PENDING_REVIEW
+
+
+@pytest.mark.parametrize("alias", ["audio.official_selection", "audio.rule"])
+def test_alias_rule_ids_scope_the_same_as_the_canonical_one(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    """Un alias no puede esquivar el scoping.
+
+    El contrato acepta ``audio.official_selection`` y ``audio.rule`` como
+    clasificacion valida de ``audio.official_track``. Si el predicado solo
+    reconoce la grafia canonica, un alias deja pasar el defecto: la regla se despacha
+    para plataformas que no la piden.
+    """
+    contract = _two_platforms("official_required")
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    with_alias = contract.model_copy(
+        update={
+            "rules": contract.rules.model_copy(
+                update={
+                    "manual_review": [
+                        *(r for r in contract.rules.manual_review if r != "audio.official_track"),
+                        alias,
+                    ]
+                }
+            )
+        }
+    )
+
+    result = _gate().run(contract=with_alias, piece=reels, assets=AssetRegistry(tmp_path))
+
+    assert alias not in [check.id for check in result.checks]
+    assert result.status is not GateStatus.PENDING_REVIEW
+
+
+def test_rule_declared_but_claimed_by_no_platform_is_recorded_and_blocks(
+    tmp_path: Path,
+) -> None:
+    """CASO C: una regla declarada que nadie pide se REGISTRA, no se silencia.
+
+    Este es el fail-open que casi entra: con solo el scoping por plataforma, una
+    regla ``hard`` que ninguna plataforma activa desaparecia del ``gate.json`` y
+    la pieza salia ``passed`` con el ``contract_sha256`` apuntando a un
+    contrato que la declaraba dura.
+    """
+    contract = make_contract(
+        audio_rule="any",
+        hard=["artifact.integrity", "duration.min", "audio.no_trending"],
+    )
+    piece = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    result = _gate().run(contract=contract, piece=piece, assets=AssetRegistry(tmp_path))
+
+    orphan = _check(result, "audio.no_trending")
+    assert orphan.status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED
+    assert "ninguna plataforma" in str(orphan.evidence["unclaimed"])
+
+    for approve in (False, True):
+        report = _export(
+            tmp_path, contract=contract, pieces=[piece], approve=approve, tag=f"t8-{approve}"
+        )
+        assert report.status is ExportStatus.BLOCKED
+
+
+def test_manual_review_rule_claimed_by_no_platform_is_recorded_and_blocks(
+    tmp_path: Path,
+) -> None:
+    """CASO C tambien con fuerza ``manual_review``, que es el caso de #59.
+
+    Comprueba que el estado registrado es el mismo que producia la ausencia de
+    scoping, para una regla ``manual_review`` huerfana.
+    """
+    contract = make_contract(
+        audio_rule="any",
+        hard=["artifact.integrity", "duration.min"],
+        manual_review=["audio.no_trending"],
+    )
+    piece = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    result = _gate().run(contract=contract, piece=piece, assets=AssetRegistry(tmp_path))
+
+    assert _check(result, "audio.no_trending").status is CheckStatus.MANUAL_REVIEW
+    assert result.status is GateStatus.PENDING_REVIEW

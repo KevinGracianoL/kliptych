@@ -6,7 +6,7 @@ from pathlib import Path
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
 from kliptych.contract.enums import AudioRule
-from kliptych.contract.schema import PlatformRules
+from kliptych.contract.schema import PlatformRules, canonical_rule_id
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -71,7 +71,7 @@ def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     Returns:
         True si la regla aplica a esta plataforma.
     """
-    predicate = _RULE_APPLICABILITY.get(rule_id)
+    predicate = _RULE_APPLICABILITY.get(canonical_rule_id(rule_id))
     return True if predicate is None else predicate(rules)
 
 
@@ -162,11 +162,40 @@ class Gate:
             (RuleStrength.RECOMMENDED, contract.rules.recommended),
             (RuleStrength.MANUAL_REVIEW, contract.rules.manual_review),
         ):
-            outcomes.extend(
-                (strength, self._run_rule(rule_id, strength, context))
-                for rule_id in rule_ids
-                if rule_applies(rule_id, context.rules)
-            )
+            for rule_id in rule_ids:
+                if rule_applies(rule_id, context.rules):
+                    # CASO A: la regla aplica a la plataforma de esta pieza.
+                    outcomes.append((strength, self._run_rule(rule_id, strength, context)))
+                elif rule_applies_anywhere(rule_id, contract):
+                    # CASO B: no aplica aqui pero si en otra plataforma. Es regla
+                    # de esa otra, y esta pieza no tiene que arrastrarla.
+                    continue
+                else:
+                    # CASO C: declarada en el contrato y sin ninguna plataforma
+                    # que la pida. El contrato es incoherente, y una declaracion
+                    # incoherente NO se inventa: se despacha igual que antes del
+                    # scoping, para que su resultado sea IDENTICO al de base.
+                    # Omitirla en silencio seria un fail-open, y sustituirla por
+                    # un UNSUPPORTED fijo tambien: `_derive_status` solo escala
+                    # UNSUPPORTED cuando la fuerza es `hard`, asi que una regla
+                    # recommended huerfana pasaria de `rejected` a `passed`.
+                    # Se registra siempre; anadir el motivo es ademas informativo.
+                    dispatched = self._run_rule(rule_id, strength, context)
+                    outcomes.append(
+                        (
+                            strength,
+                            CheckResult(
+                                id=dispatched.id,
+                                status=dispatched.status,
+                                evidence={
+                                    **dispatched.evidence,
+                                    "unclaimed": (
+                                        "ninguna plataforma del contrato declara esta regla"
+                                    ),
+                                },
+                            ),
+                        )
+                    )
         if contract.unmapped:
             colliding = [
                 entry.rule for entry in contract.unmapped if entry.rule in self._validators
@@ -232,6 +261,25 @@ def _hash_artifact(path: Path) -> str | None:
         return sha256_file(path)
     except OSError:
         return None
+
+
+def rule_applies_anywhere(rule_id: str, contract: Contract) -> bool:
+    """Indica si la regla aplica a ALGUNA plataforma del contrato.
+
+    Es la contraparte de ``rule_applies``: aquella responde por una plataforma
+    concreta, esta responde por el contrato entero. Sirve para distinguir una
+    regla que es de otra plataforma (y que esta pieza no debe arrastrar) de una
+    regla que no es de ninguna (y que por tanto es una declaracion incoherente
+    que hay que registrar en vez de callar).
+
+    Args:
+        rule_id: Identificador de la regla declarada en el contrato.
+        contract: Contrato completo, con todas sus plataformas.
+
+    Returns:
+        True si la regla aplica a al menos una plataforma del contrato.
+    """
+    return any(rule_applies(rule_id, rules) for rules in contract.platforms.values())
 
 
 def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> GateStatus:

@@ -534,15 +534,7 @@ class Contract(ContractBase):
             hook_keyword=self.hook_keyword,
             brand_safety_required=self.brand_safety_required,
         )
-        aliases: dict[str, tuple[str, ...]] = {
-            "audio.official_track": (
-                "audio.official_track",
-                "audio.official_selection",
-                "audio.rule",
-            ),
-            "attribution.required": ("attribution.required", "attribution.present"),
-            "link.in_bio": ("link.in_bio", "link_rules.link_in_bio"),
-        }
+        aliases = RULE_ID_ALIASES
         missing: set[str] = set()
         for platform, rules in self.platforms.items():
             for rule_id in active_restriction_rules(rules, global_restrictions):
@@ -849,6 +841,38 @@ def _global_restriction_rules(global_restrictions: GlobalRestrictions) -> list[s
     if global_restrictions.brand_safety_required:
         active.append("brand.safety")
     return active
+
+
+# Regla canonica -> rule_ids que el contrato acepta como su clasificacion. Un
+# operador (o un modelo) puede escribir cualquiera de los alias, asi que quien
+# decida algo a partir de un rule_id debe canonizarlo antes. Es la unica fuente:
+# el validador de clasificacion y el predicado de aplicabilidad del gate la
+# comparten.
+RULE_ID_ALIASES: dict[str, tuple[str, ...]] = {
+    "audio.official_track": (
+        "audio.official_track",
+        "audio.official_selection",
+        "audio.rule",
+    ),
+    "attribution.required": ("attribution.required", "attribution.present"),
+    "link.in_bio": ("link.in_bio", "link_rules.link_in_bio"),
+}
+
+_ALIAS_TO_CANONICAL: dict[str, str] = {
+    alias: canonical for canonical, aliases in RULE_ID_ALIASES.items() for alias in aliases
+}
+
+
+def canonical_rule_id(rule_id: str) -> str:
+    """Devuelve el ``rule_id`` canonico de una regla o de uno de sus alias.
+
+    Args:
+        rule_id: Identificador tal y como aparece en ``contract.rules``.
+
+    Returns:
+        El identificador canonico, o el mismo ``rule_id`` si no tiene alias.
+    """
+    return _ALIAS_TO_CANONICAL.get(rule_id, rule_id)
 
 
 def active_restriction_rules(
