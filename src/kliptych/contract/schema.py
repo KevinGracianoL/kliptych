@@ -591,12 +591,6 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 _ZERO_CONTRACT_AV_RULES = (
     "artifact.integrity",
     "artifact.video_stream",
-    # Declarada por completitud del catálogo, no porque verifique algo:
-    # ``check_audio_present`` aprueba de inmediato con ``audio_rule='any'``, que
-    # es el único valor que no activa una regla de audio sin validador
-    # registrado. Su evidencia en el gate.json dice ``{"audio_rule": "any"}``,
-    # no que haya audio.
-    "audio.present",
 )
 _ZERO_CONTRACT_LANGUAGE = "es"
 
@@ -611,20 +605,24 @@ def vanilla_contract(
 
     Es el contrato que se usa cuando el operador solo aporta una ``--url``: no
     hay brief que extraer, así que no se llama al LLM y se sintetiza aquí el
-    mínimo válido. Declara únicamente la integridad estándar de audio y video
-    como reglas ``hard``; sin ellas el gate aprobaría en vacío incluso con el
-    artefacto ausente, porque ``_derive_status`` devuelve ``PASSED`` sobre
+    mínimo válido.
+
+    Declara como reglas ``hard`` la integridad estándar del artefacto:
+    ``artifact.integrity`` (que exista y sea legible) y ``artifact.video_stream``
+    (que tenga flujo de video). Sin ellas el gate aprobaría en vacío incluso con
+    el artefacto ausente, porque ``_derive_status`` devuelve ``PASSED`` sobre
     cero checks.
+
+    No declara reglas de audio. La plataforma usa ``PlatformRules()``, cuyo
+    ``audio_rule`` es ``ANY``: no hay audio que exigir, y el resolver solo añade
+    ``audio.present`` cuando alguna plataforma exige audio. Declararla aquí
+    sería una aserción que el gate no puede sostener.
 
     Lo que el contrato NO declara es precisamente lo que no se puede saber sin
     un brief: sin prohibiciones léxicas, sin ``brand_safety_required``, sin
     bounds de duración, sin menciones ni hashtags, y sin watermark. El audio
     original se conserva declarando ``AudioPolicy.ORIGINAL_AUDIO``, que no
     silencia la pista.
-
-    ``audio.present`` se declara pero, con ``audio_rule='any'``, ``check_audio_present``
-    aprueba sin interrogar ffprobe: verifica que haya flujo de video y que el
-    artefacto exista y sea legible, no que haya audio.
 
     Args:
         campaign_id: Identificador de campaña; debe ser un segmento de ruta

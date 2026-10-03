@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Sprint A1 — Modo zero-contract:** `campaign --url <URL> --out <DIR>` procesa
+  un vídeo sin `brief.md`. Sin brief no hay nada que extraer, así que no se
+  llama al LLM y el contrato se sintetiza en memoria con `vanilla_contract`
+  (`brand_safety_required=False`, sin prohibiciones léxicas,
+  `audio_policy=original_audio`). El modo se fuerza a `repost_ugc`, el único
+  camino del orquestador que no selecciona segmentos con el LLM, y no exige
+  `KLIPTYCH_LLM_*`.
+- `campaign_id` sin brief se deriva de `brief_key(url)[:12]`: determinista y
+  sin colisiones entre URLs distintas en el directorio de entrega.
+- El contrato zero-contract declara solo `artifact.integrity` y
+  `artifact.video_stream` en `rules.hard`. No declara reglas de audio: la
+  plataforma usa `audio_rule=any`, así que no hay audio que exigir ni que
+  verificar, y el resolver tampoco lo haría. No están ahí por decoración:
+  `_derive_status` devuelve `passed` sobre cero checks, y sin ellas el gate
+  aprobaría en vacío incluso con el artefacto ausente.
+
+### Changed
+- `Campaign.brief` admite vacío; vacío es la señal del modo zero-contract.
+  `campaign_id` sigue exigiendo valor porque nombra el directorio de entrega.
+- `build_ytdlp_argv` usa el selector con techo anti-4K por defecto en lugar de
+  `None`, así que las llamadas externas heredan el techo.
+- `run_repost` acepta `model` ausente: el modo repost no consulta el modelo.
+
+### Fixed
+- `_even` ya no puede devolver un offset negativo al redondear a la baja.
+
 ## [1.1.0] — 2026-09-30
 
 ### Added

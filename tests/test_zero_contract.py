@@ -42,7 +42,7 @@ from tests.support import FakeProbe, make_media, make_piece
 if TYPE_CHECKING:
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
-_AV_HARD_RULES = ("artifact.integrity", "artifact.video_stream", "audio.present")
+_AV_HARD_RULES = ("artifact.integrity", "artifact.video_stream")
 _LLM_ENV_VARS = ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
 
 
@@ -168,10 +168,34 @@ def _zero_contract_campaign() -> Campaign:
 
 
 def test_vanilla_contract_declares_only_av_integrity() -> None:
+    """Exactamente las dos reglas de integridad A/V, y nada más.
+
+    ``artifact.integrity`` verifica que el artefacto exista y sea legible;
+    ``artifact.video_stream`` que tenga flujo de video. No hay una tercera.
+    """
     contract = vanilla_contract(campaign_id="abc123def456")
     assert tuple(contract.rules.hard) == _AV_HARD_RULES
     assert contract.rules.recommended == []
     assert contract.rules.manual_review == []
+
+
+def test_vanilla_contract_declares_no_audio_rule() -> None:
+    """Ninguna regla de audio, en ninguna categoría.
+
+    El contrato usa ``PlatformRules()``, cuyo ``audio_rule`` es ``ANY``: no hay
+    audio que exigir ni que verificar. El resolver solo añade ``audio.present``
+    cuando alguna plataforma exige audio (``resolver.py``), así que declararla
+    aquí sería una aserción que el gate no puede sostener y que el propio
+    pipeline nunca produciría.
+    """
+    contract = vanilla_contract(campaign_id="abc123def456")
+    classified = [
+        *contract.rules.hard,
+        *contract.rules.recommended,
+        *contract.rules.manual_review,
+    ]
+    assert "audio.present" not in classified
+    assert not [rule for rule in classified if rule.startswith("audio.")]
 
 
 def test_vanilla_contract_has_no_lexical_prohibitions() -> None:
@@ -279,6 +303,33 @@ def test_gate_rejects_vanilla_contract_without_video_stream(tmp_path: Path) -> N
     contract = vanilla_contract(campaign_id="abc123def456")
     gate = Gate(probe=FakeProbe(info=make_media(has_video=False)))
     result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+    assert result.status is GateStatus.REJECTED
+
+
+def test_vanilla_contract_cannot_pass_without_an_artifact(tmp_path: Path) -> None:
+    """La garantía real de A1: sin reglas, el gate aprobaría en vacío.
+
+    ``_derive_status`` devuelve ``PASSED`` sobre cero checks, así que un
+    contrato sin reglas aprobaría cualquier pieza, incluida una cuyo artefacto
+    no existe. Estas dos reglas son lo que impide ese PASS, y es la razón por
+    la que el contrato zero-contract no está realmente vacío.
+    """
+    contract = vanilla_contract(campaign_id="abc123def456")
+    assert contract.rules.hard, "sin reglas el gate aprueba en vacío"
+    missing = tmp_path / "no-existe.mp4"
+    result = _gate().evaluate_piece(make_piece(missing), contract=contract)
+    assert result.status is not GateStatus.PASSED
+    assert result.status is GateStatus.REJECTED
+
+
+def test_vanilla_contract_cannot_pass_without_a_video_stream(tmp_path: Path) -> None:
+    """La segunda mitad de la garantía: el artefacto existe pero no tiene video."""
+    artifact = tmp_path / "final.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(has_video=False)))
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+    assert result.status is not GateStatus.PASSED
     assert result.status is GateStatus.REJECTED
 
 

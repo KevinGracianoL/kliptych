@@ -16,6 +16,12 @@ build/
 runs/
 campaigns/private/
 
+# Campañas locales de prueba (brief + contract_draft de una corrida real).
+# Ancladas a la raíz de campaigns/ para no capturar campaigns/fixtures/, que sí
+# es material sintético versionado.
+campaigns/kick_test/
+campaigns/youtube_test/
+
 # Credenciales, cookies y sesiones
 .env
 .env.*
