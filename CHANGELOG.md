@@ -38,7 +38,7 @@
   no se puede verificar no puede atestiguar que se verificó.
 - **Scoping por plataforma:** los `rule_id` de `contract.rules` son globales,
   pero `audio.present` solo aplica a las plataformas que exigen audio. El motor
-  (`_rule_applies`) omite el check cuando la plataforma de la pieza declara
+  (`rule_applies`) omite el check cuando la plataforma de la pieza declara
   `audio_rule=any`, en vez de emitir un estado.
   - **ANTES de este cambio:** `audio.present` con `audio_rule=any` devolvía
     `PASS` con evidencia `{"audio_rule": "any"}`, una atestestación de que el
@@ -58,7 +58,7 @@
   - Lo que fuerza el `pending_review` es `_derive_status` leyendo
     `RuleStrength.MANUAL_REVIEW` del `contract.rules.manual_review`, que es
     **global**, mientras que las reglas son por plataforma.
-  - El predicado `_rule_applies` de este cambio arregla el **despacho de
+  - El predicado `rule_applies` de este cambio arregla el **despacho de
     checks**; no toca la **agregación de fuerzas**. Mismo defecto, un nivel más
     arriba, y por eso el `any` no queda libre.
   El resultado exportable de esa pieza es el mismo que antes de este cambio: lo
@@ -70,7 +70,42 @@
   `{"required": [], "missing": []}`). Un conjunto de requisitos vacío no es lo
   mismo que una regla no aplicable, y esa distinción está escrita en el motor
   para que nadie la generalice por error.
-- No cambia: `own_clip`, `_derive_status`, el resolver y el exportador.
+- No cambia en el arreglo anterior: `_derive_status`, el resolver y el
+  exportador.
+- **Scoping por plataforma para las reglas de audio (`#59`).**
+  `contract.rules` es global: una sola declaración cubre todas las plataformas.
+  Los requisitos de audio, no. Una plataforma con `audio_rule=any` quedaba
+  frenada por la regla de audio de otra plataforma del mismo contrato.
+
+  **Invariante:** una regla declarada que no es aplicable es un estado
+  explícito y registrado, nunca silencio. El caso en que la regla no la declara
+  ninguna plataforma tiene dos formas, y no se comportan igual:
+
+  - Una regla **sin validador registrado** se comporta como en `main`: mismo
+    estado, mismo gate y misma exportación. La evidencia gana una clave que
+    dice que ninguna plataforma la declara.
+  - Una regla **con validador registrado** es más estricta que `main`, porque
+    `main` la omitía en silencio y exportaba la pieza.
+
+  Las reglas de audio sin validador son `audio.own_clip`, `audio.no_trending` y
+  `audio.official_track`; la única con validador es `audio.present`. `RULE_ID_ALIASES`
+  es la lista de alias del contrato, y el resolver deriva de ella.
+
+  `test_audio_rule_is_scoped_per_platform` (del PR anterior) afirmaba que
+  `audio.no_trending` se emitía para la plataforma con `audio_rule=any`, es
+  decir documentaba este defecto bajo un nombre de scoping. Ahora afirma que no
+  se emite.
+
+  **Diferido, y nada de esto se arregla aquí:**
+
+  - Recordatorios de revisión manual por plataforma: `reminders` es plano por
+    informe. El exportador no cambia. #57.
+  - `attribution.required`, `attribution.present`, `link.in_bio` y
+    `link_rules.link_in_bio` también son por plataforma en intención y siguen
+    frenando a quien no las pide. #63.
+  - Un banco de pruebas que enumere la matriz de aplicabilidad. PR aparte.
+
+  La evidencia de todo esto está en la discusión del PR, no aquí.
 - **Se quita una aserción de reloj de pared de la suite de correctitud
   (`#56`).** Tres cosas distintas, que conviene no mezclar:
 

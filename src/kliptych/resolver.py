@@ -74,6 +74,7 @@ from kliptych.contract import (
     active_restriction_rules,
 )
 from kliptych.contract.base import ContractBase
+from kliptych.contract.schema import RULE_ID_ALIASES
 from kliptych.gate.brand_safety import BRAND_SAFETY_MENTIONS
 from kliptych.gate.text import normalize_text
 
@@ -1879,18 +1880,18 @@ def _resolve_rules(
     return RuleSet(hard=hard, recommended=recommended, manual_review=manual_review)
 
 
+# Reglas que, sin fuerza explicita, se clasifican como manual_review porque no
+# hay validador mecanico que las compruebe. Los alias de cada familia se
+# derivan de RULE_ID_ALIASES para que exista UNA sola lista de alias en el
+# repo: escribir aqui una grafia alternativa la duplicaba.
 _MANUAL_REVIEW_DEFAULTS: frozenset[str] = frozenset(
     {
-        "audio.official_track",
-        "audio.official_selection",
-        "audio.rule",
         "audio.own_clip",
         "audio.no_trending",
         "audio.policy",
-        "attribution.required",
-        "attribution.present",
-        "link.in_bio",
-        "link_rules.link_in_bio",
+        *RULE_ID_ALIASES["audio.official_track"],
+        *RULE_ID_ALIASES["attribution.required"],
+        *RULE_ID_ALIASES["link.in_bio"],
     }
 )
 

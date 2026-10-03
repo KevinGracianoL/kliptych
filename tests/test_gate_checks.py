@@ -40,7 +40,7 @@ def _hand_declared_audio_contract(audio_rule: str) -> Contract:
     fijar que hace el check si alguien lo invoca igualmente, que es justo el
     caso que tiene que ser ``UNSUPPORTED`` en vez de un ``PASS`` sin comprobar.
     El motor ya no llega aqui por su cuenta: omite ``audio.present`` para una
-    plataforma con ``any`` (ver ``_rule_applies``).
+    plataforma con ``any`` (ver ``rule_applies``).
 
     Args:
         audio_rule: Valor de ``audio_rule`` de la plataforma.
@@ -466,7 +466,7 @@ def test_audio_rule_any_is_unsupported_when_checked_directly(tmp_path: Path) -> 
 
     Se invoca el validador directamente, saltandose el motor a proposito. Por la
     via normal no se llega: el motor omite ``audio.present`` cuando la
-    plataforma declara ``any`` (ver ``_rule_applies``). Este test fija que debe
+    plataforma declara ``any`` (ver ``rule_applies``). Este test fija que debe
     hacer el check si alguien lo invoca igualmente, para que no degrade a un
     PASS con evidencia que parece una atestaci�n de audio verificado.
     """
@@ -496,7 +496,7 @@ def test_audio_rule_any_is_not_a_fail_when_there_is_no_audio(tmp_path: Path) -> 
     Rama hermana de la anterior, y la que mas importa: el motor omite
     ``audio.present`` para una plataforma con ``any``, asi que esta rama no se
     alcanza por la via normal. Es la ultima linea de defensa si el predicado
-    ``_rule_applies`` se rompe alguna vez, y tiene que impedir las dos
+    ``rule_applies`` se rompe alguna vez, y tiene que impedir las dos
     respuestas incorrectas. Un FAIL rechazaria la pieza por exigir audio que
     nadie pidio; un PASS con ``{"has_audio": false}`` atestiguaria una
     comprobacion que no ocurrio.

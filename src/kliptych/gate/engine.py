@@ -6,7 +6,7 @@ from pathlib import Path
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
 from kliptych.contract.enums import AudioRule
-from kliptych.contract.schema import PlatformRules
+from kliptych.contract.schema import PlatformRules, canonical_rule_id
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -19,20 +19,28 @@ from kliptych.gate.models import (
 from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_file
 
-# Predicados de aplicabilidad por plataforma, indexados por rule_id.
-# Semilla: audio.present solo aplica a las plataformas que exigen audio.
+# Predicados de aplicabilidad por plataforma, indexados por rule_id canonico.
+# Es la UNICA tabla de aplicabilidad: la consultan el despacho de checks y el
+# lookup de validadores, ambos del motor. El exportador NO la consulta: sus
+# recordatorios son planos por informe y no pueden expresar el caso B, asi que
+# siguen usando la lista global de manual_review (#57 abierto).
 _RULE_APPLICABILITY: dict[str, Callable[[PlatformRules], bool]] = {
     "audio.present": lambda rules: rules.audio_rule is not AudioRule.ANY,
+    "audio.own_clip": lambda rules: rules.audio_rule is AudioRule.OWN_CLIP,
+    "audio.no_trending": lambda rules: rules.audio_rule is AudioRule.NO_TRENDING,
+    "audio.official_track": lambda rules: rules.audio_rule is AudioRule.OFFICIAL_REQUIRED,
 }
 
 
-def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
+def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     """Indica si la regla tiene requisitos que verificar en esta plataforma.
 
     Los ``rule_id`` de ``contract.rules`` son globales: una sola declaracion
     cubre todas las plataformas del contrato. Su contenido, en cambio, es por
     plataforma, asi que la misma regla puede tener requisitos en una plataforma
-    y en otra no. Este predicado es el unico lugar donde se decide eso.
+    y en otra no. Este predicado es el unico lugar del motor donde se decide eso,
+    y lo consultan el despacho de checks y el lookup de validadores. El
+    exportador no lo consulta: sus recordatorios son planos por informe (#57).
 
     Ojo con la distincion que separa las dos situaciones:
 
@@ -45,6 +53,13 @@ def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
       producir ningun outcome: hacerlo emitiria un estado, y un ``UNSUPPORTED``
       por regla dura deja la pieza inexportable sin salida humana.
 
+    Las reglas ``audio.own_clip``, ``audio.no_trending`` y
+    ``audio.official_track`` son ``manual_review`` y no tienen validador
+    mecanico a proposito: ``manual_review`` significa que decide una persona, y
+    eso no se automatiza. No tienen que emitir evidencia mecanica; lo que no
+    pueden es exigir la revision manual de una plataforma que no declaro esa
+    regla de audio.
+
     Generalizar esto a "omitir todo check sin requisitos" seria incorrecto y
     borraria la evidencia de los checks que si deben constancia. Solo se omite
     lo que tiene un predicado declarado aqui.
@@ -56,7 +71,7 @@ def _rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     Returns:
         True si la regla aplica a esta plataforma.
     """
-    predicate = _RULE_APPLICABILITY.get(rule_id)
+    predicate = _RULE_APPLICABILITY.get(canonical_rule_id(rule_id))
     return True if predicate is None else predicate(rules)
 
 
@@ -123,7 +138,7 @@ class Gate:
             El resultado del gate, con un check por regla declarada que aplique
             a la plataforma de la pieza. Una regla declarada globalmente pero
             no aplicable a esta plataforma queda omitida, sin emitir outcome:
-            ver ``_rule_applies`` para el criterio y el motivo.
+            ver ``rule_applies`` para el criterio y el motivo.
 
         Raises:
             GateError: Si la plataforma de la pieza no está en el contrato.
@@ -147,12 +162,53 @@ class Gate:
             (RuleStrength.RECOMMENDED, contract.rules.recommended),
             (RuleStrength.MANUAL_REVIEW, contract.rules.manual_review),
         ):
-            outcomes.extend(
-                (strength, self._run_rule(rule_id, strength, context))
-                for rule_id in rule_ids
-                if _rule_applies(rule_id, context.rules)
-            )
+            for rule_id in rule_ids:
+                if rule_applies(rule_id, context.rules):
+                    # CASO A: la regla aplica a la plataforma de esta pieza.
+                    outcomes.append((strength, self._run_rule(rule_id, strength, context)))
+                elif rule_applies_anywhere(rule_id, contract):
+                    # CASO B: no aplica aqui pero si en otra plataforma. Es regla
+                    # de esa otra, y esta pieza no tiene que arrastrarla.
+                    continue
+                else:
+                    # CASO C: declarada en el contrato y sin ninguna plataforma
+                    # que la pida. El contrato es incoherente, y una declaracion
+                    # incoherente NO se inventa: se despacha. Omitirla en
+                    # silencio seria un fail-open, y sustituirla por un
+                    # UNSUPPORTED fijo tambien: `_derive_status` solo escala
+                    # UNSUPPORTED cuando la fuerza es `hard`, asi que una regla
+                    # recommended huerfana pasaria de `rejected` a `passed`.
+                    #
+                    # OJO: no hay un unico "igual que base", depende de la FORMA
+                    # de la regla. Sin validador (audio.no_trending,
+                    # audio.own_clip, audio.official_track) base ya la
+                    # despachaba y el resultado es identico. Con validador
+                    # (audio.present) base la omitia en silencio, o sea base
+                    # fallaba abierta, y aqui es MAS estricto. En ninguno de los
+                    # dos casos es menos estricto que base.
+                    # Se registra siempre; anadir el motivo es ademas informativo.
+                    dispatched = self._run_rule(rule_id, strength, context)
+                    outcomes.append(
+                        (
+                            strength,
+                            CheckResult(
+                                id=dispatched.id,
+                                status=dispatched.status,
+                                evidence={
+                                    **dispatched.evidence,
+                                    "unclaimed": (
+                                        "ninguna plataforma del contrato declara esta regla"
+                                    ),
+                                },
+                            ),
+                        )
+                    )
         if contract.unmapped:
+            # Estas dos comparaciones (esta y la de `citations` mas abajo) NO
+            # canonicalizan el rule_id, a proposito. Canonizarlas no seria un
+            # cambio sin efecto: una entrada `unmapped` escrita con un alias
+            # pasaria a encontrar su validador y a degradar de `manual_review`
+            # a `fail`. Se dejan como estan, con su comportamiento de siempre.
             colliding = [
                 entry.rule for entry in contract.unmapped if entry.rule in self._validators
             ]
@@ -182,7 +238,7 @@ class Gate:
         )
 
     def _run_rule(self, rule_id: str, strength: RuleStrength, context: GateContext) -> CheckResult:
-        validator = self._validators.get(rule_id)
+        validator = self._validators.get(canonical_rule_id(rule_id))
         if validator is None:
             citations = [
                 unmapped.quote for unmapped in context.contract.unmapped if unmapped.rule == rule_id
@@ -217,6 +273,25 @@ def _hash_artifact(path: Path) -> str | None:
         return sha256_file(path)
     except OSError:
         return None
+
+
+def rule_applies_anywhere(rule_id: str, contract: Contract) -> bool:
+    """Indica si la regla aplica a ALGUNA plataforma del contrato.
+
+    Es la contraparte de ``rule_applies``: aquella responde por una plataforma
+    concreta, esta responde por el contrato entero. Sirve para distinguir una
+    regla que es de otra plataforma (y que esta pieza no debe arrastrar) de una
+    regla que no es de ninguna (y que por tanto es una declaracion incoherente
+    que hay que registrar en vez de callar).
+
+    Args:
+        rule_id: Identificador de la regla declarada en el contrato.
+        contract: Contrato completo, con todas sus plataformas.
+
+    Returns:
+        True si la regla aplica a al menos una plataforma del contrato.
+    """
+    return any(rule_applies(rule_id, rules) for rules in contract.platforms.values())
 
 
 def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> GateStatus:

@@ -34,6 +34,40 @@ uv run pytest
 No `# noqa`, `# type: ignore`, skipped tests, or relaxed thresholds to
 pass a gate. Fix the code.
 
+## Comparing against another revision
+
+To compare behaviour against another revision, use a separate worktree with its
+own environment:
+
+```sh
+git worktree add ../kliptych-base <base_sha>
+cd ../kliptych-base && uv sync
+```
+
+**Then prove which code you loaded before quoting any difference.** The editable
+install makes `PYTHONPATH` unreliable: a `PYTHONPATH` pointed at the worktree
+still imports the package from the main checkout, because the editable finder
+wins over path order. A comparison built on that silently runs the same code
+twice and "confirms" whatever you expected.
+
+```sh
+uv run python -c "import kliptych.gate.engine as e; print(e.__file__)"
+```
+
+If the printed path is not inside the worktree you created, the comparison is
+void.
+
+## Verify that an operation did what it reported
+
+A silent no-op is worse than a failure, because it removes the signal.
+
+- An edit tool that errors on no-match beats a string replace that prints `ok`.
+- A harness reporting 0 violations must prove it BUILT the case it claims, not
+  only that it ran.
+- A count quoted in a PR body must be recomputable from a command in the repo.
+- A kill count measured before a code change is not a measurement of the current
+  code.
+
 ## Data rules
 
 - `campaigns/private/` and `runs/` are NEVER committed.
