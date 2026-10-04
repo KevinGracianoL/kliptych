@@ -76,10 +76,20 @@ class Aspect(StrEnum):
     def ratio(self) -> float:
         """La relacion ancho/alto que declara este aspecto.
 
+        La tabla se indexa por MIEMBRO, no por el string del valor, para que
+        anadir un miembro sin su razon falle en el test que recorre `Aspect` y
+        no con un `KeyError` dentro de un validador, que pydantic no envuelve.
+
         Returns:
             La razon como float.
         """
-        return {"9:16": 9.0 / 16.0, "16:9": 16.0 / 9.0}[self.value]
+        return _ASPECT_RATIOS[self]
+
+
+_ASPECT_RATIOS: dict["Aspect", float] = {
+    Aspect.VERTICAL: 9.0 / 16.0,
+    Aspect.HORIZONTAL: 16.0 / 9.0,
+}
 
 
 class WatermarkPosition(StrEnum):

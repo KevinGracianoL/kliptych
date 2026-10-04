@@ -21,7 +21,13 @@ import pytest
 from pydantic import ValidationError
 
 from kliptych.contract.enums import Aspect
-from kliptych.contract.schema import Contract, OutputSpec, SplitScreenConfig
+from kliptych.contract.schema import (
+    Contract,
+    OutputSpec,
+    SplitScreenConfig,
+    contract_digest,
+    vanilla_contract,
+)
 from tests.support import make_contract
 
 _VERTICAL: dict[str, object] = {"aspect": "9:16", "index": 0}
@@ -55,8 +61,21 @@ def test_a1_el_enum_expone_solo_los_formatos_soportados() -> None:
     assert Aspect("16:9") is Aspect.HORIZONTAL
 
 
-def test_a2_cada_aspecto_expone_su_razon() -> None:
-    """La razon vive en el enum, no la recalcula cada consumidor."""
+@pytest.mark.parametrize("aspect", list(Aspect))
+def test_a2_todo_aspecto_expone_su_razon(aspect: Aspect) -> None:
+    """La razon vive en el enum, y TODO miembro la tiene.
+
+    Parametrizado sobre `Aspect`, no sobre dos literales: anadir `SQUARE="1:1"`
+    sin su entrada en la tabla tiene que fallar AQUI, no con un `KeyError`
+    dentro de un `model_validator` en produccion, que pydantic no envuelve.
+    """
+    assert aspect.ratio > 0
+    ancho, alto = aspect.value.split(":")
+    assert aspect.ratio == pytest.approx(int(ancho) / int(alto))
+
+
+def test_a2b_las_razones_conocidas_son_las_declaradas() -> None:
+    """El enum no crece en silencio."""
     assert Aspect.VERTICAL.ratio == pytest.approx(9 / 16)
     assert Aspect.HORIZONTAL.ratio == pytest.approx(16 / 9)
 
@@ -112,6 +131,33 @@ def test_b3_no_se_puede_declarar_ninguna_salida() -> None:
         _ = make_contract(schema_version="1.2", outputs=[])
 
 
+def test_b3b_el_indice_es_una_etiqueta_no_un_identificador() -> None:
+    """Dos formatos con el mismo `index` cargan; no son una colision todavia.
+
+    El `index` es una etiqueta ordenada, no una clave unica, asi que repetirlo
+    entre formatos distintos es legal. Lo que no puede ser es repetir el ASPECTO,
+    porque ahi si dos piezas identicas compartirian el nombre de entrega. La
+    unicidad real del nombre la pondra PR 3, que hoy nombra las piezas
+    `{campana}-{plataforma}-{NN}` sin el formato.
+    """
+    contrato = make_contract(
+        schema_version="1.2",
+        outputs=[{"aspect": "9:16", "index": 0}, {"aspect": "16:9", "index": 0}],
+    )
+
+    assert [spec.index for spec in contrato.outputs] == [0, 0]
+    assert [spec.aspect for spec in contrato.outputs] == [
+        Aspect.VERTICAL,
+        Aspect.HORIZONTAL,
+    ]
+
+
+def test_b3c_el_indice_no_puede_ser_negativo() -> None:
+    """Un indice negativo no es una posicion, es un nombre de archivo raro."""
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        _ = make_contract(schema_version="1.2", outputs=[{"aspect": "9:16", "index": -1}])
+
+
 def test_b4_no_se_pueden_repetir_aspectos() -> None:
     """Dos salidas del mismo formato colisionarian en el nombre de entrega.
 
@@ -153,6 +199,72 @@ def test_b6_un_documento_1_1_sin_salidas_carga_con_el_default() -> None:
     assert contract.outputs == (OutputSpec(aspect=Aspect.VERTICAL, index=0),)
 
 
+def test_b6b_un_1_1_puede_traer_el_default_explicito() -> None:
+    """La veda es por valor, no por presencia, y esto es el motivo.
+
+    `model_dump` emite siempre todos los campos, y un contrato 1.1 tiene que
+    sobrevivir a su propio round-trip: `tests/support.py:with_platform` revalida
+    el dump en vez de copiar el modelo, asi que el documento que llega al
+    validador SI trae `outputs` aunque nadie lo declarara. Un chequeo por
+    presencia rechazaria eso y, con el, media suite.
+    """
+    contrato = make_contract(schema_version="1.1")
+
+    recargado = Contract.model_validate(contrato.model_dump(mode="json"))
+
+    assert recargado.outputs == contrato.outputs
+    assert recargado.schema_version == "1.1"
+
+
+def test_b8_el_digest_no_mueve_por_declarar_el_default() -> None:
+    """Un contrato ya grabado tiene que conservar su hash.
+
+    `outputs` no existia en 1.1, asi que un contrato 1.1 que no lo declara no lo
+    tiene en su dump. `contract_digest` lo poda cuando vale el default, que es
+    el patron que ya usan `audio_policy` y los ajustes de watermark.
+
+    La comparacion es 1.1 contra 1.1 a proposito: `schema_version` entra en el
+    digest, asi que un 1.1 nunca puede igualar a un 1.2 y comparar eso solo
+    probaria que el campo existe.
+    """
+    sin_declarar = contract_digest(make_contract(schema_version="1.1"))
+    declarando_el_default = contract_digest(
+        make_contract(schema_version="1.1", outputs=[_VERTICAL])
+    )
+
+    assert sin_declarar == declarando_el_default
+
+
+def test_b8c_el_digest_de_un_1_1_es_el_de_siempre() -> None:
+    """El valor golden, medido sobre `main` antes de este PR.
+
+    Sin este ancla, la poda de `outputs` puede desaparecer y mover el hash de
+    todo contrato 1.1 sin que ningun test se entere: nada mas mide el digest.
+    Con ella, el hash que hay grabado en los manifiestos es un contrato, no una
+    funcion del dia.
+    """
+    assert contract_digest(make_contract(schema_version="1.1")) == (
+        "b307aa91c957f7ae38849c2e21f3e67bc4891ad948cc7c7e5e7814e94b09e006"
+    )
+
+
+def test_b8b_declarar_salidas_de_verdad_si_mueve_el_digest() -> None:
+    """La poda no puede tragarse la declaracion: si no, no detectaria el cambio."""
+    base = contract_digest(make_contract())
+    dual = contract_digest(make_contract(schema_version="1.2", outputs=[_VERTICAL, _HORIZONTAL]))
+
+    assert base != dual
+
+
+def test_b9_el_digest_sobrevive_al_round_trip() -> None:
+    """Rehidratar un contrato no puede cambiar su identidad."""
+    contrato = make_contract(schema_version="1.2", outputs=[_VERTICAL])
+
+    recargado = Contract.model_validate(contrato.model_dump(mode="json"))
+
+    assert contract_digest(recargado) == contract_digest(contrato)
+
+
 def test_b7_esta_version_emite_1_2() -> None:
     """El default es 1.2 aunque se lean 1.1.
 
@@ -163,6 +275,17 @@ def test_b7_esta_version_emite_1_2() -> None:
     """
     assert Contract.model_json_schema()["properties"]["schema_version"]["default"] == "1.2"
     assert make_contract(schema_version="1.2").schema_version == "1.2"
+
+
+def test_b7b_el_contrato_de_referencia_emite_1_2() -> None:
+    """El default tiene que llegar al codigo que construye contratos de verdad.
+
+    `vanilla_contract` es el camino del modo zero-contract, donde no hay brief
+    ni LLM: el contrato lo sintetiza el codigo. Comprobar el default del modelo
+    JSON no basta, porque se puede declarar 1.2 en el modelo y seguir emitiendo
+    1.1 desde ahi.
+    """
+    assert vanilla_contract(campaign_id="camp-test").schema_version == "1.2"
 
 
 def test_c1_el_lienzo_se_valida_contra_su_aspecto_declarado() -> None:
@@ -179,6 +302,17 @@ def test_c1_el_lienzo_se_valida_contra_su_aspecto_declarado() -> None:
         _ = SplitScreenConfig.model_validate(_split(aspect="9:16", **_CANVAS_16x9))
 
     assert "9:16" in str(excinfo.value)
+
+
+def test_c1b_el_lienzo_tiene_techo() -> None:
+    """El cociente del aspecto no puede reventar con un entero gigante.
+
+    `width / height` sobre enteros sin cota lanza `OverflowError`, que pydantic
+    no envuelve: un documento no confiable alcanzaba un crash sin `ValidationError`.
+    Con el techo, el mismo documento se rechaza como lo que es.
+    """
+    with pytest.raises(ValidationError, match="less than or equal to 65536"):
+        _ = SplitScreenConfig.model_validate(_split(width=10**400, height=2))
 
 
 def test_c2_el_lienzo_vertical_por_defecto_seguida_siendo_valido() -> None:
@@ -200,7 +334,13 @@ def test_c3_un_lienzo_vertical_no_puede_declararse_horizontal() -> None:
 
 
 def test_d1_lienzo_y_salida_declarada_pueden_coincidir() -> None:
-    """El caso coherente: una salida, un lienzo de ese formato."""
+    """El caso coherente: una salida, un lienzo de ESE formato.
+
+    No es tautologico aunque las dos declaraciones digan 9:16: la regla podria
+    comparar mal y aun asi dejar pasar este caso. Lo que lo hace util es que
+    recorre las DOS ramas de la reconciliacion (una sola salida, aspecto
+    coincidente) y exige que el lienzo sobreviva con su geometria intacta.
+    """
     contract = make_contract(
         schema_version="1.2",
         outputs=[_VERTICAL],
@@ -208,7 +348,26 @@ def test_d1_lienzo_y_salida_declarada_pueden_coincidir() -> None:
     )
 
     assert contract.split_screen is not None
-    assert contract.split_screen.aspect is contract.outputs[0].aspect
+    assert contract.split_screen.aspect is Aspect.VERTICAL
+    assert (contract.split_screen.width, contract.split_screen.height) == (1080, 1920)
+
+
+def test_d1b_un_lienzo_horizontal_tambien_puede_coincidir() -> None:
+    """La reconciliacion no esta cableada a 9:16.
+
+    Aqui el lienzo y la salida son los dos HORIZONTAL, y aun asi tienen que
+    cargar. Si la comparacion se hubiera escrito contra el valor crudo "9:16" en
+    vez de contra `outputs[0].aspect`, este contrato pasaria o fallaria por el
+    motivo equivocado.
+    """
+    contract = make_contract(
+        schema_version="1.2",
+        outputs=[_HORIZONTAL],
+        split_screen=_split(aspect="16:9", **_CANVAS_16x9),
+    )
+
+    assert contract.split_screen is not None
+    assert contract.split_screen.aspect is Aspect.HORIZONTAL
 
 
 def test_d2_un_lienzo_horizontal_con_salida_vertical_se_rechaza() -> None:

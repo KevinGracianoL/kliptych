@@ -167,15 +167,19 @@ WatermarkConfig = Watermark
 _SPLIT_ASPECT_EPS = 1e-9
 _SPLIT_EVEN_PX = 2
 _SPLIT_MIN_PANEL_PX = 2
+# Techo del lienzo. Ademas de que ningun encoder llega aqui, acota el cociente
+# `width / height`: con enteros arbitrariamente grandes la division launcha
+# `OverflowError`, que pydantic no envuelve, en vez de un `ValidationError`.
+_MAX_CANVAS_PX = 65_536
 
 
 class SplitScreenConfig(ContractBase):
-    """Composición vertical en dos paneles (superior + inferior).
+    """Composición en dos paneles (superior + inferior).
 
-    El lienzo de salida es vertical 9:16 (por defecto 1080x1920) dividido
-    en dos paneles horizontales: ``panel_ratio`` es la fracción del alto
-    útil (alto menos ``gap``) que ocupa el panel superior; ``gap`` es la
-    franja negra entre paneles, en píxeles pares. ``top_source`` y
+    El lienzo tiene la geometria que declara ``aspect`` (9:16 por defecto,
+    1080x1920) dividido en dos paneles horizontales: ``panel_ratio`` es la
+    fracción del alto útil (alto menos ``gap``) que ocupa el panel superior;
+    ``gap`` es la franja negra entre paneles, en píxeles pares. ``top_source`` y
     ``bottom_source`` son los asset_id de cada panel (video o imagen).
     """
 
@@ -183,13 +187,19 @@ class SplitScreenConfig(ContractBase):
     bottom_source: str = Field(min_length=1)
     gap: int = Field(default=0, ge=0)
     panel_ratio: float = Field(default=0.5, gt=0, lt=1)
-    width: int = Field(default=1080, gt=0)
-    height: int = Field(default=1920, gt=0)
+    width: int = Field(default=1080, gt=0, le=_MAX_CANVAS_PX)
+    height: int = Field(default=1920, gt=0, le=_MAX_CANVAS_PX)
     # El lienzo se valida contra el ASPECTO DECLARADO, no contra una constante.
     # Antes compara con 9 y 16 de modulo, asi que el unico lienzo posible era
     # 9:16 y ningun contrato podia declarar otra cosa. El default sigue siendo
     # VERTICAL, de modo que un contrato que no dice nada se comporta EXACTAMENTE
     # como antes.
+    # OJO: el gate todavia valida este lienzo contra SU PROPIA constante de 9:16
+    # (`gate/checks.py`), asi que un lienzo no vertical construye aqui pero lo
+    # rechaza el gate con un mensaje que nombra un aspecto que el contrato no
+    # declaro. Es el orden de la escalera: PR 1 declara y PR 2 mueve la
+    # constante del gate. No es alcanzable desde la CLI todavia, porque el draft
+    # no expone `aspect`.
     aspect: Aspect = Aspect.VERTICAL
 
     @field_validator("top_source", "bottom_source")
@@ -431,11 +441,11 @@ KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
 class OutputSpec(ContractBase):
     """Un formato que el contrato dice que hay que emitir.
 
-    El `index` desambigua DENTRO del conjunto de salidas: es el `NN` de
-    `<campana>-<formato>-<NN>`. No dice nada de la plataforma, que ya viaja en el
-    `piece_id` por su cuenta. El par (plataforma, formato) es un producto
-    cartesiano: una campana con dos plataformas y dos salidas emite cuatro
-    artefactos por span.
+    El `index` es una etiqueta ORDENADA dentro del conjunto de salidas, no un
+    identificador unico. El par (plataforma, formato) es un producto cartesiano:
+    una campana con dos plataformas y dos salidas emite cuatro artefactos por
+    span. El nombre de entrega lo pondra PR 3, que hoy sigue siendo
+    `{campana}-{plataforma}-{NN}` y no incluye el formato.
     """
 
     aspect: Aspect = Aspect.VERTICAL
@@ -525,7 +535,7 @@ class Contract(ContractBase):
 
     @model_validator(mode="after")
     def _schema_version_matches_outputs(self) -> Self:
-        """Un documento 1.1 no puede declarar `outputs`.
+        """Un documento 1.1 no puede declarar SALIDAS que difieran del default.
 
         `extra="forbid"` no ayuda aqui: `outputs` SI existe en el modelo, asi que
         un documento que dice 1.1 y ademas trae `outputs` se valida sin quejarse
@@ -534,11 +544,18 @@ class Contract(ContractBase):
         1.1 no puede expresar. Un documento que se contradice no se acepta en
         silencio: o se corrige a "1.2", o se quita `outputs`.
 
+        La comparacion es por VALOR y no por presencia a proposito. Un 1.1 que
+        trae el default se ACEPTA, porque `model_dump` emite siempre todos los
+        campos y un contrato 1.1 tiene que sobrevivir a su propio round-trip
+        (`tests/support.py:with_platform` revalida en vez de copiar el modelo).
+        Un chequeo por presencia rechazaria ese round-trip y, con el, media suite.
+
         Returns:
             ``self``, sin cambios.
 
         Raises:
-            ValueError: si el documento se declara 1.1 y trae `outputs`.
+            ValueError: si el documento se declara 1.1 y declara salidas que no
+                son el default.
         """
         if self.schema_version == "1.1" and self.outputs != _DEFAULT_OUTPUTS:
             declarados = ", ".join(spec.aspect.value for spec in self.outputs)
@@ -832,10 +849,10 @@ def contract_digest(contract: Contract) -> str:
 
     Excluye metadatos volátiles de resolución (``resolved_at`` de los assets):
     el mismo contrato resuelto dos veces produce el mismo digest. Los
-    opcionales añadidos tras v1.1 (``languages.language``, ``audio_policy``)
-    se excluyen cuando no se declaran, para no mover el hash de contratos ya
-    grabados; al declararlos sí entran al digest e invalidan la caché de
-    ``--resume``.
+    opcionales añadidos tras v1.1 (``languages.language``, ``audio_policy``,
+    ``outputs``) se excluyen cuando no se declaran, para no mover el hash de
+    contratos ya grabados; al declararlos sí entran al digest e invalidan la
+    caché de ``--resume``.
 
     Args:
         contract: Contrato validado.
@@ -865,6 +882,12 @@ def _prune_unset_options(contract: Contract, dump: dict[str, object]) -> None:
             del languages["language"]
     if contract.audio_policy is None:
         _ = dump.pop("audio_policy", None)
+    if contract.outputs == _DEFAULT_OUTPUTS:
+        # `outputs` llego en v1.2, asi que un contrato ya grabado que no lo
+        # declara no lo tiene en su dump. Podarlo cuando vale el default es lo
+        # que mantiene el digest identico entre versiones; al declarar salidas
+        # de verdad si entran, y con eso invalidan la cache de `--resume`.
+        _ = dump.pop("outputs", None)
     if contract.hook_keyword is None:
         _ = dump.pop("hook_keyword", None)
     if not contract.unmapped:
