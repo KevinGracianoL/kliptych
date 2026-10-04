@@ -1785,12 +1785,20 @@ def _rationale_segmentador(resultado: SpeechSegmentResult) -> str:
     Returns:
         El texto de justificacion.
     """
+    # Forma ETIQUETA: VALOR, y no frase con el numero dentro.
+    #
+    # Una frase con recuento lleva concordancia de genero y de numero, y esa
+    # concordancia no se puede escribir a mano sin equivocarse: "1 particiones"
+    # es lo que sale. La forma etiqueta no tiene genero ni numero en ningun
+    # idioma, y no se rompe con 0, con 1 ni con 2. Por eso todos los recuentos
+    # van invertidos. NO reescribir esto como frase: se ha probado y falla.
     return (
-        f"segmentador local determinista: {len(resultado.moments)} de "
-        f"{resultado.qualifying} tramos por palabras por segundo y silencios; "
-        f"{resultado.qualifying - len(resultado.moments)} descartados por el techo, "
-        f"{resultado.discarded_by_floor} por los suelos, "
-        f"{resultado.split} particiones por duracion"
+        "segmentador local determinista; tramos por palabras por segundo y "
+        f"silencios; entregados: {len(resultado.moments)}; "
+        f"calificados: {resultado.qualifying}; "
+        f"descartados por el techo: {resultado.qualifying - len(resultado.moments)}; "
+        f"descartados por los suelos: {resultado.discarded_by_floor}; "
+        f"particiones por duracion: {resultado.split}"
     )
 
 

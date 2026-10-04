@@ -266,8 +266,7 @@ def test_t5_la_justificacion_dice_cuantos_se_descartaron() -> None:
     resultado = SpeechSegmentResult(moments=(), qualifying=19, discarded_by_floor=6, split=2)
     texto = _rationale(resultado)
 
-    assert "12 de 19" in texto or "0 de 19" in texto, texto
-    assert "19" in texto, texto
+    assert f"calificados: {resultado.qualifying}" in texto, texto
     assert "techo" in texto, texto
     assert "suelos" in texto, texto
     assert "particiones" in texto, texto
@@ -278,7 +277,8 @@ def test_t5b_la_justificacion_real_refleja_el_recuento_real() -> None:
     resultado = segmenter.segment_by_speech_rate(_varios_tramos(19))
     texto = _rationale(resultado)
 
-    assert f"{len(resultado.moments)} de {resultado.qualifying}" in texto, texto
+    assert f"entregados: {len(resultado.moments)}" in texto, texto
+    assert f"calificados: {resultado.qualifying}" in texto, texto
     assert f"{resultado.discarded_by_floor}" in texto, texto
 
 
