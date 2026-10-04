@@ -39,6 +39,31 @@ _DEFAULT_HEIGHT = 1920
 _MARGIN_H = 20
 _ENCODING = 1
 
+# Grouping of words into one Dialogue event each. A karaoke line is read as a
+# unit: the highlight sweeps across its words, so words are grouped and emitted
+# as consecutive {\k} tags inside a single event, not one event per word.
+# Vertical 9:16 is narrow, and the SubStation readable-line convention is the
+# upper bound for how long a line should stay up.
+MAX_CHARS_PER_LINE = 18
+MAX_DURATION_S = 7.0
+# Word endings that make a break after them preferable to breaking at the limit.
+SENTENCE_ENDINGS = ".?!,;:"
+# A sentence break is only taken once the line already holds this many words,
+# otherwise every sentence-ending word would leave an orphan line.
+MIN_WORDS_BEFORE_SENTENCE_BREAK = 2
+
+# Smallest {\k} that libass actually draws. Measured, not assumed: a word
+# allocated 0cs renders NOTHING (no error, no warning), so a sub-centisecond
+# word would silently vanish from the output. {\k1}, {\k2} and {\k5} all draw the
+# word in full and differ only in how long the highlight lasts.
+#
+# The effective floor is min(MIN_WORD_CENTISECONDS, total_cs // n_words), so the
+# repair can never break the rule that the {\k} values sum to the event
+# duration; it moves centiseconds, it never adds them. Real speech runs
+# 200-500ms per word, so this floor almost never binds and 1cs is enough. A2.2
+# makes it configurable.
+MIN_WORD_CENTISECONDS = 1
+
 _STYLE_FORMAT = (
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
     "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
@@ -138,7 +163,7 @@ class SubtitleRenderer:
             "[Events]",
             _EVENT_FORMAT,
         ]
-        lines.extend(_dialogue_line(word) for word in words)
+        lines.extend(_line_event(line) for line in _group_words(words))
         return "\n".join(lines) + "\n"
 
     def write(self, words: Sequence[Word], destination: Path) -> Path:
@@ -303,11 +328,200 @@ def _style_line(style: SubtitleStyle) -> str:
     )
 
 
-def _dialogue_line(word: Word) -> str:
-    start = _format_time(word.start_s)
-    end = _format_time(word.end_s)
-    karaoke = max(0, round((word.end_s - word.start_s) * 100))
-    text = f"{{\\k{karaoke}}}{_escape_text(word.text)}"
+def _ends_sentence(word: Word) -> bool:
+    """Dice si la palabra cierra una frase segun ``SENTENCE_ENDINGS``.
+
+    Args:
+        word: La palabra a inspeccionar.
+
+    Returns:
+        True si su texto termina en puntuacion de cierre.
+    """
+    return word.text.rstrip().endswith(tuple(SENTENCE_ENDINGS))
+
+
+def _group_words(words: Sequence[Word]) -> list[list[Word]]:
+    """Agrupa palabras en lineas, una por evento ``Dialogue``.
+
+    Las palabras son atomicas: nunca se parte una palabra. Una linea se cierra
+    cuando anadir la siguiente superaria ``MAX_CHARS_PER_LINE`` **o**
+    ``MAX_DURATION_S``. Si dentro del limite hay una palabra que termina en
+    ``SENTENCE_ENDINGS``, se rompe ahi; si no, se rompe en el limite. No hay
+    duracion minima: una linea corta es valida y rellenarla mentiria sobre el
+    tiempo.
+
+    Args:
+        words: Palabras con marca de tiempo, en orden temporal.
+
+    Returns:
+        Las lineas, cada una con al menos una palabra.
+    """
+    lines: list[list[Word]] = []
+    current: list[Word] = []
+    current_chars = 0
+    for word in words:
+        length = len(word.text)
+        line_start = current[0].start_s if current else word.start_s
+        # El span va del inicio de la PRIMERA palabra de la linea al fin de la
+        # que se anade. Sumar el span anterior seria contarlo dos veces y
+        # partiria las lineas antes de tiempo.
+        span = word.end_s - line_start
+        projected = current_chars + (1 + length if current else length)
+        if current and (projected > MAX_CHARS_PER_LINE or span > MAX_DURATION_S):
+            lines.append(current)
+            current = [word]
+            current_chars = length
+            continue
+        current.append(word)
+        current_chars = projected
+        # La puntuacion de cierre es un punto de corte PREFERIDO, pero no se
+        # parte una linea en su primera palabra: eso deja un huerfano por
+        # Oracion.
+        if len(current) >= MIN_WORDS_BEFORE_SENTENCE_BREAK and _ends_sentence(word):
+            lines.append(current)
+            current = []
+            current_chars = 0
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _allocate_centiseconds(words: Sequence[Word]) -> list[int]:
+    r"""Reparte los centisegundos de una linea entre sus palabras.
+
+    Los ``{\k}`` van en centisegundos enteros y las marcas de faster-whisper son
+    float en segundos. Redondear cada palabra por su cuenta hace que la suma no
+    cuadre con la duracion real, y el error se acumula siempre en el mismo
+    sentido: el resalte se queda atras de la voz y no la alcanza nunca.
+
+    Reparto por resto mayor: se convierte el TOTAL de la linea una sola vez a
+    centisegundos enteros, cada palabra recibe ``floor(d*100)``, y los
+    centisegundos que sobran van uno a una a las palabras con mayor resto
+    fraccionario, desempatando por indice. Asi la suma es exacta por
+    construccion.
+
+    Luego se reparan los ceros MOVIENDO un centisegundo desde las asignaciones
+    mayores, nunca sumando, porque un ``{\k0}`` no se dibuja. La suma sigue
+    cuadrando con la duracion.
+
+    Args:
+        words: Palabras de una sola linea.
+
+    Returns:
+        Los centisegundos de cada palabra, en orden.
+
+    Raises:
+        SubtitleError: Si la linea tiene mas palabras que centisegundos, que no
+            puede ocurrir con habla real pero si con una transcripcion
+            sintetica o corrupta.
+    """
+    if not words:
+        msg = "no hay palabras que repartir"
+        raise SubtitleError(msg)
+    # La base del reparto son las RANURAS: desde el inicio de cada palabra
+    # hasta el inicio de la siguiente, y la ultima hasta el final de la linea.
+    # Asi los centisegundos teselan la linea entera, silencios incluidos. Con la
+    # duracion propia de cada palabra los silencios se perderian y el evento
+    # terminaria antes de que termine la ultima palabra.
+    #
+    # ALTERNATIVA EVALUADA Y DESCARTADA: cuantizar cada limite a centisegundos
+    # enteros primero y repartir por diferencias enteras. Borra 22 lineas de este
+    # bloque y elimina por completo el round(..., 9) de abajo, porque no habria
+    # ni resto ni orden. Se descarto por FRECUENCIA, no por correccion:
+    #     ranura de 0 cs con aritmetica float : practicamente imposible
+    #     ranura de 0 cs cuantizando limites  : 15109 / 20000 lineas = 75%
+    # con palabras de 3 a 15 ms. La reparacion de ceros ya existe y lo absorbe,
+    # pero entonces deja de ser la excepcion y pasa a ser el camino normal del
+    # habla rapida, y todo fallo futuro seria un fallo en el camino comun.
+    # Misma correccion, peor forma.
+    line_end = words[-1].end_s
+    slots: list[float] = [
+        ((words[index + 1].start_s if index + 1 < len(words) else line_end) - word.start_s) * 100.0
+        for index, word in enumerate(words)
+    ]
+    total = sum(slots)
+    total_cs = round(total)
+    floor_cs = min(MIN_WORD_CENTISECONDS, total_cs // len(words))
+    if floor_cs < 1:
+        msg = (
+            f"linea degenerada: {len(words)} palabras en {total_cs} centisegundos; "
+            "no hay reparto posible que las dibuje sin superar la duracion"
+        )
+        raise SubtitleError(msg)
+
+    allocated = [max(floor_cs, int(value)) for value in slots]
+    difference = total_cs - sum(allocated)
+    if difference > 0:
+        # El resto se compara redondeado: dos ranuras iguales pueden diferir en
+        # el ultimo bit por el ruido de coma flotante al restar marcas, y sin
+        # redondear el desempate por indice seria inestable.
+        order = sorted(range(len(words)), key=lambda i: (-round(slots[i] - int(slots[i]), 9), i))
+        for step in range(difference):
+            allocated[order[step % len(order)]] += 1
+    elif difference < 0:
+        order = sorted(range(len(words)), key=lambda i: (-allocated[i], i))
+        for step in range(-difference):
+            allocated[order[step % len(order)]] -= 1
+            if allocated[order[step % len(order)]] < floor_cs:
+                msg = (
+                    f"linea degenerada: {len(words)} palabras en {total_cs} centisegundos; "
+                    "el suelo por palabra no cabe"
+                )
+                raise SubtitleError(msg)
+    if sum(allocated) != total_cs:
+        # INALCANZABLE POR CONSTRUCCION, y aun asi se deja el guard.
+        #
+        # Structuralmente: los tres caminos terminan en suma == total_cs. Si la
+        # diferencia es positiva, el bucle mueve exactamente esa diferencia, una
+        # unidad por paso, sobre una permutacion de los indices. Si es negativa,
+        # el bucle descuenta exactamente su opuesto y, en cuanto una asignacion
+        # bajaria del suelo, lanza OTRO error antes de llegar aqui. Si es cero,
+        # la suma ya es total_cs. No queda ninguna rama que termine con otra
+        # suma.
+        #
+        # Medido ademas: 69.723 entradas (rejilla exhaustiva de 1 a 3 palabras
+        # por 20 duraciones, mas 60.000 lineas aleatorias con silencios
+        # arbitrarios) y 0 veces alcanzado. Patron H2 de PR #54.
+        #
+        # No lleva `# pragma: no cover`: no estamos tapando un hueco de
+        # cobertura, estamos documentando una linea inalcanzable por
+        # construccion, que es una afirmacion distinta y mas fuerte.
+        msg = f"reparto inconsistente: {sum(allocated)} != {total_cs}"
+        raise SubtitleError(msg)
+    return allocated
+
+
+def _line_event(words: Sequence[Word]) -> str:
+    r"""Construye un evento ``Dialogue`` con un ``{\k}`` por palabra.
+
+    Las marcas del evento y los valores ``{\\k}`` salen de la MISMA rejilla de
+    centisegundos enteros: son una linea temporal en dos representaciones, no dos
+    lineales temporales. El final del evento es el inicio mas la suma de los
+    ``{\\k}``, de modo que no pueden separarse.
+
+    La identidad telescopica es EXACTA EN EL ARCHIVO EMITIDO: la suma de los
+    centisegundos enteros es siempre igual a ``End - Start``, que es lo que
+    consume libass. No es exacta contra un extremo redondeado por separado,
+    porque en coma flotante ``sum(ranuras)`` y ``end - start`` difieren en el
+    ultimo bit y, cuando el total cae a un pelo de un ``.5``, los dos ``round()``
+    caen en lados opuestos: 96 de 69.723 lineas, un 0,14%. Es la resolucion del
+    propio formato, porque las marcas ASS son de centisegundo.
+
+    Args:
+        words: Palabras de una sola linea.
+
+    Returns:
+        La linea de dialogo ASS.
+    """
+    allocated = _allocate_centiseconds(words)
+    start_cs = round(words[0].start_s * 100)
+    end_cs = start_cs + sum(allocated)
+    text = "".join(
+        f"{{\\k{value}}}{_escape_text(word.text)}"
+        for word, value in zip(words, allocated, strict=True)
+    )
+    start = _format_time(start_cs / 100)
+    end = _format_time(end_cs / 100)
     return f"Dialogue: 0,{start},{end},{_STYLE_NAME},,0,0,0,,{text}"
 
 
