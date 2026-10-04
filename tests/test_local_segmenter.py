@@ -227,7 +227,7 @@ def test_b1_un_tramo_por_debajo_de_min_words_se_descarta_aunque_dure_lo_suficien
     duracion = palabras[-1].end_s - palabras[0].start_s
     assert len(palabras) < segmenter.MIN_WORDS
     assert duracion >= segmenter.MIN_CLIP_S, duracion
-    assert segmenter.segment_by_speech_rate(palabras) == ()
+    assert segmenter.segment_by_speech_rate(palabras).moments == ()
 
 
 def test_b2_un_tramo_mas_corto_de_min_clip_s_se_descarta_aunque_tenga_palabras() -> None:
@@ -236,7 +236,7 @@ def test_b2_un_tramo_mas_corto_de_min_clip_s_se_descarta_aunque_tenga_palabras()
     duracion = palabras[-1].end_s - palabras[0].start_s
     assert len(palabras) >= segmenter.MIN_WORDS
     assert duracion < segmenter.MIN_CLIP_S, duracion
-    assert segmenter.segment_by_speech_rate(palabras) == ()
+    assert segmenter.segment_by_speech_rate(palabras).moments == ()
 
 
 def test_b3_un_tramo_que_pasa_los_dos_suelos_se_conserva() -> None:
@@ -253,7 +253,7 @@ def test_b4_el_min_s_del_contrato_sube_el_suelo_por_encima_del_propio() -> None:
     duracion = palabras[-1].end_s - palabras[0].start_s
     assert 2.0 <= duracion < 8.0, duracion
     assert len(segmenter.segment_by_speech_rate(palabras)) == 1
-    assert segmenter.segment_by_speech_rate(palabras, min_s=8.0) == ()
+    assert segmenter.segment_by_speech_rate(palabras, min_s=8.0).moments == ()
     assert _piso(None) == segmenter.MIN_CLIP_S
     assert _piso(8.0) == pytest.approx(8.0)
 
@@ -498,13 +498,13 @@ def test_e3_el_score_no_es_el_orden_de_salida() -> None:
 
 
 def test_f1_entrada_vacia_da_tupla_vacia() -> None:
-    assert segmenter.segment_by_speech_rate([]) == ()
+    assert segmenter.segment_by_speech_rate([]).moments == ()
 
 
 def test_f2_una_sola_palabra_se_descarta() -> None:
     """Una palabra no llega al suelo de palabras, por muy larga que sea."""
     palabras = [Word(start_s=0.0, end_s=9.0, text="sola", confidence=0.9, token_id=0)]
-    assert segmenter.segment_by_speech_rate(palabras) == ()
+    assert segmenter.segment_by_speech_rate(palabras).moments == ()
 
 
 def test_f3_las_palabras_desordenadas_se_ordenan_sin_mutar_la_entrada() -> None:

@@ -42,10 +42,10 @@ simple, o densidad normalizada por una constante con nombre). Ese cambio no se
 anticipa aqui porque anadiria una constante que hoy nadie justify.
 """
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Final, cast, override
+from typing import Final, override
 
 from kliptych.moments import Moment, MomentSource
 from kliptych.transcribe import Word
@@ -167,28 +167,37 @@ class SpeechSegmentResult:
 
     @override
     def __hash__(self) -> int:
-        """Hash coherente con la igualdad por momentos.
+        """Hash coherente con la igualdad por TODOS los campos.
 
         Returns:
-            El hash de la tupla de momentos.
+            El hash de la tupla de campos completa.
         """
-        return hash(self.moments)
+        return hash((self.moments, self.qualifying, self.discarded_by_floor, self.split))
 
     @override
     def __eq__(self, otro: object) -> bool:
-        """Compara contra otra cosa con los mismos momentos.
+        """Compara TODOS los campos, recuentos incluidos.
+
+        Comparar solo los momentos seria justo el fallo que este tipo existe para
+        evitar: una asercion pasaria con `qualifying`, `discarded_by_floor` y
+        `split` todos equivocados. Y comparar contra una tupla suelta igualaria
+        un informe PARCIAL a uno completo sin que nada se entere, asi que un
+        resultado no es igual a la tupla de sus momentos.
 
         Args:
             otro: El valor con el que se compara.
 
         Returns:
-            True si los momentos coinciden.
+            True solo si todos los campos coinciden.
         """
-        if isinstance(otro, SpeechSegmentResult):
-            return self.moments == otro.moments
-        if isinstance(otro, tuple | list):
-            return self.moments == tuple(cast("Iterable[Moment]", otro))
-        return NotImplemented
+        if not isinstance(otro, SpeechSegmentResult):
+            return NotImplemented
+        return (
+            self.moments == otro.moments
+            and self.qualifying == otro.qualifying
+            and self.discarded_by_floor == otro.discarded_by_floor
+            and self.split == otro.split
+        )
 
 
 def segment_by_speech_rate(
