@@ -55,6 +55,43 @@ class AttributionType(StrEnum):
     NONE = "none"
 
 
+class Aspect(StrEnum):
+    """Relacion de aspecto que el contrato declara para su salida.
+
+    Es un conjunto CERRADO a proposito. Un float admitiria 1,7777, que ningun
+    codificador respeta y que ningun check podria comparar con exactitud; un
+    enum hace que el conjunto soportado sea explicito y que un aspecto no
+    soportado sea un error de construccion y no un render silenciosamente
+    equivocado. Cualquier otra relacion (1:1, 4:5) se anade aqui de forma
+    explicita cuando haga falta.
+
+    La razon la expone cada miembro para que ningun consumidor la vuelva a
+    escribir: el unico lugar que conoce el 9:16 y el 16:9 es este enum.
+    """
+
+    VERTICAL = "9:16"
+    HORIZONTAL = "16:9"
+
+    @property
+    def ratio(self) -> float:
+        """La relacion ancho/alto que declara este aspecto.
+
+        La tabla se indexa por MIEMBRO, no por el string del valor, para que
+        anadir un miembro sin su razon falle en el test que recorre `Aspect` y
+        no con un `KeyError` dentro de un validador, que pydantic no envuelve.
+
+        Returns:
+            La razon como float.
+        """
+        return _ASPECT_RATIOS[self]
+
+
+_ASPECT_RATIOS: dict["Aspect", float] = {
+    Aspect.VERTICAL: 9.0 / 16.0,
+    Aspect.HORIZONTAL: 16.0 / 9.0,
+}
+
+
 class WatermarkPosition(StrEnum):
     """Zona del lienzo donde se superpone el watermark."""
 

@@ -22,6 +22,7 @@ from kliptych.contract.draft import (
     WatermarkDraft,
 )
 from kliptych.contract.enums import (
+    Aspect,
     AttributionType,
     AudioPolicy,
     AudioRule,
@@ -50,6 +51,7 @@ from kliptych.contract.schema import (
     LyricConfig,
     MinViewsForPayout,
     OfficialAudio,
+    OutputSpec,
     PlatformRules,
     RuleSet,
     Segment,
@@ -68,6 +70,7 @@ from kliptych.contract.schema import (
 __all__ = [
     "KNOWN_VALIDATOR_RULES",
     "AnalyticsProofRequired",
+    "Aspect",
     "AssetBundle",
     "AssetDraft",
     "AssetRef",
@@ -101,6 +104,7 @@ __all__ = [
     "Mode",
     "OfficialAudio",
     "OfficialAudioDraft",
+    "OutputSpec",
     "Platform",
     "PlatformDraft",
     "PlatformRules",
