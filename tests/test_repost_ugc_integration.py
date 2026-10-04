@@ -359,7 +359,7 @@ class _PalabrasTranscriber(_CountingTranscriber):
         self._counts.transcribe += 1
         palabras: list[Word] = []
         token = 0
-        for grupo, inicio in ((8, 0.0), (8, 5.0)):
+        for grupo, inicio in ((8, 0.0), (8, 7.0)):
             for indice in range(grupo):
                 palabras.append(
                     Word(
@@ -371,7 +371,7 @@ class _PalabrasTranscriber(_CountingTranscriber):
                     )
                 )
                 token += 1
-        return Transcript(words=tuple(palabras), language="es", duration_s=9.0, text="palabras")
+        return Transcript(words=tuple(palabras), language="es", duration_s=11.0, text="palabras")
 
 
 def test_repost_trocea_en_varios_segmentos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

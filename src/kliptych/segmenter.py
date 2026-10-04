@@ -53,14 +53,46 @@ from kliptych.transcribe import Word
 MIN_SPEECH_RATE_WPS: Final[float] = 2.0
 # Silencio que cierra un tramo. ESTRICTAMENTE mayor: justo en el borde no corta.
 #
+# VALOR MEDIDO, no elegido por gusto. Viene del histograma de huecos de un
+# excerpt real de 10 min (una clase, 915 palabras de faster-whisper) y del barrido
+# de umbrales sobre el, todo con la regla de descarte ya corregida:
+#
+#     MAX_GAP_S   clips   mediana   <6s
+#          0.6      56      4.82    33
+#          1.0      46      6.24    22
+#          1.5      33     10.36     9
+#          2.0      24     18.64     2   <- la rodilla
+#          3.0      18     20.24     1   (y el maximo.topa el tope de 60 s)
+#
+# 2,0 es donde la cola de clips por debajo de 6 s se hunde (22 -> 9 -> 2) sin que
+# la mediana se pase de lo publicable. 3,0 no compra nada: un clip mas de cola y
+# empuja el maximo contra el tope, o sea que parte tramos por la mitad.
+#
+# LO QUE EL HISTOGRAMA DICE Y QUE NO HAY QUE VOLVER A MEDIR: entre 0,2 y 3,0 s el
+# histograma es una meseta sin separacion. Reparto de los 914 huecos:
+#     <0,2 s  766 huecos    5,6 s
+#     0,2-0,5  38          11,5 s
+#     0,5-1,0  43          32,7 s
+#     1,0-1,5  26          31,5 s
+#     1,5-2,0  18          30,4 s
+#     2,0-3,0   7          16,4 s
+#     >3,0 s   16          95,2 s   <- 42,6 % de todo el silencio
+#
+# Es decir: la unica frontera con separacion real esta por encima de 3 s, y ahi
+# solo quedan 18 tramos. Cualquier constante puesta entre 0,6 y 3,0 esta partiendo
+# una meseta, y por eso 1,2 o 1,7 no son "ajustar": son otro punto arbitrario de la
+# misma meseta. Ver la issue sobre por que el silencio, por si solo, no puede dar
+# la forma de salida de un competidor.
+#
 # Ojo con la aritmetica: la comparacion es contra una resta de flotantes, asi que
-# un hueco de "0.6 s" es aproximado en el orden de 1e-16. Dos contextos que
-# quieren 0.6 pueden dar 0.5999999999999996 o 0.6000000000000001 segun como se
-# resten. La salida sigue siendo DETERMINISTA: es la misma entrada la misma vez,
-# siempre. Lo unico difuso es el SIGNIFICADO del numero en una medida de cero, y
-# anadir redondeo para taparlo seria maquinaria para esconder un problema que no
-# llega a ser un problema.
-MAX_GAP_S: Final[float] = 0.6
+# un hueco de "2,0 s" es aproximado en el orden de 1e-16. La salida sigue siendo
+# DETERMINISTA: es la misma entrada la misma vez, siempre. Lo unico difuso es el
+# SIGNIFICADO del numero en una medida de cero, y anadir redondeo para taparlo
+# seria maquinaria para esconder un problema que no llega a ser un problema.
+MAX_GAP_S: Final[float] = 2.0
+# Tope de momentos emitidos. Es un TECHO, no un filtro: si hay mas tramos que
+# este, se ordenan por interes y se quedan los mejores.
+MAX_MOMENTS: Final[int] = 12
 # Descartan JUNTAS: menos palabras que esto Y mas corto que el piso.
 MIN_WORDS: Final[int] = 4
 # Piso propio del segmentador, usado cuando el contrato no dice nada.
@@ -115,6 +147,18 @@ def segment_by_speech_rate(
         )
         for tramo, densidad in puntuados
     ]
+    # El TECHO no se aplica por tiempo sino por INTERES, y el interes es
+    # LEXICOGRAFICO: primero la banda de duracion, despues la densidad dentro de
+    # la banda. Es una regla, no una formula, asi que no anade constantes.
+    #
+    # Por que no basta con ordenar por score: la densidad favorece los tramos
+    # cortos y apretados, porque un burst de 3 s es mas denso que una reflexion de
+    # 40 s. Un tope sobre la densidad sola devolveria doce clips de tres segundos,
+    # que es justo lo que se quiere dejar de producir. La banda de duracion va
+    # primero, de modo que un tramo de 3 s NO puede adelantar a uno de 20 s con la
+    # misma densidad.
+    momentos = sorted(momentos, key=_interes)
+    momentos = momentos[:MAX_MOMENTS]
     # ORDEN CRONOLOGICO POR CONTRATO. El score es un ATRIBUTO, no la clave de
     # orden: ordenar por score es decision del consumidor, no del productor. Con
     # orden por score las dos mitades de un tramo partido salian en orden
@@ -122,6 +166,24 @@ def segment_by_speech_rate(
     # va antes que la otra. Para quien lee la lista, el tiempo es la unica
     # ordenacion que no necesita explicacion.
     return tuple(sorted(momentos, key=lambda m: (m.start_s, m.end_s)))
+
+
+def _interes(momento: Moment) -> tuple[int, float, float, float]:
+    """Ordena momentos para quedarse con los mejores, sin anadir constantes.
+
+    Es LEXICOGRAFICO y en este orden: primero la banda de duracion (un tramo que
+    llega a ``PREFERRED_CLIP_S`` por delante de uno que no), despues la densidad
+    dentro de la banda, y al final el tiempo como desempate estable.
+
+    Args:
+        momento: El momento a ordenar.
+
+    Returns:
+        La clave, con ``0`` en la banda preferida.
+    """
+    duracion = momento.end_s - momento.start_s
+    banda = 0 if duracion >= PREFERRED_CLIP_S else 1
+    return (banda, -momento.score, momento.start_s, momento.end_s)
 
 
 def _piso_efectivo(min_s: float | None) -> float:

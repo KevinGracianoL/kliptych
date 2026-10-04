@@ -6,10 +6,14 @@
 - **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
   emitia un unico segmento con el video completo. Ahora transcribe y trocea las
   palabras en varios segmentos, elegidos por palabras por segundo y silencios.
-  Medido sobre un VOD real de 70 min (una clase), en un excerpt de 10 min:
-  929 palabras_whisper, 87 tramos crudos, 13 descartados por la regla 4 y **74
-  segmentos** frente al unico segmento de antes. Duracion mediana 5,0 s, min
-  0,98 s, max 18,7 s. La seleccion中新 se midio aparte: 0,37 ms de media, un
+Medido sobre un VOD real de 70 min (una clase), en un excerpt de 10 min. Con
+  el umbral de silencio en 0,6 s: 87 tramos crudos, 13 descartados y **74
+  segmentos** de mediana 5,0 s, de los cuales 45 duraban menos de 6 s. Ese era el
+  problema: no faltaba troceado, sobraba.
+  Con el umbral en 2,0 s y el techo de 12 momentos: **12 segmentos**, min 8,6 s,
+  mediana 23,3 s, max 59,8 s, y ninguno por debajo de 8 s. El umbral sale del
+  histograma de huecos de ese mismo excerpt y de un barrido de umbrales; no es un
+  ajuste de gusto. La seleccion se midio aparte: 0,37 ms de media, un
   0,0007 % del tiempo de transcripcion.
 - La seleccion es mecanica y determinista: no hay LLM, ni API, ni red. La misma
   transcripcion produce siempre los mismos segmentos, y la lista sale en orden
