@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Changed
+- **Sprint A2.1 - Karaoke por linea, no por palabra:** el subtitulo de karaoke
+  antes escribia un evento `Dialogue` por palabra, de modo que solo se veia una
+  palabra a la vez. Ahora agrupa las palabras en una linea y emite un unico
+  evento con un `{\k}` por palabra, y el resalte avanza dentro de la linea.
+- Una palabra a la que se le asignan `0` centisegundos **no se dibuja**: medido
+  con libass, un `{\k0}` no renderiza nada, sin error ni aviso. Por eso hay un
+  suelo de `1` centisegundo, y por eso el reparto mueve centisegundos entre
+  palabras en vez de anadirlos.
+- Una palabra de menos de 10 ms recibe un resalte perceptualmente instantaneo
+  pero tecnicamente valido. La alternativa es que no aparezca nunca.
+- El reparto es por resto mayor y la suma de los `{\k}` coincide exactamente con
+  la duracion del evento. Con redondeo independiente esa suma se desviaba 3
+  centisegundos en una linea de 8 palabras, y la desviacion crece con el numero
+  de palabras.
+- Nota: la identidad es exacta en el `.ass` emitido, que es lo que consume
+  libass. Contra un extremo redondeado por separado puede diferir en `1`
+  centisegundo, porque las marcas ASS son de centisegundo. No es un defecto a
+  corregir.
+
 ### Added
 - **Sprint A1 — Modo zero-contract:** `campaign --url <URL> --out <DIR>` procesa
   un vídeo sin `brief.md`. Sin brief no hay nada que extraer, así que no se

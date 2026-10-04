@@ -33,7 +33,7 @@ def _private(name: str) -> object:
 _format_time = cast("Callable[[float], str]", _private("_format_time"))
 _escape_text = cast("Callable[[str], str]", _private("_escape_text"))
 _style_line = cast("Callable[[SubtitleStyle], str]", _private("_style_line"))
-_dialogue_line = cast("Callable[[Word], str]", _private("_dialogue_line"))
+_line_event = cast("Callable[[Sequence[Word]], str]", _private("_line_event"))
 _filter_path = cast("Callable[[Path], str]", _private("_filter_path"))
 
 
@@ -126,13 +126,13 @@ def test_style_line_serializes_all_fields() -> None:
     assert ",2,20,20,80,1" in line
 
 
-def test_dialogue_line_has_karaoke_and_times() -> None:
-    line = _dialogue_line(_word(0.5, 1.0, "hola"))
+def test_line_event_has_karaoke_and_times() -> None:
+    line = _line_event([_word(0.5, 1.0, "hola")])
     assert line == "Dialogue: 0,0:00:00.50,0:00:01.00,Default,,0,0,0,,{\\k50}hola"
 
 
-def test_dialogue_line_escapes_text() -> None:
-    line = _dialogue_line(_word(0.0, 0.5, "{x}"))
+def test_line_event_escapes_text() -> None:
+    line = _line_event([_word(0.0, 0.5, "{x}")])
     assert line.endswith("{\\k50}\\{x\\}")
 
 
@@ -154,15 +154,19 @@ def test_build_play_res_is_vertical() -> None:
     assert "PlayResY: 1280" in content
 
 
-def test_build_one_event_per_word_with_matching_times() -> None:
+def test_build_groups_words_into_one_event_per_line() -> None:
+    r"""Dos palabras cortas caben en una linea: un evento, dos {\k}.
+
+    Antes este test fijaba un evento por palabra, que es justamente la forma que
+    este cambio sustituye: el resalte tiene que recorrer las palabras DENTRO de
+    una linea para que el karaoke se vea.
+    """
     words = [_word(0.0, 0.5, "hola", 0), _word(0.6, 1.2, "mundo", 1)]
     content = SubtitleRenderer().build(words)
     dialogues = [line for line in content.splitlines() if line.startswith("Dialogue:")]
-    assert len(dialogues) == 2
-    assert "0:00:00.00,0:00:00.50" in dialogues[0]
-    assert "0:00:00.60,0:00:01.20" in dialogues[1]
-    assert "{\\k50}hola" in dialogues[0]
-    assert "{\\k60}mundo" in dialogues[1]
+    assert len(dialogues) == 1
+    assert "0:00:00.00,0:00:01.20" in dialogues[0]
+    assert "{\\k60}hola{\\k60}mundo" in dialogues[0]
 
 
 def test_build_empty_words_raise() -> None:

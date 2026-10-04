@@ -74,7 +74,17 @@ def test_real_ass_file_is_written(tmp_path: Path) -> None:
     content = written.read_text(encoding="utf-8")
     assert "PlayResX: 1080" in content
     assert "PlayResY: 1920" in content
-    assert content.count("Dialogue:") == 2
+    # Una linea por evento: estas dos palabras caben juntas, asi que el karaoke
+    # las recorre dentro de un unico evento en vez de una por palabra.
+    #
+    # Esta asercion tambine FIJA LA BASE DE RANURAS. El evento dura 2.00 s y las
+    # dos palabras duran 1.00 s cada una, luego 100 + 100 = 200 cs sobre un
+    # evento de 200 cs. Con la base por DURACION las dos sumarian 190 cs y el
+    # evento terminaria en 0:00:01.90, diez centisegundos antes de que termine
+    # la ultima palabra. Quien "arregle" esto de vuelta a duraciones rompera
+    # esta asercion sin saber por que estaba.
+    assert content.count("Dialogue:") == 1
+    assert "{\\k100}hola{\\k100}mundo" in content
 
 
 def test_real_burn_produces_video_with_audio(tmp_path: Path) -> None:
