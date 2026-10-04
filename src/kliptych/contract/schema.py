@@ -1,8 +1,13 @@
-"""Contrato validado (schema v1.1): restricciones duras que obedecen pipeline y gate.
+"""Contrato validado (schema v1.2, lee v1.1): restricciones duras que obedecen pipeline y gate.
 
 El contrato v1.1 incorpora ``segments`` para el modo ``long_video``: la lista de
 cortes temporales seleccionados del vídeo fuente, obligatoria en ese modo y
 prohibida en el resto.
+
+v1.2 anade ``outputs``, la declaracion explicita de los formatos que la campana
+emite. El significado no cambia: ausente significa un unico formato 9:16, como
+siempre. Lo que cambia es que ahora se puede DECIR, que es el primer peldano
+para renderizar mas de un formato.
 """
 
 import math
@@ -13,6 +18,7 @@ from pydantic import AwareDatetime, Field, StringConstraints, field_validator, m
 
 from kliptych.contract.base import ContractBase
 from kliptych.contract.enums import (
+    Aspect,
     AttributionType,
     AudioPolicy,
     AudioRule,
@@ -158,8 +164,7 @@ class Watermark(ContractBase):
 WatermarkConfig = Watermark
 
 
-_SPLIT_ASPECT_W = 9
-_SPLIT_ASPECT_H = 16
+_SPLIT_ASPECT_EPS = 1e-9
 _SPLIT_EVEN_PX = 2
 _SPLIT_MIN_PANEL_PX = 2
 
@@ -180,6 +185,12 @@ class SplitScreenConfig(ContractBase):
     panel_ratio: float = Field(default=0.5, gt=0, lt=1)
     width: int = Field(default=1080, gt=0)
     height: int = Field(default=1920, gt=0)
+    # El lienzo se valida contra el ASPECTO DECLARADO, no contra una constante.
+    # Antes compara con 9 y 16 de modulo, asi que el unico lienzo posible era
+    # 9:16 y ningun contrato podia declarar otra cosa. El default sigue siendo
+    # VERTICAL, de modo que un contrato que no dice nada se comporta EXACTAMENTE
+    # como antes.
+    aspect: Aspect = Aspect.VERTICAL
 
     @field_validator("top_source", "bottom_source")
     @classmethod
@@ -208,8 +219,12 @@ class SplitScreenConfig(ContractBase):
         if self.width % _SPLIT_EVEN_PX != 0 or self.height % _SPLIT_EVEN_PX != 0:
             msg = f"el lienzo split_screen exige dimensiones pares, no {self.width}x{self.height}"
             raise ValueError(msg)
-        if self.width * _SPLIT_ASPECT_H != self.height * _SPLIT_ASPECT_W:
-            msg = f"el lienzo split_screen exige aspecto 9:16, no {self.width}x{self.height}"
+        declarado = self.aspect.ratio
+        if abs(self.width / self.height - declarado) > _SPLIT_ASPECT_EPS:
+            msg = (
+                f"el lienzo split_screen exige el aspecto declarado "
+                f"{self.aspect.value}, no {self.width}x{self.height}"
+            )
             raise ValueError(msg)
         if self.gap % _SPLIT_EVEN_PX != 0:
             msg = f"el gap split_screen exige píxeles pares, no {self.gap}"
@@ -413,12 +428,42 @@ KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
 )
 
 
+class OutputSpec(ContractBase):
+    """Un formato que el contrato dice que hay que emitir.
+
+    El `index` desambigua DENTRO del conjunto de salidas: es el `NN` de
+    `<campana>-<formato>-<NN>`. No dice nada de la plataforma, que ya viaja en el
+    `piece_id` por su cuenta. El par (plataforma, formato) es un producto
+    cartesiano: una campana con dos plataformas y dos salidas emite cuatro
+    artefactos por span.
+    """
+
+    aspect: Aspect = Aspect.VERTICAL
+    index: int = Field(default=0, ge=0)
+
+
+_DEFAULT_OUTPUTS: tuple[OutputSpec, ...] = (OutputSpec(aspect=Aspect.VERTICAL, index=0),)
+
+
 class Contract(ContractBase):
     """Contrato validado y normalizado que consumen pipeline y gate."""
 
-    schema_version: Literal["1.1"] = "1.1"
+    # "1.2" por una razon SINTACTICA, no semantica, y va en las DOS
+    # direcciones. El DEFAULT es "1.2": esta version EMITE documentos 1.2, y
+    # como ContractBase prohibe campos extra, un binario con "1.1" que lea uno
+    # de esos lo RECHAZA con "schema_version no soportado" en vez de ignorarle
+    # `outputs` y fallar mas tarde con un "campo extra no permitido" que no
+    # dice nada. El conjunto permitido incluye "1.1" porque esta version LEE
+    # documentos 1.1 sin cambiar su significado: al faltar `outputs`, el
+    # default vertical significa exactamente lo que siempre significo.
+    #
+    # NO "endurecer" este Literal a un solo valor. Ponerlo en Literal["1.2"]
+    # parece mas estricto pero rompe los documentos 1.1 que hay, que son
+    # validos: lo que protege al lector viejo es el DEFAULT, no la lista.
+    schema_version: Literal["1.1", "1.2"] = "1.2"
     campaign_id: str = Field(min_length=1, max_length=64)
     format: Format
+    outputs: tuple[OutputSpec, ...] = Field(default=_DEFAULT_OUTPUTS, min_length=1)
     mode: Mode
     platforms: dict[Platform, PlatformRules] = Field(min_length=1)
     languages: Languages
@@ -451,6 +496,104 @@ class Contract(ContractBase):
     def _mode_matches_format(self) -> Self:
         if (self.mode is Mode.SLIDESHOW) != (self.format is Format.SLIDESHOW):
             msg = "mode 'slideshow' y format 'slideshow' deben aparecer juntos"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _outputs_are_distinct(self) -> Self:
+        """Los aspectos declarados tienen que ser distintos.
+
+        `min_length=1` ya rechaza la tupla vacia, pero no puede expresar "sin
+        repetidos". Un contrato que declara (VERTICAL, VERTICAL) produciria dos
+        piezas identicas, con el mismo piece_id y la misma carpeta de entrega, y
+        el exportador lo rechazaria en cerrado por colision de nombres: el
+        defecto se detecta tarde y con un mensaje que no senala la causa. Falla
+        aqui, al construir, diciendo cual se repite.
+
+        Returns:
+            ``self``, sin cambios.
+
+        Raises:
+            ValueError: si un aspecto declarado se repite.
+        """
+        vistos = [spec.aspect for spec in self.outputs]
+        repetidos = {a for a in vistos if vistos.count(a) > 1}
+        if repetidos:
+            msg = f"aspectos de salida repetidos: {sorted(a.value for a in repetidos)}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _schema_version_matches_outputs(self) -> Self:
+        """Un documento 1.1 no puede declarar `outputs`.
+
+        `extra="forbid"` no ayuda aqui: `outputs` SI existe en el modelo, asi que
+        un documento que dice 1.1 y ademas trae `outputs` se valida sin quejarse
+        de nada. Pero estaria afirmando dos cosas incompatibles a la vez: que
+        habla el 1.1, donde el campo no existia, y que declara una salida que el
+        1.1 no puede expresar. Un documento que se contradice no se acepta en
+        silencio: o se corrige a "1.2", o se quita `outputs`.
+
+        Returns:
+            ``self``, sin cambios.
+
+        Raises:
+            ValueError: si el documento se declara 1.1 y trae `outputs`.
+        """
+        if self.schema_version == "1.1" and self.outputs != _DEFAULT_OUTPUTS:
+            declarados = ", ".join(spec.aspect.value for spec in self.outputs)
+            msg = (
+                f"un documento schema_version 1.1 no puede declarar outputs "
+                f"({declarados}): ese campo no existia en 1.1. Pon schema_version "
+                f'"1.2" para declarar salidas, o quita `outputs`.'
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _split_screen_matches_outputs(self) -> Self:
+        """El lienzo split_screen tiene que encajar con las salidas declaradas.
+
+        Sin esta comprobacion el contrato tiene DOS declaraciones de aspecto que
+        nadie reconcilia: `SplitScreenConfig.aspect` dice la geometria de ESTE
+        artefacto y `Contract.outputs` dice que emite la campana. Un contrato
+        podria declarar outputs=(HORIZONTAL,) y traer un lienzo 9:16, y nada lo
+        notaria hasta el render, que produciria un artefacto con un formato que
+        la campana no declaro. El issue #76 existe porque el aspecto tenia
+        demasiadas casas independientes; esta es la que las une.
+
+        Cuando hay un unico formato, el lienzo tiene que coincidir con el.
+        Cuando hay varios, el modelo todavia no sabe a cual pertenece el lienzo,
+        asi que se rechaza en lugar de adivinar. El limite es deliberado: si
+        alguna vez hace falta, la ampliacion es un campo que diga a que salida
+        pertenece el lienzo, mas esta misma reconciliacion.
+
+        Returns:
+            ``self``, sin cambios.
+
+        Raises:
+            ValueError: si la campana declara varios formatos y trae un lienzo,
+                o si el aspecto del lienzo no esta entre las salidas declaradas.
+        """
+        if self.split_screen is None:
+            return self
+        declarados = [spec.aspect for spec in self.outputs]
+        if len(declarados) > 1:
+            detalle = ", ".join(aspect.value for aspect in declarados)
+            msg = (
+                f"una campana multi-formato ({detalle}) no puede declarar un "
+                f"lienzo split_screen: el lienzo describe un unico formato y este "
+                f"modelo no dice a cual de los {len(declarados)} pertenece. "
+                f"Es una limitacion deliberada, no un defecto pendiente"
+            )
+            raise ValueError(msg)
+        declarado = next(iter(declarados))
+        if self.split_screen.aspect is not declarado:
+            msg = (
+                f"el lienzo split_screen declara el aspecto "
+                f"{self.split_screen.aspect.value}, que no esta en las salidas "
+                f"declaradas ({declarado.value})"
+            )
             raise ValueError(msg)
         return self
 

@@ -33,7 +33,12 @@ class RunManifest(_ManifestBase):
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
     brief_sha256: str | None = Field(default=None, pattern=_SHA256)
-    contract_schema_version: Literal["1.1"] | None = None
+    # El manifiesto graba QUE version del contrato produjo la corrida, asi que
+    # tiene que aceptar todas las que el contrato sepa leer. Sin "1.2" aqui,
+    # escribir el manifiesto de cualquier corrida que use el contrato actual
+    # revienta con un error de Literal que no explica nada. Este campo NO es el
+    # `manifest_version` de arriba: ese versiona ESTE documento y no cambia.
+    contract_schema_version: Literal["1.1", "1.2"] | None = None
     contract_sha256: str | None = Field(default=None, pattern=_SHA256)
     model_version: str | None = None
     prompt_version: str | None = None

@@ -212,6 +212,24 @@ def _resolve_hard_rules(hard: Sequence[str] | None, audio_rule: str) -> list[str
     return [*hard]
 
 
+def _outputs_key(outputs: Sequence[dict[str, object]] | None) -> dict[str, object]:
+    """Devuelve el campo ``outputs`` o nada, segun se haya pedido o no.
+
+    Omitirlo del todo importa: un documento que se declara 1.1 no puede cargar
+    ``outputs``, porque ese campo no existia en 1.1. Mandarlo como ``None``
+    tampoco vale, porque el default del contrato es una tupla de un elemento.
+
+    Args:
+        outputs: Las salidas a declarar, o ``None`` para no declarar ninguna.
+
+    Returns:
+        ``{"outputs": [...]}`` si se pidieron salidas; si no, un diccionario vacio.
+    """
+    if outputs is None:
+        return {}
+    return {"outputs": list(outputs)}
+
+
 def make_contract(
     *,
     format_: str | Format = "video",
@@ -246,6 +264,8 @@ def make_contract(
     unmapped: Sequence[tuple[str, str]] = (),
     timestamp_ranges: Sequence[TimestampRange | tuple[float, float] | list[float]] = (),
     split_screen: dict[str, object] | SplitScreenConfig | None = None,
+    outputs: Sequence[dict[str, object]] | None = None,
+    schema_version: str = "1.1",
 ) -> Contract:
     plan = _resolve_hard_rules(hard, audio_rule)
     manual = [*manual_review]
@@ -294,7 +314,8 @@ def make_contract(
         classified.add("layout.geometry")
     return Contract.model_validate(
         {
-            "schema_version": "1.1",
+            **_outputs_key(outputs),
+            "schema_version": schema_version,
             "campaign_id": "camp-test",
             "format": format_val,
             "mode": mode,
