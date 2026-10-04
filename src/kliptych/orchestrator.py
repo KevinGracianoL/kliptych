@@ -89,8 +89,6 @@ _AUDIO_TRACK_NAME = "audio_track.mp3"
 _FINAL_NAME = "final.mp4"
 _FFPROBE = "ffprobe"
 _AUDIO_DURATION_TOLERANCE_S = 0.1
-_TARGET_ASPECT = 9.0 / 16.0
-_ASPECT_TOLERANCE = 0.05
 _SLIDESHOW_NAME = "slideshow.mp4"
 _SLIDESHOW_CONCAT_NAME = "slideshow_input.txt"
 _SLIDESHOW_WIDTH = 1080
@@ -457,6 +455,15 @@ def compute_long_video_fingerprint(
             "ffmpeg": config.render.ffmpeg,
             "timeout_s": config.render.timeout_s,
             "nvenc_available": config.render.nvenc_available,
+            # El aspecto y su tolerancia DECIDEN si un video se reencuadra o se
+            # copia tal cual, asi que tienen que estar en el digest. El digest
+            # lista los campos a mano en vez de serializar el dataclass entero,
+            # asi que anadir un campo a RenderConfig NO lo mete por si solo: sin
+            # estas dos lineas, dos corridas con distinta relacion de aspecto
+            # compartiran checkpoint y la segunda reutilizara el render de la
+            # primera.
+            "target_aspect": config.render.target_aspect,
+            "aspect_tolerance": config.render.aspect_tolerance,
         },
         "download": {
             "timestamp_ranges": [
@@ -2521,10 +2528,10 @@ def _probe_rotation(raw: str | None) -> int:
         return 0
 
 
-def _is_vertical(width: int, height: int) -> bool:
+def _is_vertical(width: int, height: int, *, objetivo: float, tolerancia: float) -> bool:
     # Las dimensiones vienen validadas por _probe_video: aquí son positivas.
     aspect = width / height
-    return abs(aspect - _TARGET_ASPECT) <= _TARGET_ASPECT * _ASPECT_TOLERANCE
+    return abs(aspect - objetivo) <= objetivo * tolerancia
 
 
 def _needs_reframe(video: Path, render: RenderConfig) -> bool:
@@ -2542,7 +2549,9 @@ def _needs_reframe(video: Path, render: RenderConfig) -> bool:
         PipelineError: Si no se pueden leer las dimensiones del vídeo.
     """
     info = _probe_video(video, render=render)
-    return not _is_vertical(info.width, info.height)
+    return not _is_vertical(
+        info.width, info.height, objetivo=render.target_aspect, tolerancia=render.aspect_tolerance
+    )
 
 
 def _full_video_selection(source: Path, *, render: RenderConfig) -> SegmentSelection:

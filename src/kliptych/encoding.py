@@ -12,10 +12,15 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 logger = logging.getLogger("kliptych.encoding")
 _STDERR_TAIL = 500
 
+# Aspecto por defecto del render 9:16, con la tolerancia con la que se acepta
+# que una fuente ya este en vertical y no haya que reencuadrar.
+_DEFAULT_TARGET_ASPECT: Final[float] = 9.0 / 16.0
+_DEFAULT_ASPECT_TOLERANCE: Final[float] = 0.05
 _DEFAULT_TIMEOUT_S = 600.0
 
 
@@ -26,15 +31,30 @@ class RenderConfig:
     ffmpeg: str = "ffmpeg"
     timeout_s: float = _DEFAULT_TIMEOUT_S
     nvenc_available: bool = False
+    # Aspecto objetivo del render, y tolerancia admisible al compararlo con el
+    # de la fuente. Antes vivian en constantes de modulo del orquestador, lo que
+    # hacia imposible que dos relaciones de aspecto convivieran en una misma
+    # invocacion. Aqui son estado de la invocacion, y como RenderConfig ya entra
+    # en el digest del checkpoint, dos aspectos dan dos fingerprints distintos
+    # sin tocar la logica del fingerprint.
+    target_aspect: float = _DEFAULT_TARGET_ASPECT
+    aspect_tolerance: float = _DEFAULT_ASPECT_TOLERANCE
 
     def __post_init__(self) -> None:
-        """Valida el timeout del render.
+        """Valida el timeout del render y el aspecto objetivo.
 
         Raises:
-            ValueError: Si el timeout no es positivo.
+            ValueError: Si el timeout no es positivo, o el aspecto no es
+                un valor de aspecto utilizable.
         """
         if self.timeout_s <= 0:
             msg = f"timeout inválido: {self.timeout_s}"
+            raise ValueError(msg)
+        if self.target_aspect <= 0:
+            msg = f"aspecto objetivo inválido: {self.target_aspect}"
+            raise ValueError(msg)
+        if self.aspect_tolerance < 0:
+            msg = f"tolerancia de aspecto inválida: {self.aspect_tolerance}"
             raise ValueError(msg)
 
 
