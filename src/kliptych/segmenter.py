@@ -11,11 +11,18 @@ Las reglas hacen trabajos distintos y por eso ninguna sobra:
   mayor que el maximo define donde ACABA el habla activa. Corte duro.
 - ``MIN_SPEECH_RATE_WPS`` ORDENA. Es una senal de ranking: coloca los tramos,
   nunca los elimina.
-- ``MIN_WORDS`` junto al piso de duracion DESCARTAN. Es la unica regla que
-  elimina, y solo cuando se cumple AMBAS condiciones a la vez.
+- ``MIN_WORDS`` y el piso de duracion DESCARTAN. Es la unica regla que elimina,
+  y descarta cuando falla CUALQUIERA de los dos.
 
-Si el ranking descartara, tendria la misma autoridad que el descarte y la
-semantica AND de la regla de descarte dejaria de significar nada.
+Los dos pisos son DUROS, no mitades de una conjuncion. La conjuncion fue un
+error, y lo从句 los datos reales de un VOD: "5 y 10." son 3 palabras en 2,0 s y
+"diferencia es Diff." son 3 palabras en 7,2 s. Con AND ambos sobrevivian,
+porque la duracion pasaba el suelo de palabras y las palabras no llegaban al
+suelo de duracion. Ninguno de los dos es un clip: son alguien escribiendo en una
+diapositiva mientras whisper transcribe.
+
+Si el ranking descartara, tendria la misma autoridad que el descarte y la regla
+de descarte dejaria de significar nada.
 
 El piso de duracion existe, ademas, como previsor: si un brief fija ``min_s``
 manana, un tramo mas corto que ese piso haria fallar la seleccion entera de una
@@ -227,7 +234,7 @@ def _punto_de_corte(tramo: list[Word], tope: float) -> int:
 
 
 def _descartar(*, tramos: list[list[Word]], piso: float) -> list[list[Word]]:
-    """La unica regla que elimina: pocas palabras Y poco tiempo.
+    """La unica regla que elimina: si falla CUALQUIERA de los dos suelos.
 
     Args:
         tramos: Los tramos ya partidos.
@@ -239,7 +246,7 @@ def _descartar(*, tramos: list[list[Word]], piso: float) -> list[list[Word]]:
     return [
         tramo
         for tramo in tramos
-        if not (len(tramo) < MIN_WORDS and (tramo[-1].end_s - tramo[0].start_s) < piso)
+        if len(tramo) >= MIN_WORDS and (tramo[-1].end_s - tramo[0].start_s) >= piso
     ]
 
 
