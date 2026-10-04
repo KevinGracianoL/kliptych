@@ -128,9 +128,9 @@ class SpeechSegmentResult:
             denominador de "12 de 19".
         discarded_by_floor: Cuantos tramos murieron en un suelo, por palabras o
             por duracion.
-        split: Cuantas PARTES produjo la particion por tope. No es el numero de
-            tramos partidos, sino el de trozos resultantes por encima de los
-            tramos originales.
+        split: Cuantos tramos PARTIO la particion por tope, o sea cuantos
+            clips se recortaron. Un tramo que se convierte en 2 trozos vale 1:
+            se corto un clip.
     """
 
     moments: tuple[Moment, ...]

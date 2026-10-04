@@ -10,18 +10,35 @@ contra otro resultado con el mismo recuento erroneo.
 """
 
 from collections.abc import Sequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from kliptych import orchestrator as orch
 from kliptych import segmenter
+from kliptych.segmenter import SpeechSegmentResult
 from kliptych.transcribe import Word
 
-_privado = cast("object", getattr(segmenter, "SpeechSegmentResult"))
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def _resultado_de(palabras: Sequence[Word], **opciones: float | None) -> object:
-    """Llama al segmentador y devuelve el resultado tipado como `object`.
+def _rationale(resultado: SpeechSegmentResult) -> str:
+    """Invoca la justificacion privada del orquestador, con su nombre resuelto.
+
+    Args:
+        resultado: El resultado que el orquestador registraria.
+
+    Returns:
+        La cadena que va al manifest.
+    """
+    nombre = "_rationale_segmentador"
+    rationale = cast("Callable[[SpeechSegmentResult], str]", getattr(orch, nombre))
+    return rationale(resultado)
+
+
+def _resultado_de(palabras: Sequence[Word], **opciones: float | None) -> SpeechSegmentResult:
+    """Llama al segmentador y devuelve su resultado tipado.
 
     Args:
         palabras: Las palabras de entrada.
@@ -30,7 +47,7 @@ def _resultado_de(palabras: Sequence[Word], **opciones: float | None) -> object:
     Returns:
         El `SpeechSegmentResult` que devuelve el segmentador.
     """
-    return segmenter.segment_by_speech_rate(palabras, **opciones)  # type: ignore[arg-type]
+    return segmenter.segment_by_speech_rate(palabras, **opciones)
 
 
 def _span_de_palabras(n_palabras: int, *, paso: float = 0.7, inicio: float = 0.0) -> list[Word]:
@@ -45,14 +62,19 @@ def _span_de_palabras(n_palabras: int, *, paso: float = 0.7, inicio: float = 0.0
         Las palabras del tramo.
     """
     return [
-        Word(start_s=inicio + i * paso, end_s=inicio + i * paso + paso * 0.8,
-             text="w", confidence=0.9, token_id=i)
+        Word(
+            start_s=inicio + i * paso,
+            end_s=inicio + i * paso + paso * 0.8,
+            text="w",
+            confidence=0.9,
+            token_id=i,
+        )
         for i in range(n_palabras)
     ]
 
 
 def _varios_tramos(n: int, *, palabras_por_tramo: int = 30, paso: float = 0.7) -> list[Word]:
-    """n tramos que pasan los dos suelos, separados por un hueco grande.
+    """N tramos que pasan los dos suelos, separados por un hueco grande.
 
     Args:
         n: Cuantos tramos.
@@ -90,9 +112,9 @@ def test_t1_qualifying_supera_a_lo_entregado_cuando_el_techo_muerde() -> None:
     construidos = segmenter.MAX_MOMENTS + 7
     resultado = _resultado_de(_varios_tramos(construidos))
 
-    assert resultado.qualifying == construidos, resultado.qualifying  # type: ignore[attr-defined]
-    assert len(resultado.moments) == segmenter.MAX_MOMENTS  # type: ignore[attr-defined]
-    assert resultado.qualifying > len(resultado.moments)  # type: ignore[attr-defined]
+    assert resultado.qualifying == construidos, resultado.qualifying
+    assert len(resultado.moments) == segmenter.MAX_MOMENTS
+    assert resultado.qualifying > len(resultado.moments)
 
 
 # --------------------------------------------------------------------------
@@ -105,8 +127,8 @@ def test_t2_qualifying_iguala_a_lo_entregado_cuando_el_techo_no_muerde() -> None
     construidos = segmenter.MAX_MOMENTS - 7
     resultado = _resultado_de(_varios_tramos(construidos))
 
-    assert resultado.qualifying == construidos  # type: ignore[attr-defined]
-    assert resultado.qualifying == len(resultado.moments)  # type: ignore[attr-defined]
+    assert resultado.qualifying == construidos
+    assert resultado.qualifying == len(resultado.moments)
 
 
 # --------------------------------------------------------------------------
@@ -130,8 +152,13 @@ def test_t3_descartados_por_suelo_cuenta_ambos_fallos() -> None:
         nonlocal token, t
         for w in tramo:
             palabras.append(
-                Word(start_s=w.start_s + t, end_s=w.end_s + t, text=w.text,
-                     confidence=0.9, token_id=token)
+                Word(
+                    start_s=w.start_s + t,
+                    end_s=w.end_s + t,
+                    text=w.text,
+                    confidence=0.9,
+                    token_id=token,
+                )
             )
             token += 1
         t += tramo[-1].end_s - tramo[0].start_s + segmenter.MAX_GAP_S + 1.0
@@ -145,8 +172,8 @@ def test_t3_descartados_por_suelo_cuenta_ambos_fallos() -> None:
 
     resultado = _resultado_de(palabras)
 
-    assert resultado.discarded_by_floor == 6, resultado.discarded_by_floor  # type: ignore[attr-defined]
-    assert resultado.qualifying == 3, resultado.qualifying  # type: ignore[attr-defined]
+    assert resultado.discarded_by_floor == 6, resultado.discarded_by_floor
+    assert resultado.qualifying == 3, resultado.qualifying
 
 
 def test_t3b_un_fallo_por_palabras_cuenta_igual_que_uno_por_duracion() -> None:
@@ -155,15 +182,45 @@ def test_t3b_un_fallo_por_palabras_cuenta_igual_que_uno_por_duracion() -> None:
     Un caso con un solo fallo por palabras y otro con un solo fallo por duracion
     tienen que reportar UN descartado cada uno. Asi se ve que el recuento no
     distingue solo un tipo de fallo.
-    """
-    solo_palabras = _varios_tramos(2) + _span_de_palabras(2, paso=1.5)
-    solo_palabras += _span_de_palabras(30, inicio=100.0)
-    r1 = _resultado_de(solo_palabras)
-    assert r1.discarded_by_floor == 1, r1.discarded_by_floor  # type: ignore[attr-defined]
 
-    solo_duracion = _varios_tramos(2) + _span_de_palabras(8, paso=0.2, inicio=100.0)
+    Los tramos que deben fallar llevan un `inicio` explicito y POSTERIOR al de
+    los buenos. Un tramo en `inicio=0.0` se solapa con lo que haya antes, se
+    fusiona con el, y el resultado es un tramo que PASA: el fixture no construye
+    el caso que dice construir. Por eso el `inicio` va aqui y no por defecto.
+    """
+    buenos = _varios_tramos(2)
+    fin_de_los_buenos = buenos[-1].end_s + segmenter.MAX_GAP_S + 1.0
+
+    solo_palabras = buenos + _span_de_palabras(2, paso=1.5, inicio=fin_de_los_buenos)
+    solo_palabras += _span_de_palabras(30, inicio=fin_de_los_buenos + 20.0)
+    r1 = _resultado_de(solo_palabras)
+    assert r1.discarded_by_floor == 1, r1.discarded_by_floor
+
+    solo_duracion = buenos + _span_de_palabras(8, paso=0.2, inicio=fin_de_los_buenos)
+    solo_duracion += _span_de_palabras(30, inicio=fin_de_los_buenos + 20.0)
     r2 = _resultado_de(solo_duracion)
-    assert r2.discarded_by_floor == 1, r2.discarded_by_floor  # type: ignore[attr-defined]
+    assert r2.discarded_by_floor == 1, r2.discarded_by_floor
+
+
+def test_t3c_los_dos_suelos_suman_cuando_ocurren_a_la_vez() -> None:
+    """Un fallo por palabras y otro por duracion, en la misma entrada, cuentan 2.
+
+    Es el caso que faltaba: T3b prueba que cada fallo cuenta por separado, y esto
+    prueba que los dos cuentan JUNTOS. Los tramos que fallan van despues de los
+    buenos por el mismo motivo que en T3b: en `inicio=0.0` se fusionarian con el
+    primer tramo bueno y pasarian los dos.
+    """
+    buenos = _varios_tramos(3)
+    fin = buenos[-1].end_s + segmenter.MAX_GAP_S + 1.0
+
+    palabras = buenos + _span_de_palabras(2, paso=1.5, inicio=fin)
+    palabras += _span_de_palabras(8, paso=0.2, inicio=fin + 20.0)
+    palabras += _span_de_palabras(30, inicio=fin + 40.0)
+
+    resultado = _resultado_de(palabras)
+
+    assert resultado.discarded_by_floor == 2, resultado.discarded_by_floor
+    assert resultado.qualifying == 4, resultado.qualifying
 
 
 # --------------------------------------------------------------------------
@@ -189,9 +246,9 @@ def test_t4_la_particion_por_tope_informa_de_su_conteo() -> None:
 
     resultado = _resultado_de(palabras)
 
-    assert len(resultado.moments) == 2, len(resultado.moments)  # type: ignore[attr-defined]
+    assert len(resultado.moments) == 2, len(resultado.moments)
     # La implementacion cuenta los trozos POR ENCIMA de los tramos originales.
-    assert resultado.split == 1, resultado.split  # type: ignore[attr-defined]
+    assert resultado.split == 1, resultado.split
 
 
 # --------------------------------------------------------------------------
@@ -206,13 +263,8 @@ def test_t5_la_justificacion_dice_cuantos_se_descartaron() -> None:
     va al manifest es la cadena. Si esa cadena omite el recuento, un operador ve
     "12 tramo(s)" y no tiene como saber que faltaron 7.
     """
-    from kliptych.orchestrator import SpeechSegmentResult
-    import kliptych.orchestrator as orch
-
-    resultado = SpeechSegmentResult(
-        moments=(), qualifying=19, discarded_by_floor=6, split=2
-    )
-    texto = orch._rationale_segmentador(resultado)  # noqa: SLF001
+    resultado = SpeechSegmentResult(moments=(), qualifying=19, discarded_by_floor=6, split=2)
+    texto = _rationale(resultado)
 
     assert "12 de 19" in texto or "0 de 19" in texto, texto
     assert "19" in texto, texto
@@ -223,10 +275,8 @@ def test_t5_la_justificacion_dice_cuantos_se_descartaron() -> None:
 
 def test_t5b_la_justificacion_real_refleja_el_recuento_real() -> None:
     """La cadena que se registra lleva las cuentas DEL resultado que se entrego."""
-    import kliptych.orchestrator as orch
-
     resultado = segmenter.segment_by_speech_rate(_varios_tramos(19))
-    texto = orch._rationale_segmentador(resultado)  # noqa: SLF001
+    texto = _rationale(resultado)
 
     assert f"{len(resultado.moments)} de {resultado.qualifying}" in texto, texto
     assert f"{resultado.discarded_by_floor}" in texto, texto
@@ -243,5 +293,4 @@ def test_t5c_la_igualdad_del_tipo_no_acepta_una_tupla_de_momentos() -> None:
     assert resultado != tuple(resultado.moments)
     assert resultado == segmenter.segment_by_speech_rate(_varios_tramos(19))
 
-    otro = cast("object", resultado)
-    assert otro != pytest.approx(0)  # sanity: la comparacion no es un tipo raro
+    assert resultado != pytest.approx(0)
