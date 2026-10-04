@@ -3,6 +3,56 @@
 ## [Unreleased]
 
 ### Changed
+- **El gate valida el aspecto que el CONTRATO DECLARA**, en vez de comparar
+  contra un 9:16 fijo en modulo. `_SPLIT_ASPECT_W`/`_SPLIT_ASPECT_H` han
+  desaparecido de `gate/checks.py`; el aspecto sale de `SplitScreenConfig.aspect`
+  y la aritmetica vive en un solo sitio, el enum `Aspect`. Antes, un contrato que
+  declarase 16:9 no podia pasar ni con un artefacto 16:9 perfecto, y el mensaje
+  de FAIL le atribuia al contrato algo que el contrato habia dicho bien.
+- **Un artefacto cuya geometria no se puede medir devuelve ahora UNSUPPORTED en
+  vez de FAIL** en el validador de split-screen. Es un cambio de comportamiento
+  visible, asi que conviene decir exactamente que significa y que no significa:
+  `FAIL` es "el artefacto esta mal" y `UNSUPPORTED` es "no pude verificarlo". Un
+  archivo que ffprobe no pudo abrir es un problema de herramienta o de entorno, no
+  de contenido, asi que "rejected" mandaba al operador a depurar lo que no estaba
+  roto. Cinco validadores ya devolvian `_unsupported` en ese mismo caso
+  (duracion, integridad, aspect, watermark, audio): este era el unico que
+  conflacionaba los dos casos, no una decision de diseno.
+  Lo que NO cambia: ambos veredictos siguen bloqueando la exportacion, y la
+  aprobacion manual solo rescata `PENDING_REVIEW`, asi que no se vuelve
+  exportable nada que no lo fuera. Lo que cambia es el diagnostico que ve el
+  operador: el estado global pasa de `rejected` a `unsupported` para un artefacto
+  no inspeccionable.
+  La distincion se mantiene en las DOS direcciones: un artefacto que si se pudo
+  medir y no cuadra sigue siendo FAIL, porque "no se pudo verificar" seria falso.
+- **Un contrato 1.1 ahora se MIDE contra su default documentado de 9:16, en vez
+  de saltarse la comprobacion.** Antes `check_declared_outputs` hacia
+  corto-circuito en un 1.1 y devolvia PASS sin medir nada, asi que un artefacto
+  16:9 procedente de una corrida 1.1 quedaba certificado como conforme. Esa
+  corrida renderiza 9:16, de modo que el artefacto era una corrida mal formada y
+  el gate no podia detectarla.
+  El 1.1 no declaro salidas, asi que no hay nada a lo que "pertenecer"; pero su
+  conjunto efectivo es una sola entrada vertical, y para un conjunto de un
+  elemento "¿es miembro?" y "¿es 9:16?" son la misma pregunta, de modo que la
+  exencion no protegia nada. `declared_by_version` sigue en la evidencia, pero es
+  un campo de procedencia: dice que el requisito vino de un default de version y
+  no de una declaracion, para que el operador lo distinga.
+  No se rompe ninguna corrida conforme: un 1.1 que produce el 9:16 que siempre
+  produjo sigue pasando.
+- La escalera de #76 sigue en orden: **PR 1 declaro, PR 2 valida, PR 3
+  renderiza**. Solo PR 3 produce un segundo artefacto. Esta PR no entrega ninguna
+  capacidad visible.
+
+### Added
+- **Regla `artifact.aspect`**: el artefacto tiene que satisfacer AL MENOS una de
+  las salidas que el contrato declara. Vive en su propio validador, y no dentro
+  del de split-screen, porque un contrato multi-formato no puede declarar lienzo
+  (limitacion deliberada de PR 1) y anidada ahi la comprobacion no existiria
+  justo en el caso para el que existe.
+- Una regla declarada que no se puede verificar mecanicamente es UNSUPPORTED,
+  nunca PASS. La misma regla se aplica al aspecto declarado. El inventario de los
+  19 validadores registrados no encuentra ninguno que devuelva FAIL sin haber
+  medido el artefacto.
 - **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
   emitia un unico segmento con el video completo. Ahora transcribe y trocea las
   palabras en varios segmentos, elegidos por palabras por segundo y silencios.

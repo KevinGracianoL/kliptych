@@ -344,16 +344,76 @@ def test_geometry_fails_on_square_canvas(tmp_path: Path) -> None:
     assert outcome.status is CheckStatus.FAIL
 
 
-def test_geometry_fails_without_video(tmp_path: Path) -> None:
+def test_geometry_unsupported_without_video(tmp_path: Path) -> None:
+    """Sin pista de video no hay lienzo que medir: UNSUPPORTED, no FAIL.
+
+    Antes esto devolvia FAIL. La distincion importa porque son dos diagnosis
+    distintas: FAIL es "el artefacto esta mal", UNSUPPORTED es "no pude
+    verificarlo". Un artefacto que ffprobe no pudo abrir es un problema de
+    herramienta o de entorno, no de contenido, asi que decir "rejected" manda al
+    operador a depurar lo que no esta roto.
+
+    Los cinco validadores hermanos ya devolvian `_unsupported` en este mismo
+    caso (`checks.py`: duracion, split, aspect, watermark); este era el unico que
+    lo conflaba. Los dos veredictos siguen bloqueando y la aprobacion manual no
+    rescata ninguno, asi que esto no hace exportable nada que no lo fuera.
+
+    La evidencia tiene que traer el motivo Y el aspecto declarado, para que un
+    cambio de estado con la evidencia vacia no pueda pasar.
+    """
     video = _file(tmp_path, "dummy.mp4")
     outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, has_video=False))
-    assert outcome.status is CheckStatus.FAIL
+
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "pista de video" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+    assert outcome.evidence["has_video"] is False
 
 
-def test_geometry_fails_without_probe(tmp_path: Path) -> None:
+def test_geometry_unsupported_without_probe(tmp_path: Path) -> None:
+    """Sin probe no hay medicion: UNSUPPORTED, no FAIL. Ver el caso de arriba."""
     video = _file(tmp_path, "dummy.mp4")
     outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, with_probe=False))
+
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "inspeccionar" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+
+
+def test_geometry_still_fails_on_measured_mismatch(tmp_path: Path) -> None:
+    """El complemento: SI se pudo medir y no cuadra, sigue siendo FAIL.
+
+    Es la mitad que hace que lo anterior sea una distincion y no una fusion. Si
+    las dos ramas dieran el mismo veredicto, un artefacto con la geometria
+    equivocada se reportaria como "no se pudo verificar", que es mentira: se
+    verifico y salio mal. Por eso este test exige FAIL y no "no PASS".
+    """
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=720, height=1280)
+    )
+
     assert outcome.status is CheckStatus.FAIL
+    assert "dimensiones" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+
+
+def test_geometry_still_fails_on_measured_square_canvas(tmp_path: Path) -> None:
+    """El complemento para un lienzo que SI se pudo medir y no cuadra.
+
+    1080x1080 es un artefacto REAL que ffprobe si midio: lo que falla es que sus
+    dimensiones no son las del lienzo declarado. Debe ser FAIL, no
+    UNSUPPORTED, porque "no se pudo verificar" seria falso aqui.
+    """
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=1080, height=1080)
+    )
+
+    assert outcome.status is CheckStatus.FAIL
+    assert outcome.evidence["declared_aspect"] == "9:16"
+    assert outcome.evidence["width"] == 1080
+    assert outcome.evidence["height"] == 1080
 
 
 def test_geometry_fails_without_config(tmp_path: Path) -> None:

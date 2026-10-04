@@ -416,6 +416,20 @@ class UnmappedRule(ContractBase):
 
 KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
     {
+        # Este catalogo de rule_ids vive en el modulo de contrato, y no en el
+        # gate, por una dependencia que conviene no romper: `unmapped` rechaza
+        # como colision una regla que este名录ada aqui, asi que el contrato
+        # necesita conocer el catalogo para validar su propia documentacion. Si
+        # se mueve al gate, el contrato deja de poder validar ese caso y la
+        # colision pasa por alto.
+        #
+        # `artifact.aspect` verifica que el artefacto satisface alguna de las
+        # salidas que el contrato declara. Llega junto a `outputs` en el
+        # esquema 1.2. Un documento 1.1 no declara la regla porque no declaro
+        # salidas, pero el gate si lo mide igual: su conjunto efectivo es la
+        # entrada vertical por defecto, y para un conjunto de un elemento
+        # "pertenece a sus salidas" y "es 9:16" son la misma pregunta.
+        "artifact.aspect",
         "artifact.integrity",
         "artifact.video_stream",
         "assets.required",
