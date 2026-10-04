@@ -3,24 +3,29 @@
 ## [Unreleased]
 
 ### Changed
-- **Sprint A2.1 - Karaoke por linea, no por palabra:** el subtitulo de karaoke
-  antes escribia un evento `Dialogue` por palabra, de modo que solo se veia una
-  palabra a la vez. Ahora agrupa las palabras en una linea y emite un unico
-  evento con un `{\k}` por palabra, y el resalte avanza dentro de la linea.
+- **Sprint A2.1 - Karaoke por linea:** el subtitulo de karaoke escribia un
+  evento `Dialogue` por palabra, de modo que en pantalla se veia una sola palabra
+  a la vez. Ahora agrupa las palabras en una linea, emite un unico evento con un
+  `{\k}` por palabra, y el resalte barre esa linea.
 - Una palabra a la que se le asignan `0` centisegundos **no se dibuja**: medido
-  con libass, un `{\k0}` no renderiza nada, sin error ni aviso. Por eso hay un
-  suelo de `1` centisegundo, y por eso el reparto mueve centisegundos entre
-  palabras en vez de anadirlos.
+  con libass, un `{\k0}` no renderiza nada, sin error ni aviso. De ahi que el
+  suelo sea de `1` centisegundo, y de ahi que el reparto mueva centisegundos
+  entre palabras en lugar de anadirlos.
 - Una palabra de menos de 10 ms recibe un resalte perceptualmente instantaneo
-  pero tecnicamente valido. La alternativa es que no aparezca nunca.
-- El reparto es por resto mayor y la suma de los `{\k}` coincide exactamente con
-  la duracion del evento. Con redondeo independiente esa suma se desviaba 3
-  centisegundos en una linea de 8 palabras, y la desviacion crece con el numero
-  de palabras.
-- Nota: la identidad es exacta en el `.ass` emitido, que es lo que consume
-  libass. Contra un extremo redondeado por separado puede diferir en `1`
-  centisegundo, porque las marcas ASS son de centisegundo. No es un defecto a
-  corregir.
+  pero tecnicamente valido, porque la alternativa es que no aparezca nunca.
+- El `.ass` emitido es coherente consigo mismo en centisegundos: la suma de los
+  `{\k}` es igual a `End - Start`. Las marcas ASS son de centisegundo, así que
+  contra un extremo redondeado por separado puede diferir en `1` centisegundo.
+  Eso es el suelo del formato, no un defecto a corregir.
+- El reparto es por resto mayor sobre ranuras (de inicio a siguiente inicio, y la
+  ultima hasta el fin). Con redondeo independiente, una linea de 8 palabras se
+  desviaba 3 centisegundos, y la desviacion crece con el numero de palabras.
+
+Evidencia de que el barrido progresa y no es una sola transicion: en un unico
+evento `Dialogue`, la parte ya cantada es siempre un prefijo cuyo borde derecho
+avanza, y su centroide x crece de forma monotona y es distinto en cada estado
+medido (213,2 -> 326,5 -> 355,7 en una linea de 720x1280). Con solo contar
+pixeles esa tabla no se distingue de "la linea entera se encendio a la mitad".
 
 ### Added
 - **Sprint A1 — Modo zero-contract:** `campaign --url <URL> --out <DIR>` procesa
