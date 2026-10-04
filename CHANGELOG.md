@@ -3,6 +3,42 @@
 ## [Unreleased]
 
 ### Changed
+- **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
+  emitia un unico segmento con el video completo. Ahora transcribe y trocea las
+  palabras en varios segmentos, elegidos por palabras por segundo y silencios.
+Medido sobre un VOD real de 70 min (una clase), en un excerpt de 10 min. Con
+  el umbral de silencio en 0,6 s: 87 tramos crudos, 13 descartados y **74
+  segmentos** de mediana 5,0 s, de los cuales 45 duraban menos de 6 s. Ese era el
+  problema: no faltaba troceado, sobraba.
+  Con el umbral en 2,0 s y el techo de 12 momentos: **12 segmentos**, min 8,6 s,
+  mediana 23,3 s, max 59,8 s, y ninguno por debajo de 8 s. El umbral sale del
+  histograma de huecos de ese mismo excerpt y de un barrido de umbrales; no es un
+  ajuste de gusto. La seleccion se midio aparte: 0,37 ms de media, un
+  0,0007 % del tiempo de transcripcion.
+- La seleccion es mecanica y determinista: no hay LLM, ni API, ni red. La misma
+  transcripcion produce siempre los mismos segmentos, y la lista sale en orden
+  cronologico; el score viaja en cada segmento para quien quiera ordenar por
+  interes.
+- El modo personal ahora transcribe y, por tanto, ahora produce subtitulos karaoke
+  que antes no producia.
+- La duracion minima la impone la seleccion, NO el gate: el contrato zero-contract
+  no declara regla de duracion y el gate no la verifica (#67).
+- El limite de duracion lo fija el contrato cuando lo declara, y el segmentador
+  usa los suyos solo cuando el contrato calla.
+- `MAX_GAP_S` se compara contra una resta de flotantes, asi que un hueco de "0,6 s"
+  es aproximado en el orden de 1e-16. La salida sigue siendo determinista: lo
+  unico difuso es el significado del numero en una medida de cero. No se anadio
+  redondeo para taparlo.
+- El operador recibe el recuento de lo que se descarto y por que: cuantos tramos
+  calificaron, cuantos se entregaron, cuantos se dejaron por el techo, cuantos
+  por los suelos y cuantos clips se recortaron por duracion. Sin eso, "12 tramo(s)"
+  es una operacion PARCIAL informada como completa.
+- La exportacion en lote sigue siendo atomica, asi que un clip que falle deja el
+  paquete entero sin entregar. El render perezoso por clip (B1) elimina este
+  escalon y es la resolucion prevista.
+
+
+### Changed
 - **Sprint A2.1 - Karaoke por linea:** el subtitulo de karaoke escribia un
   evento `Dialogue` por palabra, de modo que en pantalla se veia una sola palabra
   a la vez. Ahora agrupa las palabras en una linea, emite un unico evento con un

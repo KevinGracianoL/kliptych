@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import override
 
 import pytest
 
@@ -20,7 +21,7 @@ from kliptych.encoding import RenderConfig
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.orchestrator import PipelineConfig, PipelineResult, run_long_video
 from kliptych.reframe import FaceBox, FFmpegReframer, RgbFrame
-from kliptych.transcribe import Transcript
+from kliptych.transcribe import Transcript, Word
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -86,10 +87,23 @@ class _CountingTranscriber:
         self._counts: _Counts = counts
 
     def transcribe(self, audio: Path) -> Transcript:
+        """Transcribe, pero devuelve un transcript VACIO a proposito.
+
+        El modo repost ahora transcribe (antes no lo hacia) y de esas palabras
+        depende el segmentador local. Devolver vacio hace que se dispare la via
+        de reserva: un solo segmento de video completo. Asi esta prueba sigue
+        fijando la forma del artefacto de una sola pieza mientras la pieza nueva
+        que cubre el troceado real esta en otro test.
+
+        Args:
+            audio: La pista, que aqui se ignora.
+
+        Returns:
+            Un transcript sin palabras.
+        """
         _ = audio
         self._counts.transcribe += 1
-        message = "la transcripción no debe ejecutarse en modo repost"
-        raise AssertionError(message)
+        return Transcript(words=(), language="es", duration_s=0.0, text="")
 
 
 class _CountingModel:
@@ -258,7 +272,7 @@ def test_repost_vertical_passthrough_skips_ai(
     _install_fixture_downloader(monkeypatch, fixture)
     counts = _Counts()
     result = _run(_config(tmp_path), counts)
-    assert counts.transcribe == 0
+    assert counts.transcribe == 1  # el modo repost ahora transcribe
     assert counts.select == 0
     assert result.transcript is None
     assert result.moments == ()
@@ -286,7 +300,7 @@ def test_repost_horizontal_triggers_reframe(
         counts,
         reframer=FFmpegReframer(detector=_StaticFaceDetector(), render=render),
     )
-    assert counts.transcribe == 0
+    assert counts.transcribe == 1  # el modo repost ahora transcribe
     assert counts.select == 0
     assert result.transcript is None
     assert result.reframe is not None
@@ -309,7 +323,7 @@ def test_repost_with_audio_locked_injects_track(
     counts = _Counts()
     config = _config(tmp_path, audio_locked=True, audio_track_path=track)
     result = _run(config, counts)
-    assert counts.transcribe == 0
+    assert counts.transcribe == 1  # el modo repost ahora transcribe
     assert counts.select == 0
     assert result.transcript is None
     assert result.reframe is None
@@ -322,3 +336,112 @@ def test_repost_with_audio_locked_injects_track(
     assert _audio_duration_s(result.final_video) == pytest.approx(_SOURCE_DURATION_S, abs=0.2)
     assert track.is_file()
     assert _leftovers(tmp_path / "out") == []
+
+
+class _PalabrasTranscriber(_CountingTranscriber):
+    """Devuelve palabras reales, con dos tramos separados por un silencio.
+
+    Es el camino que antes no existia: el modo repost transcribe y el segmentador
+    local devuelve MAS DE UN segmento.
+    """
+
+    @override
+    def transcribe(self, audio: Path) -> Transcript:
+        """Transcribe y devuelve dos tramos de palabras.
+
+        Args:
+            audio: La pista, que aqui se ignora.
+
+        Returns:
+            El transcript con dieciseis palabras en dos tramos.
+        """
+        _ = audio
+        self._counts.transcribe += 1
+        palabras: list[Word] = []
+        token = 0
+        for grupo, inicio in ((8, 0.0), (8, 7.0)):
+            for indice in range(grupo):
+                palabras.append(
+                    Word(
+                        start_s=inicio + indice * 0.5,
+                        end_s=inicio + indice * 0.5 + 0.4,
+                        text=f"w{indice}",
+                        confidence=0.9,
+                        token_id=token,
+                    )
+                )
+                token += 1
+        return Transcript(words=tuple(palabras), language="es", duration_s=11.0, text="palabras")
+
+
+def test_repost_trocea_en_varios_segmentos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """El modo repost deja de emitir UN segmento y emite varios.
+
+    Es la prueba de que la funcionalidad existe de extremo a extremo y no solo
+    como funcion pura: dos tramos de habla separados por un silencio producen dos
+    segmentos, y el render sigue entregando un artefacto.
+    """
+    fixture = _generate_video(tmp_path / "vertical.mp4", width=720, height=1280)
+    _install_fixture_downloader(monkeypatch, fixture)
+    counts = _Counts()
+    config = _config(tmp_path)
+
+    result = run_long_video(
+        _VIDEO_URL,
+        model=_CountingModel(counts),
+        config=config,
+        transcriber=_PalabrasTranscriber(counts),
+    )
+
+    assert counts.transcribe == 1
+    assert counts.select == 0, "el troceado local no debe llamar al modelo"
+    assert result.transcript is not None
+    assert result.moments, "el segmentador local debe devolver momentos"
+    assert result.moments[0].start_s == pytest.approx(0.0)
+    assert len(result.moments) == 2, result.moments
+    assert result.moments[0].start_s < result.moments[1].start_s, "orden cronologico"
+
+
+def test_repost_cae_al_video_completo_si_no_hay_palabras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin palabras, una regresión a 0 clips sería-peor; se vuelve a 1.
+
+    El transcript vacío dispara la reserva: un segmento de video completo, que es
+    lo que emitía este modo antes de existir el segmentador.
+    """
+    fixture = _generate_video(tmp_path / "vertical.mp4", width=720, height=1280)
+    _install_fixture_downloader(monkeypatch, fixture)
+    counts = _Counts()
+
+    result = _run(_config(tmp_path), counts)
+
+    assert result.moments == ()
+    assert result.transcript is None
+    assert result.final_video.is_file(), "debe entregar el video completo"
+
+
+def test_repost_cae_al_video_completo_si_la_transcripcion_falla(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si la transcripción falla, tampoco se degrada a cero segmentos."""
+    fixture = _generate_video(tmp_path / "vertical.mp4", width=720, height=1280)
+    _install_fixture_downloader(monkeypatch, fixture)
+
+    class _Roto(_CountingTranscriber):
+        @override
+        def transcribe(self, audio: Path) -> Transcript:
+            _ = audio
+            self._counts.transcribe += 1
+            msg = "sin audio"
+            raise RuntimeError(msg)
+
+    result = run_long_video(
+        _VIDEO_URL,
+        model=_CountingModel(_Counts()),
+        config=_config(tmp_path),
+        transcriber=_Roto(_Counts()),
+    )
+
+    assert result.moments == ()
+    assert result.final_video.is_file()

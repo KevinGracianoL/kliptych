@@ -57,6 +57,11 @@ class MomentSource(StrEnum):
     AUDIO_ENERGY = "audio_energy"
     CHAT_DENSITY = "chat_density"
     FUSED = "fused"
+    # Segmentador local por palabras. NO lo consume `_fuse`:aqui `weights.get`
+    # usa 0.0 por defecto, asi que enrutar esta fuente por `_fuse` pondria a cero
+    # su score y el ranking se volveria arbitrario SIN NINGUN ERROR. Anade un
+    # peso en `_DEFAULT_WEIGHTS` si vas a enrutarla.
+    SPEECH_RATE = "speech_rate"
 
 
 _DEFAULT_WEIGHTS: Mapping[MomentSource, float] = {

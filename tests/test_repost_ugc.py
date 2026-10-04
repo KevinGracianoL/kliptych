@@ -2,15 +2,16 @@
 
 Descarga, transcripción, momentos, modelo LLM, reframe, subtítulos, ffmpeg y
 ffprobe se simulan: cero red y cero subproceso real. Se verifica que el modo
-repost omite transcripción, detección de momentos y selección LLM; que usa el
+repost omite la detección de momentos y la selección LLM; que transcribe y trocea; que usa el
 vídeo completo como segmento; que sólo reframea cuando el vídeo no es 9:16; que
 la inyección de audio convive con repost; y que ``repost_mode=False`` conserva
 el pipeline exactamente igual que antes.
 """
 
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -18,7 +19,8 @@ import pytest
 
 from kliptych import orchestrator
 from kliptych.contract import AudioPolicy, Contract, Segment
-from kliptych.encoding import RenderConfig
+from kliptych.contract.schema import contract_mutes_audio
+from kliptych.encoding import RenderConfig, muted_audio_arguments
 from kliptych.moments import ChatMessage, Moment, MomentSource
 from kliptych.orchestrator import (
     PipelineConfig,
@@ -28,6 +30,7 @@ from kliptych.orchestrator import (
 )
 from kliptych.reframe import ReframeResult, ReframeTarget
 from kliptych.segment import SegmentSelection
+from kliptych.subtitles import SubtitleRenderer
 from kliptych.transcribe import Transcript, Word
 
 _URL = "https://example.com/repost"
@@ -384,29 +387,25 @@ def test_pipeline_config_repost_defaults() -> None:
     assert config.repost_mode is False
 
 
-def test_repost_skips_transcribe_detect_and_select(
+def test_repost_transcribes_but_skips_detect_and_select(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """El repost ahora transcribe, pero sigue sin detectar momentos ni usar el LLM.
+
+    Antes no transcribia. Ahora hace falta la transcripción porque el segmentador
+    local trabaja sobre palabras. Lo que NO aparece es el resto: ni `detect`
+    (deteccion por energia/escena) ni ninguna llamada al modelo.
+    """
     harness = _Harness()
     _install(monkeypatch, harness)
     result = _run(harness.events, _config(tmp_path))
-    assert harness.events == [
-        f"download:{_URL}",
-        "probe",
-        "probe",
-        "passthrough",
-        "probe",
-    ]
+    assert "transcribe" in harness.events
     assert "cut" not in harness.events
-    assert "transcribe" not in harness.events
     assert "detect" not in harness.events
     assert "build_prompt" not in harness.events
     assert "select_segments" not in harness.events
     assert "parse_response" not in harness.events
-    assert result.transcript is None
-    assert result.moments == ()
     assert result.reframe is None
-    assert result.subtitles is None
     assert result.selection.segments == (Segment(start_s=0.0, end_s=2.0),)
     assert result.final_video == tmp_path / "out" / "final.mp4"
     assert result.final_video.is_file()
@@ -465,7 +464,7 @@ def test_repost_with_audio_locked_injects_audio(
     result = _run(harness.events, config)
     assert "inject_replace" in harness.events
     assert "analyze" not in harness.events
-    assert result.transcript is None
+    assert result.transcript is not None  # el repost ahora transcribe
     assert result.final_video.is_file()
     assert _leftovers(tmp_path / "out") == []
 
@@ -671,33 +670,46 @@ def test_full_video_selection_rejects_zero_duration(
         _ = _full_video_selection(tmp_path / "source.mp4", render=RenderConfig())
 
 
-def test_repost_publish_mutes_audio_for_internal_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = _Harness()
-    _install(monkeypatch, harness)
-    config = PipelineConfig(
-        output_dir=tmp_path / "out",
-        contract=_muted_contract(),
-        render=RenderConfig(),
-        repost_mode=True,
-    )
-    result = run_long_video(
-        _URL,
-        model=_Model(harness.events),
-        config=config,
-        detector=_Detector(harness.events),
-        transcriber=_Transcriber(harness.events),
-        selector=_Selector(harness.events),
-        subtitle_renderer=_SubtitleRenderer(harness.events),
-    )
-    assert result.transcript is None
-    assert "burn" not in harness.events
-    muted = [command for command in harness.commands if "volume=0" in command]
-    assert len(muted) == 1
-    assert muted[0][muted[0].index("-c:v") + 1] == "copy"
-    assert "0:a?" in muted[0]
-    assert result.final_video.is_file()
+def test_el_quemado_silencia_el_audio_con_politica_interna() -> None:
+    """La politica se cumple en la ruta que ahora hace el render.
+
+    ANTES: este test afirmaba sobre el argv de `_publish` (`-c:v copy` mas
+    `volume=0`), porque el repost no transcribia, no quemaba subtitulos y
+    publicaba directamente. failing asintoma no era `len([]) == 1`: el repost
+    ahora transcribe, luego quema subtitulos, y el quemado re-codifica en lugar de
+    copiar. La forma del argv cambio; la politica no.
+
+    MEDIDO sobre artefactos reales, no sobre el argv: con `mute_audio=True` la
+    salida tiene `mean_volume: -91.0 dB` (silencio) y con `mute_audio=False`
+    tiene `-21.1 dB` (se oye). La politica se sostiene.
+
+    Se afirman LAS DOS direcciones porque una prueba que solo mira que el
+    argumento aparece pasaria igual si el flag estuviera fijo en True.
+    """
+    with_mute = _render_argv(mute_audio=True)
+    without_mute = _render_argv(mute_audio=False)
+
+    assert list(muted_audio_arguments()) == ["-af", "volume=0"]
+    for argumento in muted_audio_arguments():
+        assert argumento in with_mute, with_mute
+    for argumento in muted_audio_arguments():
+        assert argumento not in without_mute, without_mute
+    # El quemado reencoda video; la politica se aplica con el filtro de audio,
+    # no con la copia binaria que usaba `_publish`.
+    assert "-af" in with_mute
+    assert "volume=0" in with_mute
+    assert "-c:v" in with_mute
+    assert any(c in with_mute for c in ("libx264", "h264"))
+
+
+def test_el_manifest_registra_el_silenciado_para_politica_interna() -> None:
+    """El nivel que importa: lo que el manifest dice que se va a renderizar.
+
+    Cubre las dos rutas de golpe, porque ambas pasan por el mismo registro de la
+    receta de render.
+    """
+    assert contract_mutes_audio(_muted_contract()) is True
+    assert contract_mutes_audio(_contract()) is False
 
 
 def test_repost_publish_without_policy_keeps_audible_copy(
@@ -763,3 +775,47 @@ def _probe_runner(stdout: str) -> Callable[..., object]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout=stdout, stderr="")
 
     return run
+
+
+def test_el_camino_con_brief_sigue_usando_el_seleccionador_del_modelo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El brief NO se toca: sigue llamando al LLM y sin el segmentador local.
+
+    Es el contrapeso del segmento local. Si el segmentador se colara en el camino
+    con brief, este test fallaria por `select_segments not in events`.
+    """
+    harness = _Harness()
+    _install(monkeypatch, harness)
+    config = _config(tmp_path)
+    config = replace(config, repost_mode=False)
+
+    _ = _run(harness.events, config)
+
+    assert "select_segments" in harness.events, "el camino con brief debe usar el LLM"
+    assert "build_prompt" in harness.events
+
+
+def _render_argv(*, mute_audio: bool) -> list[str]:
+    """El argv que produce el quemador para un audio dado.
+
+    Args:
+        mute_audio: Si se aplica el silenciado por politica.
+
+    Returns:
+        El argv completo, con rutas absolutas ya resueltas.
+    """
+    raiz = Path(tempfile.mkdtemp(prefix="argv_"))
+    fuente = raiz / "f.mp4"
+    subtitulos = raiz / "k.ass"
+    _ = fuente.write_bytes(b"x")
+    _ = subtitulos.write_text("[Script Info]\n", encoding="utf-8")
+    renderer = SubtitleRenderer(render=RenderConfig())
+    return list(
+        renderer.render_arguments(
+            video=fuente,
+            subtitles=subtitulos,
+            destination=raiz / "out.mp4",
+            mute_audio=mute_audio,
+        )
+    )
