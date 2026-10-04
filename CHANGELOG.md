@@ -29,6 +29,10 @@ Medido sobre un VOD real de 70 min (una clase), en un excerpt de 10 min. Con
   es aproximado en el orden de 1e-16. La salida sigue siendo determinista: lo
   unico difuso es el significado del numero en una medida de cero. No se anadio
   redondeo para taparlo.
+- El operador recibe el recuento de lo que se descarto y por que: cuantos tramos
+  calificaron, cuantos se entregaron, cuantos se dejaron por el techo, cuantos
+  por los suelos y cuantos clips se recortaron por duracion. Sin eso, "12 tramo(s)"
+  es una operacion PARCIAL informada como completa.
 - La exportacion en lote sigue siendo atomica, asi que un clip que falle deja el
   paquete entero sin entregar. El render perezoso por clip (B1) elimina este
   escalon y es la resolucion prevista.
