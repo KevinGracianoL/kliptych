@@ -3,6 +3,34 @@
 ## [Unreleased]
 
 ### Changed
+- **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
+  emitia un unico segmento con el video completo. Ahora transcribe y trocea las
+  palabras en varios segmentos, elegidos por palabras por segundo y silencios.
+  Medido sobre un VOD real de 70 min (una clase), en un excerpt de 10 min:
+  929 palabras_whisper, 87 tramos crudos, 13 descartados por la regla 4 y **74
+  segmentos** frente al unico segmento de antes. Duracion mediana 5,0 s, min
+  0,98 s, max 18,7 s. La seleccion中新 se midio aparte: 0,37 ms de media, un
+  0,0007 % del tiempo de transcripcion.
+- La seleccion es mecanica y determinista: no hay LLM, ni API, ni red. La misma
+  transcripcion produce siempre los mismos segmentos, y la lista sale en orden
+  cronologico; el score viaja en cada segmento para quien quiera ordenar por
+  interes.
+- El modo personal ahora transcribe y, por tanto, ahora produce subtitulos karaoke
+  que antes no producia.
+- La duracion minima la impone la seleccion, NO el gate: el contrato zero-contract
+  no declara regla de duracion y el gate no la verifica (#67).
+- El limite de duracion lo fija el contrato cuando lo declara, y el segmentador
+  usa los suyos solo cuando el contrato calla.
+- `MAX_GAP_S` se compara contra una resta de flotantes, asi que un hueco de "0,6 s"
+  es aproximado en el orden de 1e-16. La salida sigue siendo determinista: lo
+  unico difuso es el significado del numero en una medida de cero. No se anadio
+  redondeo para taparlo.
+- La exportacion en lote sigue siendo atomica, asi que un clip que falle deja el
+  paquete entero sin entregar. El render perezoso por clip (B1) elimina este
+  escalon y es la resolucion prevista.
+
+
+### Changed
 - **Sprint A2.1 - Karaoke por linea:** el subtitulo de karaoke escribia un
   evento `Dialogue` por palabra, de modo que en pantalla se veia una sola palabra
   a la vez. Ahora agrupa las palabras en una linea, emite un unico evento con un

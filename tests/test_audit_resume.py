@@ -425,7 +425,7 @@ def test_run_audio_locked_and_repost_full_pipeline(
         subtitle_renderer=deps.subtitle_renderer,
     )
     assert isinstance(repost_result, PipelineResult)
-    assert repost_result.transcript is None
+    assert repost_result.transcript is not None  # el repost ahora transcribe
     assert repost_result.final_video.is_file()
 
 
@@ -476,7 +476,7 @@ def test_repost_without_model_does_not_raise(
         subtitle_renderer=deps.subtitle_renderer,
     )
     assert isinstance(result, PipelineResult)
-    assert result.transcript is None
+    assert result.transcript is not None  # el repost ahora transcribe
     assert result.final_video.is_file()
 
 

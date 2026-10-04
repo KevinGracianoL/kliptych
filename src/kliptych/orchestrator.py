@@ -72,6 +72,7 @@ from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
 from kliptych.segment import LLMSegmentSelector, SegmentSelection, SegmentSelector
+from kliptych.segmenter import segment_by_speech_rate
 from kliptych.subtitles import SubtitleRenderer
 from kliptych.transcribe import (
     FasterWhisperTranscriber,
@@ -1662,7 +1663,13 @@ def _resolve_intelligence_stages(
     resume: bool,
 ) -> tuple[Transcript | None, tuple[Moment, ...], SegmentSelection]:
     if config.repost_mode:
-        return None, (), _full_video_selection(source, render=config.render)
+        return _resolve_repost_stages(
+            source,
+            config=config,
+            dependencies=dependencies,
+            state=state,
+            resume=resume,
+        )
     if model is None:
         # El modo repost devuelve antes de necesitar el modelo; cualquier otro
         # modo selecciona segmentos con el LLM y no admite la ausencia.
@@ -1693,6 +1700,112 @@ def _resolve_intelligence_stages(
         resume=resume,
     )
     return transcript, moments, selection
+
+
+def _resolve_repost_stages(
+    source: Path,
+    *,
+    config: PipelineConfig,
+    dependencies: _Dependencies,
+    state: PipelineStateManager,
+    resume: bool,
+) -> tuple[Transcript | None, tuple[Moment, ...], SegmentSelection]:
+    """El modo repost local: transcribe y trocea, sin LLM ni red.
+
+    Antes este modo no transcribia y devolvia el video entero como un unico
+    segmento. Ahora transcribe (con la misma cache por fingerprint que el resto
+    de etapas) y delega el troceado en el segmentador local.
+
+    Si la transcripcion falla o no devuelve palabras, se vuelve al segmento unico
+    de video completo: una regresión a 1 clip es mejor que una regresión a 0.
+
+    Args:
+        source: Ruta del vídeo fuente descargado.
+        config: Configuración del pipeline.
+        dependencies: Transcriptor y resto de dependencias.
+        state: Gestor de puntos de control.
+        resume: Si se puede reanudar desde el checkpoint.
+
+    Returns:
+        La transcripción si se pudo hacer, los momentos y la selección.
+    """
+    try:
+        transcript = _resolve_transcript_stage(
+            source,
+            config=config,
+            transcriber=dependencies.transcriber,
+            state=state,
+            resume=resume,
+        )
+    except (PipelineError, OSError, RuntimeError):
+        logger.warning(_aviso_transcripcion_fallida())
+        return None, (), _full_video_selection(source, render=config.render)
+    if not transcript.words:
+        logger.warning("La transcripción no devolvió palabras; se usa el vídeo completo")
+        return None, (), _full_video_selection(source, render=config.render)
+
+    min_s, max_s = _contract_duration_bounds(config)
+    momentos = segment_by_speech_rate(transcript.words, min_s=min_s, max_s=max_s)
+    if not momentos:
+        logger.warning("El segmentador local no encontró tramos; se usa el vídeo completo")
+        return transcript, (), _full_video_selection(source, render=config.render)
+    selection = SegmentSelection(
+        segments=tuple(Segment(start_s=m.start_s, end_s=m.end_s) for m in momentos),
+        rationale=_rationale_segmentador(len(momentos)),
+    )
+    return transcript, momentos, selection
+
+
+_TEXTO_AVISO_FALLIDA = (
+    "La transcripción no pudo completarse en modo repost; "
+    "se vuelve al segmento único de vídeo completo"
+)
+
+
+def _aviso_transcripcion_fallida() -> str:
+    """El aviso que se registra cuando la transcripción no pudo completarse.
+
+    Returns:
+        El texto del aviso.
+    """
+    return _TEXTO_AVISO_FALLIDA
+
+
+def _rationale_segmentador(cuantos: int) -> str:
+    """La justificacion que se registra junto a los segmentos del segmentador local.
+
+    Args:
+        cuantos: Cuantos segmentos salieron.
+
+    Returns:
+        El texto de justificacion.
+    """
+    return (
+        f"segmentador local determinista: {cuantos} tramo(s) por palabras por segundo y silencios"
+    )
+
+
+def _contract_duration_bounds(config: PipelineConfig) -> tuple[float | None, float | None]:
+    """El piso y el tope que el contrato impone, si impone alguno.
+
+    Se combinan igual que en la selección con brief: el mayor de los pisos de
+    todas las plataformas y el menor de los topes. Con el modo zero-contract las
+    plataformas no fijan ninguno, y el segmentador aplica los suyos.
+
+    Args:
+        config: Configuración del pipeline.
+
+    Returns:
+        La pareja (min_s, max_s), con None donde el contrato calla.
+    """
+    minimos: list[float] = []
+    topes: list[float] = []
+    for reglas in config.contract.platforms.values():
+        if reglas.duration.min_s is not None:
+            minimos.append(float(reglas.duration.min_s))
+        if reglas.duration.max_s is not None:
+            topes.append(float(reglas.duration.max_s))
+    return (max(minimos) if minimos else None, min(topes) if topes else None)
 
 
 def _resolve_clip(
