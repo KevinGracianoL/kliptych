@@ -552,13 +552,17 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
     con un artefacto 16:9 perfecto, y el mensaje de FAIL culpaba al contrato de
     algo que el contrato había dicho bien.
 
-    Fail-closed y, cuando lo que falta es la MEDICIÓN, no fail:
+    Fail-closed, y la frontera entre FAIL y UNSUPPORTED es si hubo MEDICIÓN:
     - ``split_screen`` ausente -> FAIL: la falta está en el contrato, que es
       legible.
-    - sin probe, sin dimensiones o sin pista de video -> UNSUPPORTED: lo que
-      falta es poder MIRAR el artefacto. Un artefacto que nadie pudo medir no
-      se lee como conforme, que es la misma regla que ya rige sobre las reglas
-      sin validador mecánico.
+    - sin pista de video -> FAIL: ffprobe respondió y dijo que no hay video. Eso
+      es una medición, y el veredicto es FAIL, igual que en
+      ``artifact.video_stream`` y ``audio.present``.
+    - sin probe, o sin dimensiones utilizables -> UNSUPPORTED: lo que falta es
+      poder MIRAR el artefacto. Un artefacto que nadie pudo medir no se lee como
+      conforme, que es la misma regla que ya rige sobre las reglas sin validador
+      mecánico (brief §5.1: sin validador aplicable, UNSUPPORTED o MANUAL_REVIEW,
+      nunca PASS).
 
     Args:
         context: Contexto resuelto del gate.
@@ -589,10 +593,10 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
             **evidencia,
         )
     if not media.has_video:
-        return _unsupported(
-            "el artefacto no tiene pista de video; no hay lienzo que medir",
+        return _fail(
             has_video=False,
             **evidencia,
+            reason="el artefacto no tiene pista de video",
         )
     return _geometry_outcome(media, split, evidencia)
 
@@ -625,8 +629,14 @@ def check_declared_outputs(context: GateContext) -> CheckOutcome:
     version y no de una declaracion, para que el operador lo vea.
 
     UNSUPPORTED, nunca PASS, cuando el aspecto del artefacto no se puede
-    medir: sin probe, sin dimensiones o sin pista de video no hay nada que
-    comparar, y un artefacto que nadie pudo medir no se lee como conforme.
+    medir: sin probe, o sin dimensiones utilizables. Un artefacto que nadie pudo
+    medir no se lee como conforme.
+
+    `has_video=False` NO es un caso de no medicion: ffprobe respondio y dijo que
+    no hay pista de video. Eso es una medicion, y el veredicto es FAIL, que es
+    lo que ya hacen `artifact.video_stream` y `audio.present`. Confundir las dos
+    cosas deja el mismo `gate.json` con dos diagnosticos contradictorios para el
+    mismo artefacto.
 
     Args:
         context: Contexto resuelto del gate.
@@ -650,15 +660,15 @@ def check_declared_outputs(context: GateContext) -> CheckOutcome:
             **evidencia,
         )
     if not media.has_video:
-        return _unsupported(
-            "el artefacto no tiene pista de video; el aspecto no es medible",
+        return _fail(
             has_video=False,
             **evidencia,
+            reason="el artefacto no tiene pista de video",
         )
     width, height = media.width, media.height
-    if width is None or height is None:
+    if width is None or height is None or width <= 0 or height <= 0:
         return _unsupported(
-            "ffprobe no reportó las dimensiones del video; el aspecto no es medible",
+            "ffprobe no reportó dimensiones utilizables del video; el aspecto no es medible",
             **evidencia,
         )
     medido = _measured_aspect(width, height)
@@ -695,9 +705,12 @@ def _geometry_outcome(
         dimensiones ausentes o distintas; UNSUPPORTED si no hubo medición.
     """
     width, height = media.width, media.height
-    if width is None or height is None:
+    if width is None or height is None or width <= 0 or height <= 0:
+        # `height == 0` no es teorico del todo: `MediaInfo` no declara cota, y
+        # dividir por ahi es un ZeroDivisionError que pydantic y el gate no
+        # envuelven. Es no medible, no medido y malo, asi que es UNSUPPORTED.
         return _unsupported(
-            "ffprobe no reportó las dimensiones del video; el aspecto no es medible",
+            "ffprobe no reportó dimensiones utilizables del video; el aspecto no es medible",
             expected_width=split.width,
             expected_height=split.height,
             **evidencia,

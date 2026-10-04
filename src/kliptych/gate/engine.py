@@ -175,9 +175,10 @@ class Gate:
                     # que la pida. El contrato es incoherente, y una declaracion
                     # incoherente NO se inventa: se despacha. Omitirla en
                     # silencio seria un fail-open, y sustituirla por un
-                    # UNSUPPORTED fijo tambien: `_derive_status` solo escala
-                    # UNSUPPORTED cuando la fuerza es `hard`, asi que una regla
-                    # recommended huerfana pasaria de `rejected` a `passed`.
+                    # UNSUPPORTED fijo tambien lo seria: `_derive_status` escala
+                    # UNSUPPORTED con independencia de la fuerza, asi que una
+                    # regla recommended huerfana pasaria de `passed` a
+                    # `unsupported`, que es lo que corresponde.
                     #
                     # OJO: no hay un unico "igual que base", depende de la FORMA
                     # de la regla. Sin validador (audio.no_trending,
@@ -295,11 +296,44 @@ def rule_applies_anywhere(rule_id: str, contract: Contract) -> bool:
 
 
 def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> GateStatus:
+    """Deriva el estado global del gate desde los checks y sus fuerzas.
+
+    El orden de escalado es deliberado y no se reordena:
+
+    1. Cualquier ``FAIL`` -> ``REJECTED``, sea cual sea la fuerza. Un artefacto
+       medido y malo se rechaza, y da igual que la regla fuera obligatoria o
+       recomendada.
+    2. Cualquier ``UNSUPPORTED`` -> ``UNSUPPORTED``, **tambien con independencia
+       de la fuerza**.
+    3. Cualquier ``MANUAL_REVIEW`` (por fuerza o por estado) -> ``PENDING_REVIEW``.
+    4. En otro caso -> ``PASSED``.
+
+    El punto 2 es el que se corrigio. Antes solo escalaba cuando la fuerza era
+    ``hard``, asi que una regla ``recommended`` o ``manual_review`` con un check
+    ``UNSUPPORTED`` caia en el punto 4 y devolvia ``PASSED``: un artefacto que
+    NADIE pudo verificar salia aprobado. El brief, §5.1, es literal sobre esto:
+    "sin validador aplicable el resultado es UNSUPPORTED o MANUAL_REVIEW, nunca
+    PASS". No tiene clausula "salvo que sea hard", y no la tenia nunca.
+
+    La fuerza NO se consulta aqui a proposito, y conviene entender por que antes
+    de tocarlo. La fuerza decide si una regla MALA bloquea o abre una revision
+    manual: por eso el punto 3 la mira. Pero un check ``UNSUPPORTED`` no dice que
+    el artefacto este mal, dice que NO SE PUDO MIRAR. Ahi no hay nada que el
+    operador pueda revisar a mano, porque no hay veredicto: no hay imagen que
+    mirar ni medida que discutir. Degradarlo a ``PENDING_REVIEW`` lo haria
+    exportable con ``approve_manual_review``, que es exactamente el fail-open que
+    se acaba de cerrar.
+
+    Args:
+        outcomes: Pares de (fuerza, resultado) de cada check despachado.
+
+    Returns:
+        El estado global del gate.
+    """
     checks = [check for _, check in outcomes]
     if any(check.status is CheckStatus.FAIL for check in checks):
         return GateStatus.REJECTED
-    hard = [check for strength, check in outcomes if strength is RuleStrength.HARD]
-    if any(check.status is CheckStatus.UNSUPPORTED for check in hard):
+    if any(check.status is CheckStatus.UNSUPPORTED for check in checks):
         return GateStatus.UNSUPPORTED
     if any(
         strength is RuleStrength.MANUAL_REVIEW or check.status is CheckStatus.MANUAL_REVIEW

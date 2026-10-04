@@ -290,11 +290,44 @@ def test_c2_sin_dimensiones_es_unsupported(tmp_path: Path) -> None:
     assert outcome.status is CheckStatus.UNSUPPORTED
 
 
-def test_c3_sin_pista_de_video_es_unsupported(tmp_path: Path) -> None:
-    """No hay video, no hay lienzo que medir."""
+def test_c3_sin_pista_de_video_es_fail(tmp_path: Path) -> None:
+    """Sin video es FAIL, porque el probe RESPONDIO: es una medicion.
+
+    Es la otra mitad de la distincion, y por eso importa que este test y
+    `c1` digan cosas distintas. Un probe que no devuelve nada (c1) es no
+    medible; un probe que responde "no hay pista de video" es una medicion con
+    veredicto. Devolver UNSUPPORTED en los dos casos daria el mismo diagnostico
+    para un archivo corrupto y para una herramienta caida.
+    """
     outcome = check_split_screen_geometry(_context(tmp_path, has_video=False))
 
+    assert outcome.status is CheckStatus.FAIL
+
+    pertenencia = check_declared_outputs(
+        _context(tmp_path, outputs=_DUAL, split_aspect=None, has_video=False)
+    )
+
+    assert pertenencia.status is CheckStatus.FAIL
+
+
+def test_c3b_alto_cero_no_es_una_division_por_cero(tmp_path: Path) -> None:
+    """`height == 0` es UNSUPPORTED, y el gate no revienta.
+
+    `MediaInfo` no declara cota, asi que un cero desde ffprobe llegaria aqui. La
+    aritmetica de `_measured_aspect` divide, y un `ZeroDivisionError` no
+    envuelto convertia un veredicto fail-closed en un crash. Que el camino
+    aritmetico tambien sea fail-closed es parte del contrato del gate.
+    """
+    outcome = check_split_screen_geometry(_context(tmp_path, height=0))
+
     assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "dimensiones" in str(outcome.evidence["reason"])
+
+    pertenencia = check_declared_outputs(
+        _context(tmp_path, outputs=_DUAL, split_aspect=None, height=0)
+    )
+
+    assert pertenencia.status is CheckStatus.UNSUPPORTED
 
 
 def test_c4_sin_lienzo_declarado_falla(tmp_path: Path) -> None:
@@ -312,14 +345,19 @@ def test_c4_sin_lienzo_declarado_falla(tmp_path: Path) -> None:
 def test_c5_ninguna_evidence_afirma_cumplimiento_sin_medir(tmp_path: Path) -> None:
     """Guardarrail: ningun veredicto lee como conforme algo que no se midio.
 
-    Recorre las tres formas de no poder medir. La clave es que en ningun caso la
-    evidencia pueda leerse como una atestación: si `satisfied_by` aparece, hubo
-    medición.
+    Recorre las tres formas de no poder medir y los dos validadores. La clave es
+    que en ningun caso la evidencia pueda leerse como una atestación: si
+    `satisfied_by` aparece, hubo medición.
+
+    `has_video=False` queda fuera de este bucle a proposito: el probe SI
+    respondio, asi que es una medicion con veredicto FAIL, no una ausencia de
+    medicion. Ese caso tiene su propio test (`c3`), y meterlo aqui volveria a
+    fusionar las dos cosas que este PR separa.
     """
-    for con_probe, ancho, alto, video in (
-        (False, 1080, 1920, True),
-        (True, None, None, True),
-        (True, 1080, 1920, False),
+    for con_probe, ancho, alto in (
+        (False, 1080, 1920),
+        (True, None, None),
+        (True, 1080, 0),
     ):
         # Sin lienzo, porque un contrato multi-formato no puede declararlo.
         for validar in (check_split_screen_geometry, check_declared_outputs):
@@ -331,10 +369,9 @@ def test_c5_ninguna_evidence_afirma_cumplimiento_sin_medir(tmp_path: Path) -> No
                     with_probe=con_probe,
                     width=ancho,
                     height=alto,
-                    has_video=video,
                 )
             )
-            etiqueta = (validar.__name__, con_probe, ancho, alto, video)
+            etiqueta = (validar.__name__, con_probe, ancho, alto)
             if validar is check_split_screen_geometry:
                 # Sin `split_screen` la regla no aplica: eso es FAIL del
                 # contrato, no una falta de medicion. Se cubre en `c4`.
@@ -482,6 +519,33 @@ def _sondeo_una_regla(tmp_path: Path, regla: str, media: MediaInfo | None) -> Ch
     return DEFAULT_VALIDATORS[regla](contexto)
 
 
+# Las reglas cuyo veredicto depende de haber MIRADO el artefacto. Un validador de
+# esta clase no puede devolver FAIL cuando el probe noRespondio, porque entonces
+# le esta diciendo al operador que su contenido esta mal cuando lo que fallo fue
+# la herramienta.
+#
+# Esta lista NO es una puerta estructural y no pretende serlo. Se declaro como
+# una, y no lo era: las uniones `| {"artifact.aspect"}` eran no-ops porque la
+# entrada ya estaba, y el test que "verificaba" que la lista cubriese el catalogo
+# era una identidad que se cumple siempre. Un validador nuevo que conflara los dos
+# casos pasaba las dos.
+#
+# Lo que si funciona, y es lo unico que se afirma aqui, es que la lista no se
+# desincroniza con el catalogo por la via de inventar nombres: `test_f3` lo
+# comprueba, y esa comprobacion puede fallar de verdad.
+#
+# Lo que NO se automatiza, y conviene decirlo para que nadie lo busque: que un
+# validador NUEVO que dependa del artefacto se apunte aqui. Se puede escribir esa
+# comprobacion, y es tentadora, pero necesita saber si cada validador depende del
+# artefacto, y esa informacion no existe en ningun sitio: no hay marcador, ni tipo,
+# ni anotacion. Una version de esa puerta tendria que hardcodear la misma lista
+# que ya hay, mas un diccionario de "estas si dependen", y las dos cosas se
+# desincronizan igual. Un test que depende de una tabla que el test mismo mantiene
+# no es una puerta: es una assertion con pasos extra.
+#
+# La decision de si un validador nuevo es de esta clase o de la otra sigue siendo
+# del que lo escribe, y por eso no se disfraza de automatismo. Lo que si hay es el
+# inventario (`f1`), que dice la verdad sobre las reglas de hoy.
 _REGLAS_DEL_ARTIFACTO: frozenset[str] = frozenset(
     {
         "artifact.aspect",
@@ -502,59 +566,36 @@ _REGLAS_DEL_ARTIFACTO: frozenset[str] = frozenset(
 def test_f1_inventario_de_validadores_que_conflan(tmp_path: Path) -> None:
     """Ningun validador del gate puede decir FAIL sin haber mirado el artefacto.
 
-    Este test es la puerta estructural de la clase. Un validador que devuelve
-    FAIL con `media is None` le esta diciendo al operador que su contenido esta
-    mal cuando en realidad no pudo mirarlo, y lo manda a depurar lo que no esta
-    roto: eso es un problema de herramienta, no de contenido.
+    Un validador que devuelve FAIL con `media is None` le esta diciendo al
+    operador que su contenido esta mal cuando en realidad no pudo mirarlo, y lo
+    manda a depurar lo que no esta roto: eso es un problema de herramienta, no de
+    contenido.
 
-    Se recorre TODO `DEFAULT_VALIDATORS`, asi que un validador nuevo que confunda
-    los dos casos nace muerto. Se excluyen las reglas de texto y de marca, que no
-    dependen del artefacto: un caption puede estar mal con o sin probe, asi que
-    su veredicto es legitimo en ambos casos.
-
-    La lista de reglas del artefacto se compara con el catalogo entero, asi que
-    anadir un validador obliga a decidir si es de una clase o de la otra en vez
-    de colarse por el hueco.
+    Lo que fija es el estado actual de las once reglas que dependen del artefacto.
+    Si una de ellas pasa a conflacionar, este test lo dice. Si anaden un validador
+    nuevo y no lo anaden a la lista, esto no lo vera: para eso esta `f3`.
     """
-    sin_video = MediaInfo(
-        width=None,
-        height=None,
-        has_video=False,
-        duration_s=None,
-        has_audio=False,
-        format_name="",
-    )
-    reglas_artefacto = _REGLAS_DEL_ARTIFACTO | {"artifact.aspect"}
-    assert reglas_artefacto <= set(DEFAULT_VALIDATORS)
-
     conflatan = [
         regla
-        for regla in sorted(reglas_artefacto)
+        for regla in sorted(_REGLAS_DEL_ARTIFACTO)
         if _sondeo_una_regla(tmp_path, regla, None).status is CheckStatus.FAIL
     ]
 
     assert conflatan == [], f"devuelven FAIL sin haber medido: {conflatan}"
-    assert _sondeo_una_regla(tmp_path, "artifact.video_stream", sin_video).status is (
-        CheckStatus.FAIL
-    )
 
 
-def test_f1b_la_lista_de_reglas_del_artefacto_es_exacta() -> None:
-    """El inventario tiene que cubrir el catalogo, o "no queda ninguno" no vale.
+def test_f3_la_lista_y_el_catalogo_no_se_desincronizan() -> None:
+    """`_REGLAS_DEL_ARTIFACTO` tiene que seguir existiendo en el catalogo real.
 
-    Si `DEFAULT_VALIDATORS` gana una regla nueva y nadie actualiza
-    `_REGLAS_DEL_ARTIFACTO`, `f1` dejaria de mirar esa regla y el inventario
-    volveria a ser una afirmacion sin comprobar. Este test falla cuando las dos
-    listas se desincronizan.
+    Esta es la asercion que si puede fallar, a diferencia de la que sustituye. Si
+    `_REGLAS_DEL_ARTIFACTO` gana un nombre que no esta en `DEFAULT_VALIDATORS`, el
+    inventario de `f1` estaria sondeando un validador inexistente y `f1` pasaria
+    sin comprobar nada. Falla en esa direccion.
     """
-    declaradas = _REGLAS_DEL_ARTIFACTO | {"artifact.aspect"}
+    declaradas = _REGLAS_DEL_ARTIFACTO
     todas = set(DEFAULT_VALIDATORS)
-    del_artefacto, del_texto = declaradas, todas - declaradas
 
-    assert declaradas <= todas, f"inventadas y sin validador: {sorted(declaradas - todas)}"
-    assert del_texto, "el catalogo tendria que tener reglas de texto ademas de las de artefacto"
-    assert del_artefacto.isdisjoint(del_texto)
-    assert len(declaradas) + len(del_texto) == len(todas)
+    assert declaradas <= todas, f"en la lista y sin validador: {sorted(declaradas - todas)}"
 
 
 def test_f1c_el_artefacto_sin_video_sigue_siendo_una_medicion(tmp_path: Path) -> None:

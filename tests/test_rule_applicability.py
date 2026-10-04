@@ -256,12 +256,25 @@ def test_reminder_is_still_emitted_for_the_platform_that_declares_the_rule(
     assert any("audio.no_trending" in detail for detail in manual)
 
 
-def test_recommended_rule_with_unsupported_check_is_unaffected(tmp_path: Path) -> None:
-    """T6: una regla recommended sin validador se comporta igual que en main.
+def test_recommended_rule_with_unsupported_check_blocks_the_gate(tmp_path: Path) -> None:
+    """T6: una regla recommended sin validador bloquea, y ya no se exporta.
 
-    ``link.in_bio`` no tiene validador registrado. Declarada como recommended, su
-    UNSUPPORTED no deriva en UNSUPPORTED de gate, porque esa condicion solo mira
-    las reglas ``hard``. Este PR no debe alterar esa combinacion.
+    Este test fijaba lo contrario: declaraba ``link.in_bio`` como recommended y
+    comprobaba que su UNSUPPORTED se traducía en un gate ``passed`` y una pieza
+    EXPORTADA. Eso congelaba un fail-open, no una intencion. El razonamiento que
+    lo justificaba ("esa condicion solo mira las reglas hard") era una
+    descripcion de un defecto, no una decision, y por eso otro test lo daba por
+    bueno en el mismo sitio.
+
+    El brief, §5.1, es literal: sin validador aplicable el resultado es
+    UNSUPPORTED o MANUAL_REVIEW, nunca PASS. No tiene clausula "salvo que sea
+    hard", y no la tenia nunca. Una regla recommended que nadie puede verificar no
+    es una regla que el operador pueda revisar a mano, porque no hay veredicto que
+    revisar; de degradarla a PENDING_REVIEW se volveria exportable con
+    ``approve_manual_review``.
+
+    Lo que este test sigue fijando, y sigue siendo cierto: el check se despacha
+    y se registra. No se omite en silencio.
     """
     contract = make_contract(
         audio_rule="any",
@@ -272,10 +285,17 @@ def test_recommended_rule_with_unsupported_check_is_unaffected(tmp_path: Path) -
 
     result = _gate().run(contract=contract, piece=piece, assets=AssetRegistry(tmp_path))
     assert _check(result, "link.in_bio").status is CheckStatus.UNSUPPORTED
-    assert result.status is GateStatus.PASSED
+    assert result.status is GateStatus.UNSUPPORTED
 
     exported = _export(tmp_path, contract=contract, pieces=[piece], approve=False, tag="t6")
-    assert exported.status is ExportStatus.EXPORTED
+    assert exported.status is not ExportStatus.EXPORTED
+
+    # Y con la firma de aprobacion manual, que es donde el fail-open se
+    # escondia: `_is_piece_exportable` solo rescata PENDING_REVIEW, y aqui el
+    # estado es UNSUPPORTED. El estado del gate no basta para probarlo; hace
+    # falta pasar por el exportador.
+    con_firma = _export(tmp_path, contract=contract, pieces=[piece], approve=True, tag="t6b")
+    assert con_firma.status is not ExportStatus.EXPORTED
 
 
 def test_contract_without_manual_review_rules_exports_clean(tmp_path: Path) -> None:

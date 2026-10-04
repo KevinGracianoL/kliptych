@@ -15,30 +15,30 @@
   `FAIL` es "el artefacto esta mal" y `UNSUPPORTED` es "no pude verificarlo". Un
   archivo que ffprobe no pudo abrir es un problema de herramienta o de entorno, no
   de contenido, asi que "rejected" mandaba al operador a depurar lo que no estaba
-  roto. Cinco validadores ya devolvian `_unsupported` en ese mismo caso
-  (duracion, integridad, aspect, watermark, audio): este era el unico que
-  conflacionaba los dos casos, no una decision de diseno.
-  Lo que NO cambia: ambos veredictos siguen bloqueando la exportacion, y la
-  aprobacion manual solo rescata `PENDING_REVIEW`, asi que no se vuelve
-  exportable nada que no lo fuera. Lo que cambia es el diagnostico que ve el
-  operador: el estado global pasa de `rejected` a `unsupported` para un artefacto
-  no inspeccionable.
-  La distincion se mantiene en las DOS direcciones: un artefacto que si se pudo
-  medir y no cuadra sigue siendo FAIL, porque "no se pudo verificar" seria falso.
-- **Un contrato 1.1 ahora se MIDE contra su default documentado de 9:16, en vez
-  de saltarse la comprobacion.** Antes `check_declared_outputs` hacia
-  corto-circuito en un 1.1 y devolvia PASS sin medir nada, asi que un artefacto
-  16:9 procedente de una corrida 1.1 quedaba certificado como conforme. Esa
-  corrida renderiza 9:16, de modo que el artefacto era una corrida mal formada y
-  el gate no podia detectarla.
-  El 1.1 no declaro salidas, asi que no hay nada a lo que "pertenecer"; pero su
-  conjunto efectivo es una sola entrada vertical, y para un conjunto de un
-  elemento "¿es miembro?" y "¿es 9:16?" son la misma pregunta, de modo que la
-  exencion no protegia nada. `declared_by_version` sigue en la evidencia, pero es
-  un campo de procedencia: dice que el requisito vino de un default de version y
-  no de una declaracion, para que el operador lo distinga.
-  No se rompe ninguna corrida conforme: un 1.1 que produce el 9:16 que siempre
-  produjo sigue pasando.
+  roto.
+  El caso "ffprobe abrio el archivo y dijo que no hay pista de video" sigue siendo
+  FAIL, porque ahi HUBO medicion. Es lo que ya hacen `artifact.video_stream` y
+  `audio.present`, y devolver UNSUPPORTED en los dos casos dejaba el mismo
+  `gate.json` con dos diagnosticos contradictorios para el mismo artefacto.
+  No se rompe ninguna corrida conforme: nada que cumpliera deja de cumplir.
+- **UNSUPPORTED ahora bloquea con CUALQUIER fuerza de regla, no solo con `hard`.**
+  Este es un fail-open que ya existia en `main`, anterior a esta PR, y que solo
+  ahora es alcanzable desde un validador de geometria. `_derive_status` escalaba
+  `UNSUPPORTED` solo cuando la fuerza era `hard`, asi que un `UNSUPPORTED` en
+  `recommended` o `manual_review` caia al final y devolvia `passed`: un artefacto
+  que NADIE pudo verificar salia aprobado y exportable, incluso con firma de
+  revision manual.
+  El aviso estaba escrito en un comentario del propio motor, dos funciones mas
+  arriba, y ningun test lo alcanzaba. Dos tests lo fijaban como comportamiento
+  correcto (`test_recommended_rule_with_unsupported_check_is_unaffected` de #57,
+  y el de este PR). El brief, §5.1, es literal: sin validador aplicable el
+  resultado es UNSUPPORTED o MANUAL_REVIEW, nunca PASS. No tiene clausula "salvo
+  que sea hard", y no la tenia nunca.
+  Un `UNSUPPORTED` no dice que el artefacto este mal, dice que NO SE PUDO MIRAR, y
+  ahi no hay nada que un operador pueda revisar a mano. Degradarlo a revision
+  manual lo haria exportable con firma.
+  Lo que no cambia: `FAIL` sigue gainandole, y el orden de escalado es el mismo
+  (FAIL -> UNSUPPORTED -> revision manual -> passed).
 - La escalera de #76 sigue en orden: **PR 1 declaro, PR 2 valida, PR 3
   renderiza**. Solo PR 3 produce un segundo artefacto. Esta PR no entrega ninguna
   capacidad visible.
@@ -49,10 +49,22 @@
   del de split-screen, porque un contrato multi-formato no puede declarar lienzo
   (limitacion deliberada de PR 1) y anidada ahi la comprobacion no existiria
   justo en el caso para el que existe.
+  Se mide tambien en un 1.1, contra su default vertical documentado. No es una
+  exencion nueva: `main` ya rechazaba un 1.1 con un artefacto 16:9 a traves de
+  `layout.geometry`, asi que lo que cambia es que ahora el motivo es el correcto y
+  que el caso sin lienzo tambien esta cubierto. La exencion por version que
+  existio en un borrador intermedio de esta PR queda fuera de este CHANGELOG a
+  proposito: nunca estuvo en `main`, y atribuirle un defecto a un commit que no lo
+  contiene manda al siguiente a auditar el codigo equivocado.
+  `declared_by_version` queda en la evidencia como campo de PROCEDENCIA: dice que
+  el requisito vino de un default de version y no de una declaracion.
+- `artifact.aspect` se fuerza a `hard` en `resolver._base_rules`, con el mismo
+  issue code fail-closed que el resto de reglas por defecto. No es necesario para
+  la seguridad ahora que UNSUPPORTED bloquea con cualquier fuerza; es para que una
+  regla de geometria no sea segura solo por casualidad del motor.
 - Una regla declarada que no se puede verificar mecanicamente es UNSUPPORTED,
-  nunca PASS. La misma regla se aplica al aspecto declarado. El inventario de los
-  19 validadores registrados no encuentra ninguno que devuelva FAIL sin haber
-  medido el artefacto.
+  nunca PASS. El inventario de los 19 validadores registrados no encuentra ninguno
+  que devuelva FAIL sin haber medido el artefacto.
 - **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
   emitia un unico segmento con el video completo. Ahora transcribe y trocea las
   palabras en varios segmentos, elegidos por palabras por segundo y silencios.

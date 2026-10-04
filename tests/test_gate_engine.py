@@ -157,6 +157,41 @@ def test_probe_failure_blocks_media_checks(tmp_path: Path) -> None:
     assert _check(result, "caption.required_mention").status is CheckStatus.PASS
 
 
+def _always_pass(_context: GateContext) -> CheckOutcome:
+    return CheckOutcome(status=CheckStatus.PASS, evidence={"reason": "cumple"})
+
+
+def test_manual_review_strength_needs_human_even_when_the_check_passes(tmp_path: Path) -> None:
+    """Una regla `manual_review` que el validador aprueba igual exige a una persona.
+
+    Este es el unico caso en el que la FUERZA es lo unico que distingue el
+    resultado: el check sale PASS, asi que sin mirar la fuerza la pieza se daria
+    por buena sin que nadie la haya mirado. Un operador tiene que poder abrirla y
+    decidir, aunque la maquina diga que cumple.
+
+    Sin este test, la rama `strength is RuleStrength.MANUAL_REVIEW` de
+    `_derive_status` se puede borrar entera y la suite sigue verde: es lo que
+    pasaria con una mutacion que la dejara solo mirando `check.status`.
+    """
+    contract = make_contract(
+        hard=["artifact.integrity"],
+        manual_review=["review.me"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+    )
+    validators = {**DEFAULT_VALIDATORS, "review.me": _always_pass}
+    result = Gate(FakeProbe(info=make_media()), validators=validators).run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    assert _check(result, "review.me").status is CheckStatus.PASS
+    assert result.status is GateStatus.PENDING_REVIEW
+    assert result.passed is False
+
+
 def test_missing_artifact_fails_integrity(tmp_path: Path) -> None:
     result = _gate().run(
         contract=make_contract(),
@@ -166,6 +201,109 @@ def test_missing_artifact_fails_integrity(tmp_path: Path) -> None:
     assert result.status is GateStatus.REJECTED
     assert _check(result, "artifact.integrity").status is CheckStatus.FAIL
     assert result.artifact_sha256 is None
+
+
+def _always_unsupported(_context: GateContext) -> CheckOutcome:
+    return CheckOutcome(status=CheckStatus.UNSUPPORTED, evidence={"reason": "no verificable"})
+
+
+@pytest.mark.parametrize("strength", ["hard", "recommended", "manual_review"])
+def test_unsupported_blocks_at_every_strength(tmp_path: Path, strength: str) -> None:
+    """UNSUPPORTED bloquea con CUALQUIER fuerza, no solo con `hard`.
+
+    Este es el fail-open que se cerro. `_derive_status` miraba solo las reglas
+    `hard`, asi que un UNSUPPORTED en `recommended` o `manual_review` caia al
+    final y devolvia PASSED: un artefacto que nadie pudo verificar salia
+    aprobado. El aviso estaba escrito en un comentario del propio motor, dos
+    funciones mas arriba, y ningun test lo alcanzaba.
+
+    El brief, §5.1, no admite la excepcion: sin validador aplicable el resultado
+    es UNSUPPORTED o MANUAL_REVIEW, nunca PASS.
+    """
+    if strength == "hard":
+        contract = make_contract(
+            hard=["artifact.integrity", "probe.unsupported"],
+            audio_rule="any",
+            min_s=None,
+            max_s=None,
+        )
+    elif strength == "recommended":
+        contract = make_contract(
+            hard=["artifact.integrity"],
+            recommended=["probe.unsupported"],
+            audio_rule="any",
+            min_s=None,
+            max_s=None,
+        )
+    else:
+        contract = make_contract(
+            hard=["artifact.integrity"],
+            manual_review=["probe.unsupported"],
+            audio_rule="any",
+            min_s=None,
+            max_s=None,
+        )
+    validators = {**DEFAULT_VALIDATORS, "probe.unsupported": _always_unsupported}
+    result = Gate(FakeProbe(info=make_media()), validators=validators).run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    assert _check(result, "probe.unsupported").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED, strength
+    assert result.passed is False, strength
+
+
+def test_unsupported_outranks_manual_review_strength(tmp_path: Path) -> None:
+    """UNSUPPORTED se escala ANTES que la rama de revision manual.
+
+    El orden importa: si una regla es `manual_review` y su check sale
+    UNSUPPORTED, el resultado correcto es UNSUPPORTED. Degradarlo a
+    PENDING_REVIEW lo haria exportable con `approve_manual_review`, y no hay
+    veredicto que un operador pueda revisar a mano cuando no se pudo medir.
+    """
+    contract = make_contract(
+        hard=["artifact.integrity"],
+        manual_review=["probe.unsupported"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+    )
+    validators = {**DEFAULT_VALIDATORS, "probe.unsupported": _always_unsupported}
+    result = Gate(FakeProbe(info=make_media()), validators=validators).run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    assert result.status is GateStatus.UNSUPPORTED
+
+
+def test_fail_still_outranks_unsupported(tmp_path: Path) -> None:
+    """Un FAIL medido sigue gainandole a un UNSUPPORTED de otra regla.
+
+    El orden de escalado no se ha reordenado: FAIL -> REJECTED es lo primero, y
+    un artefacto que se pudo medir y esta mal se rechaza aunque otra regla no se
+    haya podido verificar.
+    """
+    contract = make_contract(
+        hard=["artifact.integrity", "probe.unsupported"],
+        recommended=["duration.max"],
+        audio_rule="any",
+        min_s=None,
+        max_s=6,
+    )
+    validators = {**DEFAULT_VALIDATORS, "probe.unsupported": _always_unsupported}
+    result = Gate(FakeProbe(info=make_media()), validators=validators).run(
+        contract=contract,
+        piece=make_piece(_artifact(tmp_path)),
+        assets=AssetRegistry(tmp_path),
+    )
+
+    assert _check(result, "duration.max").status is CheckStatus.FAIL
+    assert _check(result, "probe.unsupported").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.REJECTED
 
 
 def test_piece_platform_must_exist_in_contract(tmp_path: Path) -> None:
