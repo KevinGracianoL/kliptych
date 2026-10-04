@@ -42,9 +42,10 @@ simple, o densidad normalizada por una constante con nombre). Ese cambio no se
 anticipa aqui porque anadiria una constante que hoy nadie justify.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from itertools import pairwise
-from typing import Final
+from typing import Final, cast, override
 
 from kliptych.moments import Moment, MomentSource
 from kliptych.transcribe import Word
@@ -107,12 +108,95 @@ SPLIT_SEARCH_TAIL: Final[float] = 0.2
 _SENTENCE_ENDINGS: Final[frozenset[str]] = frozenset(".?!,;:")
 
 
+@dataclass(frozen=True, slots=True)
+class SpeechSegmentResult:
+    """Lo que devuelve el segmentador: los momentos Y lo que dejo fuera.
+
+    Una tupla no puede llevar dos hechos, y aqui hacen falta dos: lo que se
+    entrega y lo que se descarto. Devolver solo `len(momentos)` converts una
+    operacion PARCIAL en un informe que parece COMPLETO: con el techo puesto, 12
+    de 19, y el operador no tiene forma de saber que faltaban 7.
+
+    Se comporta como la secuencia de momentos que substituye, asi que
+    `len(resultado)`, `resultado[0]` e iteracion siguen funcionando y el cambio
+    de tipo no obliga a reescribir cada consumidor.
+
+    Attributes:
+        moments: Lo que se devuelve, ya con el techo aplicado y en orden
+            cronologico.
+        qualifying: Cuantos tramos pasaron LOS DOS SUELOS, antes del techo. Es el
+            denominador de "12 de 19".
+        discarded_by_floor: Cuantos tramos murieron en un suelo, por palabras o
+            por duracion.
+        split: Cuantas PARTES produjo la particion por tope. No es el numero de
+            tramos partidos, sino el de trozos resultantes por encima de los
+            tramos originales.
+    """
+
+    moments: tuple[Moment, ...]
+    qualifying: int
+    discarded_by_floor: int
+    split: int
+
+    def __len__(self) -> int:
+        """Cuenta los momentos entregados.
+
+        Returns:
+            Cuantos momentos se entregan.
+        """
+        return len(self.moments)
+
+    def __iter__(self) -> Iterator[Moment]:
+        """Itera sobre los momentos entregados.
+
+        Returns:
+            Un iterador de momentos.
+        """
+        return iter(self.moments)
+
+    def __getitem__(self, indice: int) -> Moment:
+        """Devuelve un momento por su indice.
+
+        Args:
+            indice: La posicion dentro de los momentos.
+
+        Returns:
+            El momento en esa posicion.
+        """
+        return self.moments[indice]
+
+    @override
+    def __hash__(self) -> int:
+        """Hash coherente con la igualdad por momentos.
+
+        Returns:
+            El hash de la tupla de momentos.
+        """
+        return hash(self.moments)
+
+    @override
+    def __eq__(self, otro: object) -> bool:
+        """Compara contra otra cosa con los mismos momentos.
+
+        Args:
+            otro: El valor con el que se compara.
+
+        Returns:
+            True si los momentos coinciden.
+        """
+        if isinstance(otro, SpeechSegmentResult):
+            return self.moments == otro.moments
+        if isinstance(otro, tuple | list):
+            return self.moments == tuple(cast("Iterable[Moment]", otro))
+        return NotImplemented
+
+
 def segment_by_speech_rate(
     words: Sequence[Word],
     *,
     min_s: float | None = None,
     max_s: float | None = None,
-) -> tuple[Moment, ...]:
+) -> SpeechSegmentResult:
     """Trocea las palabras en momentos candidatos, de mayor a menor interes.
 
     Honra los limites de duracion del contrato cuando los tiene: el piso es el
@@ -129,13 +213,21 @@ def segment_by_speech_rate(
         Los momentos, ordenados. Vacio si no hay nada que.emitir.
     """
     if not words:
-        return ()
+        return _resultado_vacio()
     ordenadas = tuple(sorted(words, key=lambda w: (w.start_s, w.end_s, w.token_id)))
     piso = _piso_efectivo(min_s)
     tope = _tope_efectivo(max_s)
-    tramos = _descartar(tramos=_partir(tramos=_tramos(ordenadas), tope=tope), piso=piso)
+    crudos = _tramos(ordenadas)
+    partidos = _partir(tramos=crudos, tope=tope)
+    tramos = _descartar(tramos=partidos, piso=piso)
+    descartados = len(crudos) - len(tramos)
     if not tramos:
-        return ()
+        return SpeechSegmentResult(
+            moments=(),
+            qualifying=0,
+            discarded_by_floor=descartados,
+            split=len(partidos) - len(crudos),
+        )
     puntuados = [(tramo, _densidad(tramo)) for tramo in tramos]
     maximo = max(densidad for _, densidad in puntuados)
     momentos = [
@@ -157,6 +249,7 @@ def segment_by_speech_rate(
     # que es justo lo que se quiere dejar de producir. La banda de duracion va
     # primero, de modo que un tramo de 3 s NO puede adelantar a uno de 20 s con la
     # misma densidad.
+    qualifying = len(momentos)
     momentos = sorted(momentos, key=_interes)
     momentos = momentos[:MAX_MOMENTS]
     # ORDEN CRONOLOGICO POR CONTRATO. El score es un ATRIBUTO, no la clave de
@@ -165,7 +258,21 @@ def segment_by_speech_rate(
     # arbitrario, porque sus densidades son casi iguales y nadie ve por que una
     # va antes que la otra. Para quien lee la lista, el tiempo es la unica
     # ordenacion que no necesita explicacion.
-    return tuple(sorted(momentos, key=lambda m: (m.start_s, m.end_s)))
+    return SpeechSegmentResult(
+        moments=tuple(sorted(momentos, key=lambda m: (m.start_s, m.end_s))),
+        qualifying=qualifying,
+        discarded_by_floor=descartados,
+        split=len(partidos) - len(crudos),
+    )
+
+
+def _resultado_vacio() -> SpeechSegmentResult:
+    """El resultado de una entrada sin nada que emitir.
+
+    Returns:
+        Un resultado vacio, con todos los recuentos a cero.
+    """
+    return SpeechSegmentResult(moments=(), qualifying=0, discarded_by_floor=0, split=0)
 
 
 def _interes(momento: Moment) -> tuple[int, float, float, float]:

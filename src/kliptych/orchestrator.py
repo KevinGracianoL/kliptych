@@ -72,7 +72,7 @@ from kliptych.moments import FFmpegMomentDetector, Moment, MomentDetector
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
 from kliptych.segment import LLMSegmentSelector, SegmentSelection, SegmentSelector
-from kliptych.segmenter import segment_by_speech_rate
+from kliptych.segmenter import SpeechSegmentResult, segment_by_speech_rate
 from kliptych.subtitles import SubtitleRenderer
 from kliptych.transcribe import (
     FasterWhisperTranscriber,
@@ -1745,13 +1745,14 @@ def _resolve_repost_stages(
         return None, (), _full_video_selection(source, render=config.render)
 
     min_s, max_s = _contract_duration_bounds(config)
-    momentos = segment_by_speech_rate(transcript.words, min_s=min_s, max_s=max_s)
+    resultado = segment_by_speech_rate(transcript.words, min_s=min_s, max_s=max_s)
+    momentos = tuple(resultado.moments)
     if not momentos:
         logger.warning("El segmentador local no encontró tramos; se usa el vídeo completo")
         return transcript, (), _full_video_selection(source, render=config.render)
     selection = SegmentSelection(
         segments=tuple(Segment(start_s=m.start_s, end_s=m.end_s) for m in momentos),
-        rationale=_rationale_segmentador(len(momentos)),
+        rationale=_rationale_segmentador(resultado),
     )
     return transcript, momentos, selection
 
@@ -1771,17 +1772,25 @@ def _aviso_transcripcion_fallida() -> str:
     return _TEXTO_AVISO_FALLIDA
 
 
-def _rationale_segmentador(cuantos: int) -> str:
+def _rationale_segmentador(resultado: SpeechSegmentResult) -> str:
     """La justificacion que se registra junto a los segmentos del segmentador local.
 
+    Dice cuantos tramos se entregan, cuantos calificaron y cuantos quedaron
+    fuera, y por que. Sin eso un resultado PARCIAL se registra como si fuera
+    COMPLETO: con el techo puesto son 12 de 19, y "12 tramo(s)" no lo dice.
+
     Args:
-        cuantos: Cuantos segmentos salieron.
+        resultado: Lo que devolvio el segmentador local.
 
     Returns:
         El texto de justificacion.
     """
     return (
-        f"segmentador local determinista: {cuantos} tramo(s) por palabras por segundo y silencios"
+        f"segmentador local determinista: {len(resultado.moments)} de "
+        f"{resultado.qualifying} tramos por palabras por segundo y silencios; "
+        f"{resultado.qualifying - len(resultado.moments)} descartados por el techo, "
+        f"{resultado.discarded_by_floor} por los suelos, "
+        f"{resultado.split} particiones por duracion"
     )
 
 
