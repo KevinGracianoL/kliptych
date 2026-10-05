@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### Changed
+- **El gate valida el aspecto con la predicada del RENDER, no con una
+  comparacion exacta.** El reframe cuantiza a entero par
+  (`width = _even(round(height * 9/16))`), de modo que la salida del render NUNCA
+  es un 9:16 exacto: para un alto de 1080, `round(607.5)` da 606 u 608.
+  Medido con `crop_size` del propio repo: 1920x1080 -> 608x1080 (0,08 % de 9:16),
+  1280x720 -> 404x720 (0,08 %), 1080x1900 -> 1068x1900 (0,90 %).
+  Un gate que comparase a 1e-9 no era mas riguroso: exigia un valor que esta
+  aritmetica no puede emitir, y rechazaba la salida del propio render. Eso es lo
+  que hacia una version anterior de esta PR, y lo encontro una revision
+  adversarial ejecutando el crop de verdad, no leyendo el codigo.
+  Ahora gate y render llaman a la MISMA funcion, `encoding.aspect_matches`, que
+  es la predicada que decide si un video hay que reencuadrar. No se copia el
+  numero: una tolerancia en dos sitios es el mismo defecto que la constante 9:16
+  que esta PR quita, y divergiria en silencio la primera vez que cambiase la
+  cuantizacion del reframe.
+  **Es una relajacion frente a comparar a 1e-9, y se declara como tal.** No es una
+  perdida de rigor: es la retirada de un desacuerdo que la comprobacion anterior
+  no podia detectar, porque todo artefacto conforme tenia un 0,08 % de margen y
+  ningun test miraba. Lo que ahora se acepta es lo que el render emite, y un
+  16:9 genuino (que esta a un 78 % de 9:16) sigue fallando.
+- **El aspecto se compara con tolerancia RELATIVA**
+  (`|aspect - objetivo| <= objetivo * tolerancia`), la que ya usaba el reframe.
+  El criterio escala con el objetivo en vez de depender del tamaño del lienzo.
 - **El gate valida el aspecto que el CONTRATO DECLARA**, en vez de comparar
   contra un 9:16 fijo en modulo. `_SPLIT_ASPECT_W`/`_SPLIT_ASPECT_H` han
   desaparecido de `gate/checks.py`; el aspecto sale de `SplitScreenConfig.aspect`
@@ -20,7 +43,6 @@
   FAIL, porque ahi HUBO medicion. Es lo que ya hacen `artifact.video_stream` y
   `audio.present`, y devolver UNSUPPORTED en los dos casos dejaba el mismo
   `gate.json` con dos diagnosticos contradictorios para el mismo artefacto.
-  No se rompe ninguna corrida conforme: nada que cumpliera deja de cumplir.
 - **UNSUPPORTED ahora bloquea con CUALQUIER fuerza de regla, no solo con `hard`.**
   Este es un fail-open que ya existia en `main`, anterior a esta PR, y que solo
   ahora es alcanzable desde un validador de geometria. `_derive_status` escalaba
@@ -29,8 +51,11 @@
   que NADIE pudo verificar salia aprobado y exportable, incluso con firma de
   revision manual.
   El aviso estaba escrito en un comentario del propio motor, dos funciones mas
-  arriba, y ningun test lo alcanzaba. Un test lo fijaba como comportamiento
-  correcto (`test_recommended_rule_with_unsupported_check_is_unaffected`, de #57).
+  arriba, y un test lo FIJABA como comportamiento correcto
+  (`test_recommended_rule_with_unsupported_check_is_unaffected`, de #57, que
+  afirmaba `PASSED` y `EXPORTED` para justo este caso). No era invisible: estaba
+  aprobado. El fail-open se encontro cuando un revisor ejecuto mutaciones sobre
+  `_derive_status`, no porque existiera un test que lo detectara.
   El brief (§5.1) dice "Si no hay validador para una regla **dura**, el resultado
   es UNSUPPORTED o MANUAL_REVIEW, jamás PASS": la cláusula "jamás PASS" está
   acotada a las reglas duras, así que esto NO es aplicar el brief, es un
@@ -51,13 +76,22 @@
   del de split-screen, porque un contrato multi-formato no puede declarar lienzo
   (limitacion deliberada de PR 1) y anidada ahi la comprobacion no existiria
   justo en el caso para el que existe.
-  Se mide tambien en un 1.1, contra su default vertical documentado. No es una
-  exencion nueva: `main` ya rechazaba un 1.1 con un artefacto 16:9 a traves de
-  `layout.geometry`, asi que lo que cambia es que ahora el motivo es el correcto y
-  que el caso sin lienzo tambien esta cubierto. La exencion por version que
-  existio en un borrador intermedio de esta PR queda fuera de este CHANGELOG a
-  proposito: nunca estuvo en `main`, y atribuirle un defecto a un commit que no lo
-  contiene manda al siguiente a auditar el codigo equivocado.
+  Se mide tambien en un 1.1, contra su default vertical documentado. Aqui hay
+  que ser exacto sobre que hacia `main`, porque la primera version de esta
+  entrada exagero: `main` rechazaba un 1.1 con artefacto 16:9 **solo cuando el
+  contrato declaraba `split_screen`**, a traves de `layout.geometry`. Un
+  contrato resuelto SIN lienzo, que es el caso normal, no tenia ninguna regla que
+  midiera el aspecto: medido, `main` le daba `passed` a un 16:9. Ese es
+  exactamente el perfil de D1, una regla que falta donde deberia estar.
+  Lo que cambia aqui es que el motivo es el correcto (que el contrato dijo 9:16
+  y el artefacto es 16:9, no "las dimensiones no coinciden con un lienzo que
+  nadie declaro") y que el caso sin lienzo esta cubierto. La exencion por
+  version que existio en un borrador intermedio queda fuera de este CHANGELOG a
+  proposito: nunca estuvo en `main`, y atribuirle un defecto a un commit que no
+  lo contiene manda al siguiente a auditar el codigo equivocado.
+  Un contrato que NO declara la regla sigue sin ejecutarla; los dos unicos
+  productores de `RuleSet` (`resolver._base_rules` y `vanilla_contract`) la
+  declaran, asi que toda corrida de produccion la tiene.
   `declared_by_version` queda en la evidencia como campo de PROCEDENCIA: dice que
   el requisito vino de un default de version y no de una declaracion.
 - `artifact.aspect` se fuerza a `hard` en `resolver._base_rules`, con el mismo

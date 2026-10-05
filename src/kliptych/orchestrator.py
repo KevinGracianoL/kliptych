@@ -52,6 +52,7 @@ from kliptych.contract import (
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
     RenderConfig,
+    aspect_matches,
     audio_and_container_arguments,
     audio_injection_arguments,
     muted_audio_arguments,
@@ -2529,9 +2530,10 @@ def _probe_rotation(raw: str | None) -> int:
 
 
 def _is_vertical(width: int, height: int, *, objetivo: float, tolerancia: float) -> bool:
-    # Las dimensiones vienen validadas por _probe_video: aquí son positivas.
-    aspect = width / height
-    return abs(aspect - objetivo) <= objetivo * tolerancia
+    # Delega en la predicada compartida de `encoding`: el render y el gate tienen
+    # que preguntar exactamente lo mismo sobre la geometria, o el gate estara
+    # juzgando un valor que el render nunca emite. Ver `encoding.aspect_matches`.
+    return aspect_matches(width, height, target_aspect=objetivo, tolerance=tolerancia)
 
 
 def _needs_reframe(video: Path, render: RenderConfig) -> bool:

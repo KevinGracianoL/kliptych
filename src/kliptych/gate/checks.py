@@ -68,6 +68,7 @@ from kliptych.contract import (
     Format,
     SplitScreenConfig,
 )
+from kliptych.encoding import RenderConfig, aspect_matches
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import (
@@ -113,6 +114,7 @@ __all__ = [
     "check_video_stream",
     "check_watermark_full_video",
     "check_watermark_present",
+    "matches_declared_aspect",
 ]
 
 _SILENCE_THRESHOLD_DB = -80.0
@@ -120,10 +122,6 @@ _VOLUMEDETECT_TIMEOUT_S = 60.0
 # Version del contrato que puede declarar `outputs`. Un 1.1 llego antes del
 # campo, asi que su `outputs` es el default y no una declaracion.
 _CONTRACT_WITH_OUTPUTS = "1.2"
-# Tolerancia para reconocer un aspecto medido. El error relativo de la division
-# IEEE es de orden 2^-53, muy por debajo; con lienzos de hasta 65536px (el techo
-# del schema) esto no puede aceptar un lienzo de otro aspecto.
-_ASPECT_EPS = 1e-9
 _FFPROBE_TIMEOUT_S = 30.0
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
 _STDERR_TAIL = 500
@@ -158,7 +156,8 @@ def _unverifiable(audio_rule: AudioRule, missing_validator: str) -> CheckOutcome
 
     La evidencia dice literalmente que no se verifico y que validador falta,
     para que ``gate.json`` no se lea como una atestación de audio verificado
-    (brief §5.1: sin validador aplicable nunca PASS).
+    (brief §5.1, para reglas duras: sin validador aplicable nunca PASS; esta función
+    se invoca solo en ese caso).
 
     Args:
         audio_rule: Regla de audio de la plataforma, sin verificar.
@@ -561,8 +560,11 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
     - sin probe, o sin dimensiones utilizables -> UNSUPPORTED: lo que falta es
       poder MIRAR el artefacto. Un artefacto que nadie pudo medir no se lee como
       conforme, que es la misma regla que ya rige sobre las reglas sin validador
-      mecánico (brief §5.1: sin validador aplicable, UNSUPPORTED o MANUAL_REVIEW,
-      nunca PASS).
+      mecánico. El brief §5.1 lo dice para las reglas DURAS ("si no hay
+      validador para una regla dura, el resultado es UNSUPPORTED o
+      MANUAL_REVIEW, jamás PASS"); aquí no hay una regla dura en juego, sino un
+      artefacto que nadie pudo medir, y por eso es UNSUPPORTED igual: no hay
+      veredicto que revisar a mano.
 
     Args:
         context: Contexto resuelto del gate.
@@ -599,6 +601,23 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
             reason="el artefacto no tiene pista de video",
         )
     return _geometry_outcome(media, split, evidencia)
+
+
+def render_aspect_tolerance() -> float:
+    """La tolerancia de aspecto que declara el RENDER, leida en vivo.
+
+    Se lee de `RenderConfig` en cada llamada, y no se copia el numero. Copiarlo
+    seria el mismo defecto que la constante 9:16 que esta PR quita: mientras los
+    dos valores coincidan no se nota, y en cuanto el render cambie el suyo el
+    gate seguira juzgando con el viejo, sin que nada falle.
+
+    Args:
+        Ninguno.
+
+    Returns:
+        La tolerancia RELATIVA que el render admite.
+    """
+    return RenderConfig().aspect_tolerance
 
 
 def check_declared_outputs(context: GateContext) -> CheckOutcome:
@@ -646,9 +665,9 @@ def check_declared_outputs(context: GateContext) -> CheckOutcome:
         está entre las declaradas; UNSUPPORTED si no se pudo medir.
     """
     contract = context.contract
-    declarados = tuple(spec.aspect.value for spec in contract.outputs)
+    declarados = tuple(spec.aspect for spec in contract.outputs)
     evidencia: dict[str, object] = {
-        "declared_aspects": list(declarados),
+        "declared_aspects": [aspecto.value for aspecto in declarados],
         "contract_schema_version": contract.schema_version,
     }
     if contract.schema_version != _CONTRACT_WITH_OUTPUTS:
@@ -673,14 +692,16 @@ def check_declared_outputs(context: GateContext) -> CheckOutcome:
         )
     medido = _measured_aspect(width, height)
     evidencia["measured_aspect"] = medido
-    if not _satisfies_declared_outputs(declarados, medido):
+    evidencia["measured_ratio"] = round(width / height, 6)
+    if not _satisfies_declared_outputs(width, height, declarados):
         return _fail(
             width=width,
             height=height,
             **evidencia,
             reason=(
-                f"el artefacto mide {medido}, que no es ninguna de las salidas "
-                f"declaradas ({', '.join(declarados)})"
+                f"el artefacto mide {width}x{height} (ratio {width / height:.6f}), "
+                f"que no es ninguna de las salidas declaradas "
+                f"({', '.join(a.value for a in declarados)})"
             ),
         )
     evidencia["satisfied_by"] = medido
@@ -725,7 +746,7 @@ def _geometry_outcome(
             reason="las dimensiones del artefacto no coinciden con el split_screen",
         )
     medido = _measured_aspect(width, height)
-    if medido != split.aspect.value:
+    if not matches_declared_aspect(width, height, split.aspect):
         return _fail(
             width=width,
             height=height,
@@ -744,43 +765,86 @@ def _geometry_outcome(
     )
 
 
-def _measured_aspect(width: int, height: int) -> str:
-    """El aspecto que el artefacto MIDE, no el que se le exige.
+def matches_declared_aspect(width: int, height: int, declarado: Aspect) -> bool:
+    """Si el artefacto esta en el aspecto DECLARADO, segun el render.
 
-    La razon se calcula con `Aspect.ratio` porque el enum es la unica fuente que
-    conoce el 9:16 y el 16:9; aqui no se reescribe la aritmetica. Cuando el
-    aspecto medido no es ninguno de los soportados se devuelve el cociente
-    reducido, que es lo unico honesto que se puede decir de el.
+    La predicada es `encoding.aspect_matches`, la misma que usa `_needs_reframe`
+    para decidir si un video hay que reencuadrar. Se llama, no se copia: una
+    tolerancia escrita en dos sitios es el mismo defecto que la constante 9:16
+    que esta PR quita, y divergiria en silencio la primera vez que cambiase la
+    cuantizacion del reframe.
+
+    No es mas laxo por gusto. El reframe cuantiza a entero par
+    (`width = _even(round(height * 9/16))`), y para un alto de 1080 eso da
+    608x1080, que esta a 0,08 % de 9:16. Una comparacion a 1e-9 no seria mas
+    rigurosa: seria exigir un 9:16 exacto que esta aritmetica no puede emitir.
+    Medido: 1920x1080 -> 608x1080, 1280x720 -> 404x720, 1080x1900 -> 1068x1900.
+
+    Args:
+        width: Ancho medido por ffprobe.
+        height: Alto medido por ffprobe.
+        declarado: El aspecto que el contrato declara.
+
+    Returns:
+        ``True`` si las dimensiones estan dentro de la tolerancia del render.
+    """
+    return aspect_matches(
+        width,
+        height,
+        target_aspect=declarado.ratio,
+        tolerance=render_aspect_tolerance(),
+    )
+
+
+def _measured_aspect(width: int, height: int) -> str:
+    """El aspecto que el artefacto MIDE, para dejarlo en la evidencia.
+
+    Se decide con la misma tolerancia del render, no con un epsilon propio: si el
+    gate reconociera "9:16" con un criterio mas estricto que el del render,
+    la evidencia y el veredicto contarian historias distintas sobre el mismo
+    artefacto. Cuando no es ninguno de los soportados se devuelve el par tal
+    cual, SIN reducir: `608x1080` es lo que se midio, y `152:270` seria una
+    segunda representacion del mismo numero.
 
     Args:
         width: Ancho medido por ffprobe.
         height: Alto medido por ffprobe.
 
     Returns:
-        El valor del aspecto si es uno soportado, si no ``f"{ancho}:{alto}"``.
+        El valor del aspecto si el render lo reconoceria como uno soportado; si
+        no, ``f"{ancho}:{alto}"``.
     """
-    razon = width / height
     for aspecto in Aspect:
-        if abs(razon - aspecto.ratio) <= _ASPECT_EPS:
+        if matches_declared_aspect(width, height, aspecto):
             return aspecto.value
     return f"{width}:{height}"
 
 
-def _satisfies_declared_outputs(declarados: tuple[str, ...], medido: str) -> bool:
-    """Si el aspecto medido satisface ALGUNA de las salidas declaradas.
+def _satisfies_declared_outputs(
+    width: int,
+    height: int,
+    declarados: tuple[Aspect, ...],
+) -> bool:
+    """Si el artefacto satisface ALGUNA de las salidas declaradas.
 
     Satisfacer una no basta: hay que satisfacer alguna. Sin esta comprobacion un
     contrato que declara (9:16, 16:9) aceptaria cualquier artefacto, porque
     siempre habria un formato declarado que "podria" ser el suyo.
 
+    La comparacion es sobre las DIMENSIONES, no sobre la etiqueta de
+    `_measured_aspect`: decidir con el string obligaria a que la tolerancia del
+    render se aplicase dos veces, y a que un artefacto se aceptase por la FORMA
+    de su etiqueta y no por su medida.
+
     Args:
-        declarados: Los valores de aspecto que el contrato declara.
-        medido: El aspecto que el artefacto mide.
+        width: Ancho medido por ffprobe.
+        height: Alto medido por ffprobe.
+        declarados: Los aspectos que el contrato declara.
 
     Returns:
-        ``True`` si el medido esta entre los declarados.
+        ``True`` si las dimensiones satisfacen alguna declaracion.
     """
-    return medido in set(declarados)
+    return any(matches_declared_aspect(width, height, aspecto) for aspecto in declarados)
 
 
 def check_required_mentions(context: GateContext) -> CheckOutcome:

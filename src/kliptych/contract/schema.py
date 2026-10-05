@@ -760,13 +760,15 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 #   checks y el gate aprueba en vacio una pieza que no existe.
 # - `artifact.video_stream`: para probar que el MP4 TIENE video. Sin ella, un
 #   contenedor sin pista de video pasaria.
-# - `artifact.aspect`: el render por defecto emite 1080x1920 y `outputs` declara
-#   9:16 por default, asi que cualquier otro aspecto es una corrida mal formada.
-#   Sin esta regla la declaracion existe y NADIE la comprueba, que es la forma
-#   exacta de D1 (#76): una regla que falta donde deberia estar, y el gate
-#   leyendo la ausencia como "no hay nada que verificar". No es redundante con
-#   `artifact.video_stream`: aquella prueba que HAY video, esta que tiene la
-#   geometria que el contrato dijo.
+# - `artifact.aspect`: el modo zero-contract declara `outputs` = un 9:16 (el
+#   default de `_DEFAULT_OUTPUTS`, sin brief que diga otra cosa), asi que su
+#   salida DEBERIA ser vertical y el artefacto tiene que medir como tal.
+#   No esta aqui porque el render emita 1080x1920: no lo emite. El reframe
+#   cuantiza a entero par, asi que 1920x1080 -> 608x1080 y 1280x720 -> 404x720,
+#   un 0,08 % por debajo de 9:16. Por eso el gate verifica con
+#   `encoding.aspect_matches` y su tolerancia, no con una comparacion exacta.
+#   Y no es redundante con `artifact.video_stream`: aquella prueba que HAY video,
+#   esta que tiene la geometria que el contrato declaro.
 _ZERO_CONTRACT_AV_RULES = (
     "artifact.aspect",
     "artifact.integrity",

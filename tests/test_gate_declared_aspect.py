@@ -18,6 +18,7 @@ La inspeccion real ya la cubre `test_gate_probe.py`.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -30,8 +31,10 @@ from kliptych.gate.checks import (
     GateContext,
     check_declared_outputs,
     check_split_screen_geometry,
+    matches_declared_aspect,
 )
 from kliptych.gate.models import CheckStatus, MediaInfo
+from kliptych.reframe import crop_size
 from tests.support import make_contract, make_piece
 
 _VERTICAL: dict[str, object] = {"aspect": "9:16", "index": 0}
@@ -481,6 +484,182 @@ def test_e1_matriz_declarado_contra_medido(
         assert outcome.evidence["measured_aspect"] != declarado.value
 
 
+# ----------------------------- la geometria que el RENDERER produce de verdad
+
+
+@pytest.mark.parametrize(
+    ("ancho", "alto"),
+    [
+        (608, 1080),
+        (404, 720),
+        (1068, 1900),
+    ],
+)
+def test_g1_regresion_artefacto_del_reframe_pasa(tmp_path: Path, ancho: int, alto: int) -> None:
+    """REGRESION: la salida del reframe tiene que pasar el gate.
+
+    Este es el test que faltaba y por el que la suite estaba verde mientras el
+    producto roto. Todas las pruebas de aspecto usaban `FakeProbe(1080, 1920)`,
+    unas dimensiones que el renderer NO PUEDE emitir: el reframe cuantiza a
+    entero par, `width = _even(round(height * 9/16))`, y para un alto de 1080 eso
+    da 608x1080, no 1080x1920. Comparar a 1e-9 no era mas riguroso, era exigir
+    un 9:16 exacto que esta aritmetica no produce.
+
+    Medido con `crop_size` del propio repo:
+        1920x1080 -> 608x1080    (0,08 % de 9:16)
+        1280x720  -> 404x720     (0,08 % de 9:16)
+        1080x1900 -> 1068x1900   (0,90 % de 9:16)
+
+    Si alguien vuelve a endurecer la comparacion, este test falla y dice por que.
+    """
+    outcome = check_declared_outputs(
+        _context(
+            tmp_path,
+            outputs=[_VERTICAL],
+            split_aspect=None,
+            width=ancho,
+            height=alto,
+        )
+    )
+
+    assert outcome.status is CheckStatus.PASS, f"{ancho}x{alto}"
+    assert outcome.evidence["measured_ratio"] == pytest.approx(ancho / alto, abs=1e-6)
+
+
+def test_g2_el_artefacto_del_reframe_lo_emite_el_reframe() -> None:
+    """Las dimensiones de `g1` no estan inventadas: salen de `crop_size`.
+
+    Si el reframe cambiara su cuantizacion, este test se moveria con el y `g1`
+    dejaria de proteger la geometria real. Por eso se leen del codigo y no se
+    escriben a mano en el parametrize.
+    """
+    for origen in ((1920, 1080), (1280, 720)):
+        ancho, alto = crop_size(*origen)
+        assert matches_declared_aspect(ancho, alto, Aspect.VERTICAL), f"{origen} -> {ancho}x{alto}"
+
+
+@pytest.mark.parametrize(
+    ("ancho", "alto"),
+    [
+        (1920, 1080),
+        (1280, 720),
+    ],
+)
+def test_g3_horizontal_genuino_falla(tmp_path: Path, ancho: int, alto: int) -> None:
+    """El otro lado: un 16:9 de verdad NO pasa un contrato vertical.
+
+    Sin esto, "aceptar lo que el renderer emite" seria indistinguible de "aceptar
+    cualquier cosa". La tolerancia del render es 5 % relativo, y un 16:9 esta a
+    un 78 % de 9:16: no hay ambiguedad posible entre los dos casos.
+    """
+    outcome = check_declared_outputs(
+        _context(
+            tmp_path,
+            outputs=[_VERTICAL],
+            split_aspect=None,
+            width=ancho,
+            height=alto,
+        )
+    )
+
+    assert outcome.status is CheckStatus.FAIL
+    assert f"{ancho}x{alto}" in str(outcome.evidence["reason"])
+
+
+def test_g4_un_vertical_reframed_no_sirve_para_un_contrato_horizontal(
+    tmp_path: Path,
+) -> None:
+    """La tolerancia es respecto al ASPECTO DECLARADO, no una regla global.
+
+    608x1080 pasa un contrato vertical. El mismo artefacto, con un contrato que
+    declara 16:9, tiene que fallar: si no, la tolerancia se habria convertido en
+    "vertical dentro de +-5 %, me da igual lo que dijeras".
+    """
+    outcome = check_declared_outputs(
+        _context(
+            tmp_path,
+            outputs=[_HORIZONTAL],
+            split_aspect=None,
+            width=608,
+            height=1080,
+        )
+    )
+
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_g5_el_lienzo_tambien_honra_la_predicada_del_render(tmp_path: Path) -> None:
+    """El validador del lienzo usa la misma predicada, no la suya.
+
+    El lienzo declara su geometria exacta (`width`/`height`), asi que aqui la
+    comparacion de dimensiones ya coraje. La de aspecto se mantiene, y comparte
+    predicada con el render: si las dos se separaran, el mismo artefacto podria
+    ser conforme para un validador y no para el otro.
+    """
+    outcome = check_split_screen_geometry(
+        _context(tmp_path, outputs=[_VERTICAL], split_aspect="9:16", width=608, height=1080)
+    )
+
+    # Las dimensiones no coinciden con el lienzo declarado (1080x1920), asi que
+    # el guard de dimensiones falla antes. Lo que se comprueba aqui es que la
+    # comparacion de aspecto reconoce 608x1080 como 9:16, que es lo que estaba
+    # en litigio.
+    assert matches_declared_aspect(608, 1080, Aspect.VERTICAL)
+    assert outcome.status is CheckStatus.FAIL
+    assert "dimensiones" in str(outcome.evidence["reason"])
+
+
+def test_g6_el_gate_sigue_al_render_cuando_la_tolerancia_cambia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El gate LEE la tolerancia del render. No la tiene copiada.
+
+    Un numero escrito en dos sitios es el mismo defecto que la constante 9:16 que
+    esta PR quita: divergiria en silencio la primera vez que cambiase la
+    cuantizacion, y ambos lados seguirian "pasando". Comprobar que el resultado
+    coincide NO alcanza, porque mientras los dos numeros sean iguales las dos
+    implementaciones dan lo mismo. Hay que mover el valor y ver que el veredicto
+    se mueve con el.
+
+    Con una tolerancia de 1e-6, 608x1080 (0,08 % de 9:16) tiene que FALLAR. Si
+    alguien sustituye `RenderConfig().aspect_tolerance` por un 0.05 literal, este
+    test no lo pilla: por eso el numero va en el monkeypatch y no en el
+    predicado.
+    """
+
+    @dataclass(frozen=True, slots=True)
+    class RenderConfigEstricto:
+        """Un RenderConfig con la tolerancia alargada a 1e-6."""
+
+        target_aspect: float = 9.0 / 16.0
+        aspect_tolerance: float = field(default=1e-6)
+
+    monkeypatch.setattr("kliptych.gate.checks.RenderConfig", RenderConfigEstricto)
+
+    assert matches_declared_aspect(608, 1080, Aspect.VERTICAL) is False
+    assert matches_declared_aspect(1080, 1920, Aspect.VERTICAL) is True
+
+
+def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
+    """Recorre los altos que el pipeline puede producir y no encuentra ninguno rechazado.
+
+    Es la enumeracion de la revision, hecha test. `crop_size` se aplica a un rango
+    de altos representativos, y para cada uno se comprueba que el gate acepta lo
+    que el reframe devuelve. Un alto se considera alcanzable si el reframe lo
+    procesa sin excepcion.
+    """
+    rechazados: list[str] = []
+    for alto in range(320, 3841, 8):
+        try:
+            ancho, alto_efectivo = crop_size(1920, alto)
+        except ValueError:
+            continue
+        if not matches_declared_aspect(ancho, alto_efectivo, Aspect.VERTICAL):
+            rechazados.append(f"{ancho}x{alto_efectivo}")
+
+    assert rechazados == [], f"el gate rechaza geometria que el reframe emite: {rechazados[:8]}"
+
+
 # ------------------------------------------------- la clase, cerrada
 
 
@@ -521,8 +700,11 @@ def _sondeo_una_regla(tmp_path: Path, regla: str, media: MediaInfo | None) -> Ch
 
 # Las reglas cuyo veredicto depende de haber MIRADO el artefacto, y entre las que
 # este archivo SI puede observar con el sondeo de `f1` (que activa el contrato minimo).
-# No incluyen las que necesitan que la campana exija watermark, silencio o assets:
-# esas se miden en #83, con su registro de assets, y aqui solo se rozarian.
+# No incluyen las que necesitan que la campana exija watermark o silencio: esas
+# se miden en #83, con el PNG registrado en el registry, y aqui solo se rozarian.
+# `assets.required` queda fuera por otra razon: `check_required_assets` no lee
+# NUNCA `context.media` (sus FAIL vienen del registry de assets), asi que no
+# puede conflacionar nada con la medicion.
 #
 # Esta lista NO es una puerta estructural y no pretende serlo. Se declaro como
 # una, y no lo era: las uniones `| {"artifact.aspect"}` eran no-ops porque la
@@ -538,7 +720,6 @@ _REGLAS_DEL_ARTIFACTO: frozenset[str] = frozenset(
         "artifact.aspect",
         "artifact.integrity",
         "artifact.video_stream",
-        "assets.required",
         "audio.present",
         "audio.silence",
         "duration.max",
@@ -551,21 +732,21 @@ _REGLAS_DEL_ARTIFACTO: frozenset[str] = frozenset(
 
 
 def test_f1_inventario_de_validadores_que_conflan(tmp_path: Path) -> None:
-    """Ningun validador del gate puede decir FAIL sin haber mirado el artefacto.
+    """Ninguna de las reglas que este test puede ACTIVAR conflana los dos fallos.
 
-    Un validador que devuelve FAIL con `media is None` le esta diciendo al
-    operador que su contenido esta mal cuando en realidad no pudo mirarlo, y lo
-    manda a depurar lo que no esta roto: eso es un problema de herramienta, no de
-    contenido.
+    Son dos salidas distintas y no deben fusionarse: `FAIL` es "el artefacto
+    esta mal" y `UNSUPPORTED` es "no pude verificarlo". Un validador que devuelve
+    FAIL con `media is None` manda al operador a depurar su contenido cuando lo
+    que fallo fue la herramienta.
 
-    ALCANCE REAL, y hay que leerlo antes de creerse el titulo: este test solo
-    puede observar las reglas que el sondeo ACTIVA. Sondea con
-    `watermark_required=False` y `audio_policy=None`, asi que `watermark.*`,
-    `audio.silence` y `assets.required` devuelven `pass` sin llegar a tocar
-    `context.media`. Para esas, este test no dice nada.
+    ALCANCE REAL, y hay que leerlo antes que el titulo: el sondeo activa un
+    contrato MINIMO, asi que solo observa las reglas que se disparan con el. Las
+    que necesitan que la campana exija watermark o silencio se miden en #83, con
+    el PNG registrado, y aqui no se tocan. Para esas, este test no dice nada.
 
-    Esas tres SI conflan, y se mids en #83. Aqui no se arreglan, y este test no
-    debe leerse como que las cubre.
+    `assets.required` queda fuera por otra razon: `check_required_assets` no lee
+    NUNCA `context.media` (sus FAIL vienen del registry de assets), asi que no
+    puede conflacionar nada con la medicion.
     """
     conflatan = [
         regla
@@ -693,7 +874,7 @@ def test_f2d_un_1_2_horizontal_con_artefacto_vertical_falla(tmp_path: Path) -> N
     assert outcome.evidence["declared_aspects"] == ["16:9"]
     assert outcome.evidence["measured_aspect"] == "9:16"
     assert "16:9" in str(outcome.evidence["reason"])
-    assert "9:16" in str(outcome.evidence["reason"])
+    assert "1080x1920" in str(outcome.evidence["reason"])
 
 
 def test_f2e_multi_salida_registra_cual_satisficio(tmp_path: Path) -> None:

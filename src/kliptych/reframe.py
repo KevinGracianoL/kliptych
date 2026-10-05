@@ -659,7 +659,31 @@ def _num(value: float) -> str:
     return f"{value:g}"
 
 
-def _crop_size(source_width: int, source_height: int) -> tuple[int, int]:
+def crop_size(source_width: int, source_height: int) -> tuple[int, int]:
+    """El tamaño del recorte 9:16 que el reframe emite para unas dimensiones dadas.
+
+    Es PUBLICA, y antes no lo era, por una razon concreta: el gate tiene que
+    verificar la geometria que el render produce, y su test necesita las
+    dimensiones reales en vez de unas inventadas. Exportar el calculo es mejor
+    que duplicar la formula en el test, que es como se cuelan las divergencias.
+
+    Y explica por que esta salida NUNCA es un 9:16 exacto: `_even` cuantiza a
+    entero par, asi que un alto de 1080 da `round(1080 * 9/16) = 607.5` y de ahi
+    606 o 608. Medido: 1920x1080 -> 608x1080 (0,08 % de 9:16), 1280x720 ->
+    404x720, 1080x1900 -> 1068x1900. Quien verifique un artefacto tiene que
+    usar `encoding.aspect_matches`, con la tolerancia del render, y no una
+    comparacion exacta.
+
+    Args:
+        source_width: Ancho del origen, positivo.
+        source_height: Alto del origen, positivo.
+
+    Returns:
+        El par ``(ancho, alto)`` del recorte, ambos pares y dentro del origen.
+
+    Raises:
+        ValueError: Si alguna dimension no es positiva.
+    """
     if source_width <= 0 or source_height <= 0:
         msg = f"dimensiones de origen inválidas: {source_width}x{source_height}"
         raise ValueError(msg)
@@ -728,7 +752,7 @@ class _CropGeometry:
 
 
 def _crop_geometry(source_width: int, source_height: int) -> _CropGeometry:
-    crop_width, crop_height = _crop_size(source_width, source_height)
+    crop_width, crop_height = crop_size(source_width, source_height)
     return _CropGeometry(
         width=crop_width,
         height=crop_height,

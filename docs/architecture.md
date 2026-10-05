@@ -11,7 +11,7 @@ approval sealed into the delivery record.
 `_derive_status` maps **any** measured `CheckOutcome.FAIL` to
 `GateStatus.REJECTED` — regardless of whether the rule was classified `hard`,
 `recommended`, or `manual_review`. It also maps **any** `CheckOutcome.UNSUPPORTED`
-to `GateStatus.UNSUPPORTED` at every strength: `PENDING_REVIEW` is an exit for
+to `GateStatus.UNSUPPORTED` at every strength — `PENDING_REVIEW` is an exit for
 rules a human can judge, and an unmeasured rule produces no verdict to judge, so
 it must not become signable. A second barrier lives in the exporter:
 `_is_piece_exportable` refuses every piece except `PASSED`, or

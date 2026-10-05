@@ -58,6 +58,45 @@ class RenderConfig:
             raise ValueError(msg)
 
 
+def aspect_matches(
+    width: int,
+    height: int,
+    *,
+    target_aspect: float = _DEFAULT_TARGET_ASPECT,
+    tolerance: float = _DEFAULT_ASPECT_TOLERANCE,
+) -> bool:
+    """Si unas dimensiones estan en el aspecto objetivo dentro de la tolerancia.
+
+    Esta es LA pregunta de geometria del repo, y por eso vive aqui y no en el
+    render ni en el gate: `RenderConfig` ya declara el aspecto objetivo y la
+    tolerancia con la que se acepta, y este modulo es una hoja (solo stdlib), asi
+    que tanto el orquestador como el gate pueden llamarla sin ciclos.
+
+    Que sea UNA funcion y no dos copias es el punto. El reframe cuantiza a un
+    entero par (`width = _even(round(height * 9/16))`), de modo que un alto de
+    1080 da 608x1080: 0,08 % por debajo de 9:16. Ninguna aritmetica de este
+    renderer puede emitir 9:16 exacto, porque `round(607.5)` no es 608 ni 606 de
+    forma exacta. Un gate que comparase a 1e-9 no estaria siendo mas riguroso,
+    estaria exigiendo un valor que el render es aritmeticamente incapaz de
+    producir, y rechazaria su propia salida.
+
+    Comparacion RELATIVA, no absoluta: `|aspect - objetivo| <= objetivo *
+    tolerancia`. Importa, porque el criterio escala con el objetivo en lugar de
+    depender del tamano del lienzo.
+
+    Args:
+        width: Ancho medido.
+        height: Alto medido. Se asume positivo; quien llame ya lo valido.
+        target_aspect: El aspecto objetivo, por defecto el del render.
+        tolerance: Tolerancia RELATIVA admitida.
+
+    Returns:
+        ``True`` si las dimensiones estan dentro de la tolerancia del objetivo.
+    """
+    aspect = width / height
+    return abs(aspect - target_aspect) <= target_aspect * tolerance
+
+
 def video_encoder_arguments(*, nvenc_available: bool) -> tuple[str, ...]:
     """Devuelve los argumentos del codificador de video.
 

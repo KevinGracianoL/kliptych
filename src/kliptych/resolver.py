@@ -1775,12 +1775,12 @@ def _resolve_segments(
 
 
 def _base_rules(context: _RuleContext) -> list[str]:
-    # `artifact.aspect` se fuerza a `hard` por la misma convencion que el resto:
-    # es la regla que comprueba la geometria del artefacto contra lo que el
-    # contrato declara. Una regla de geometria que solo es segura por casualidad
-    # es una regla que nadie quiere razonar mas adelante, y `hard` deja el
-    # veredicto explicito en lugar de depender de como `_derive_status` trate un
-    # UNSUPPORTED.
+    # `artifact.aspect` se fuerza a `hard` por la convencion que ya siguen el resto
+    # de las reglas por defecto, no porque `hard` compre aqui: con el arreglo de
+    # `_derive_status`, `FAIL` y `UNSUPPORTED` escalan con cualquier fuerza, asi
+    # que la seguridad no depende de la coercion. Es la INTENCION que se declara
+    # aqui: una regla de geometria no deberia depender de como el motor trate hoy
+    # un caso concreto, ni de que nadie la baje a `recommended` por costumbre.
     rules = ["artifact.integrity", "artifact.aspect"]
     if context.format_ in {Format.VIDEO, Format.LYRIC_VIDEO}:
         rules.append("artifact.video_stream")

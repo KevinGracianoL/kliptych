@@ -263,8 +263,11 @@ def test_recommended_rule_with_unsupported_check_blocks_the_gate(tmp_path: Path)
     comprobaba que su UNSUPPORTED se traducía en un gate ``passed`` y una pieza
     EXPORTADA. Eso congelaba un fail-open, no una intencion. El razonamiento que
     lo justificaba ("esa condicion solo mira las reglas hard") era una
-    descripcion de un defecto, no una decision, y por eso otro test lo daba por
-    bueno en el mismo sitio.
+    descripcion de un defecto, no una decision.
+
+    Conviene decir como se mantuvo tanto tiempo: NO era un test que nadie miraba.
+    Era un test que AFIRMABA el defecto, con `assert result.status is PASSED` y
+    `assert exported.status is EXPORTED`. Green y equivocado a la vez.
 
     El brief, §5.1, dice: "Si no hay validador para una regla DURA, el resultado
     es UNSUPPORTED o MANUAL_REVIEW, jamas PASS". Ojo a la palabra DURA: la

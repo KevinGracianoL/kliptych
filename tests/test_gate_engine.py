@@ -215,7 +215,11 @@ def test_unsupported_blocks_at_every_strength(tmp_path: Path, strength: str) -> 
     `hard`, asi que un UNSUPPORTED en `recommended` o `manual_review` caia al
     final y devolvia PASSED: un artefacto que nadie pudo verificar salia
     aprobado. El aviso estaba escrito en un comentario del propio motor, dos
-    funciones mas arriba, y ningun test lo alcanzaba.
+    funciones mas arriba, y un test lo FIJABA como correcto en vez de
+    detectarlo: `test_recommended_rule_with_unsupported_check_is_unaffected` de
+    #57 afirmaba `status is PASSED` y `exported.status is EXPORTED` para
+    exactamente este caso. Ese es el motivo de que pasara inadvertido: no era
+    invisible, estaba aprobado.
 
     El brief, §5.1, acota su clausula "jamás PASS" a las reglas DURAS, asi que
     esto no es cumplir el brief: es un endurecimiento deliberado mas alla de el.
