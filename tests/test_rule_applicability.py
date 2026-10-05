@@ -266,12 +266,14 @@ def test_recommended_rule_with_unsupported_check_blocks_the_gate(tmp_path: Path)
     descripcion de un defecto, no una decision, y por eso otro test lo daba por
     bueno en el mismo sitio.
 
-    El brief, §5.1, es literal: sin validador aplicable el resultado es
-    UNSUPPORTED o MANUAL_REVIEW, nunca PASS. No tiene clausula "salvo que sea
-    hard", y no la tenia nunca. Una regla recommended que nadie puede verificar no
-    es una regla que el operador pueda revisar a mano, porque no hay veredicto que
-    revisar; de degradarla a PENDING_REVIEW se volveria exportable con
-    ``approve_manual_review``.
+    El brief, §5.1, dice: "Si no hay validador para una regla DURA, el resultado
+    es UNSUPPORTED o MANUAL_REVIEW, jamas PASS". Ojo a la palabra DURA: la
+    clausula esta acotada a las reglas duras, y este caso es `recommended`. Asi
+    que este test no es el brief aplicado, es un endurecimiento deliberado mas
+    alla de §5.1, y el motivo no es de norma sino de salida: `PENDING_REVIEW` es una
+    salida, y una firma es una atestacion de una persona. Una persona no puede
+    atestiguar una geometria que no se midio, de modo que "no verificable por
+    nadie" no puede ser un estado firmable.
 
     Lo que este test sigue fijando, y sigue siendo cierto: el check se despacha
     y se registra. No se omite en silencio.

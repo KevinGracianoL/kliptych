@@ -308,21 +308,27 @@ def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> Gate
     3. Cualquier ``MANUAL_REVIEW`` (por fuerza o por estado) -> ``PENDING_REVIEW``.
     4. En otro caso -> ``PASSED``.
 
-    El punto 2 es el que se corrigio. Antes solo escalaba cuando la fuerza era
-    ``hard``, asi que una regla ``recommended`` o ``manual_review`` con un check
-    ``UNSUPPORTED`` caia en el punto 4 y devolvia ``PASSED``: un artefacto que
-    NADIE pudo verificar salia aprobado. El brief, §5.1, es literal sobre esto:
-    "sin validador aplicable el resultado es UNSUPPORTED o MANUAL_REVIEW, nunca
-    PASS". No tiene clausula "salvo que sea hard", y no la tenia nunca.
+    El punto 2 es el que se corrigio, y conviene decir con exactitud por que,
+    porque el motivo NO es que el brief lo imponga. El brief (docs/brief_v2.md
+    §5.1) dice: "Si no hay validador para una regla DURA, el resultado es
+    UNSUPPORTED o MANUAL_REVIEW, jamas PASS". La clausula "jamás PASS" esta
+    acotada a las reglas duras. Antes de este cambio el codigo cumplia esa norma
+    al pie de la letra, y aun asi dejaba pasar un artefacto que nadie habia
+    podido verificar: por eso esto es un ENDURECIMIENTO deliberado MAS ALLA de
+    §5.1, y no una transcripcion de ella.
 
-    La fuerza NO se consulta aqui a proposito, y conviene entender por que antes
-    de tocarlo. La fuerza decide si una regla MALA bloquea o abre una revision
-    manual: por eso el punto 3 la mira. Pero un check ``UNSUPPORTED`` no dice que
-    el artefacto este mal, dice que NO SE PUDO MIRAR. Ahi no hay nada que el
-    operador pueda revisar a mano, porque no hay veredicto: no hay imagen que
-    mirar ni medida que discutir. Degradarlo a ``PENDING_REVIEW`` lo haria
-    exportable con ``approve_manual_review``, que es exactamente el fail-open que
-    se acaba de cerrar.
+    El motivo real es que `PENDING_REVIEW` es una SALIDA. `_is_piece_exportable`
+    deja exportar una pieza en `PENDING_REVIEW` si todos sus checks estan en PASS o
+    MANUAL_REVIEW y hay firma de aprobacion. Una firma es una atestacion de una
+    persona, y una persona no puede atestiguar una geometria que no se midio: no
+    hay imagen que mirar ni medida que discutir. Degradar un UNSUPPORTED a
+    revision manual convertia "no verificable por nadie" en un estado firmable, que
+    es exactamente lo que un gate fail-closed no debe ofrecer.
+
+    Por eso la fuerza NO se consulta aqui, y conviene entenderlo antes de tocarlo.
+    La fuerza decide si una regla MALA bloquea o abre revision manual: por eso el
+    punto 3 la mira. Un UNSUPPORTED no dice que el artefacto este mal, dice que no
+    se pudo mirar, y ahi no hay nada que el operador pueda revisar a mano.
 
     Args:
         outcomes: Pares de (fuerza, resultado) de cada check despachado.

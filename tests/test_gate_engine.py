@@ -217,8 +217,11 @@ def test_unsupported_blocks_at_every_strength(tmp_path: Path, strength: str) -> 
     aprobado. El aviso estaba escrito en un comentario del propio motor, dos
     funciones mas arriba, y ningun test lo alcanzaba.
 
-    El brief, §5.1, no admite la excepcion: sin validador aplicable el resultado
-    es UNSUPPORTED o MANUAL_REVIEW, nunca PASS.
+    El brief, §5.1, acota su clausula "jamás PASS" a las reglas DURAS, asi que
+    esto no es cumplir el brief: es un endurecimiento deliberado mas alla de el.
+    El motivo esta en `_is_piece_exportable`: `PENDING_REVIEW` es una salida, y
+    una firma es una atestacion de una persona sobre una geometria que no se
+    midio. No hay nada que un operador pueda revisar a mano.
     """
     if strength == "hard":
         contract = make_contract(

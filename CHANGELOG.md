@@ -29,14 +29,16 @@
   que NADIE pudo verificar salia aprobado y exportable, incluso con firma de
   revision manual.
   El aviso estaba escrito en un comentario del propio motor, dos funciones mas
-  arriba, y ningun test lo alcanzaba. Dos tests lo fijaban como comportamiento
-  correcto (`test_recommended_rule_with_unsupported_check_is_unaffected` de #57,
-  y el de este PR). El brief, §5.1, es literal: sin validador aplicable el
-  resultado es UNSUPPORTED o MANUAL_REVIEW, nunca PASS. No tiene clausula "salvo
-  que sea hard", y no la tenia nunca.
-  Un `UNSUPPORTED` no dice que el artefacto este mal, dice que NO SE PUDO MIRAR, y
-  ahi no hay nada que un operador pueda revisar a mano. Degradarlo a revision
-  manual lo haria exportable con firma.
+  arriba, y ningun test lo alcanzaba. Un test lo fijaba como comportamiento
+  correcto (`test_recommended_rule_with_unsupported_check_is_unaffected`, de #57).
+  El brief (§5.1) dice "Si no hay validador para una regla **dura**, el resultado
+  es UNSUPPORTED o MANUAL_REVIEW, jamás PASS": la cláusula "jamás PASS" está
+  acotada a las reglas duras, así que esto NO es aplicar el brief, es un
+  endurecimiento deliberado más allá de §5.1.
+  El motivo no es de norma sino de salida: `PENDING_REVIEW` es una salida del
+  gate, y la firma que habilita es una atestación de una persona. Una persona no
+  puede atestiguar una geometría que no se midió, así que "no verificable por
+  nadie, ni por máquina ni por humano" no puede ser un estado firmable.
   Lo que no cambia: `FAIL` sigue gainandole, y el orden de escalado es el mismo
   (FAIL -> UNSUPPORTED -> revision manual -> passed).
 - La escalera de #76 sigue en orden: **PR 1 declaro, PR 2 valida, PR 3
@@ -62,9 +64,18 @@
   issue code fail-closed que el resto de reglas por defecto. No es necesario para
   la seguridad ahora que UNSUPPORTED bloquea con cualquier fuerza; es para que una
   regla de geometria no sea segura solo por casualidad del motor.
+- **La regla zero-contract declara ahora `artifact.aspect`.** `vanilla_contract`
+  emite `outputs` = 9:16 por default, o sea que SI declara la geometria, pero no
+  declaraba la regla que la verifica: un artefacto 16:9 en el modo zero-contract
+  pasaba con gate `passed`. Es la forma exacta de D1, una regla que falta donde
+  deberia estar y el gate leyendo la ausencia como "no hay nada que comprobar".
 - Una regla declarada que no se puede verificar mecanicamente es UNSUPPORTED,
-  nunca PASS. El inventario de los 19 validadores registrados no encuentra ninguno
-  que devuelva FAIL sin haber medido el artefacto.
+  nunca PASS. **La clase NO queda cerrada con este PR:** `watermark.present`,
+  `watermark.full_video` y `audio.silence` siguen conflacionando "el probe no
+  pudo responder" con "el probe respondio que no". Se mide en #83 con su entrada
+  exacta y no se arregla aqui, porque cambiarlo pasaria REJECTED a UNSUPPORTED en
+  toda campana con watermark, que es un cambio visible en validadores ajenos a
+  esta PR.
 - **Sprint A2.2 - Segmentador local determinista:** el modo personal (zero-contract)
   emitia un unico segmento con el video completo. Ahora transcribe y trocea las
   palabras en varios segmentos, elegidos por palabras por segundo y silencios.

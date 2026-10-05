@@ -519,33 +519,20 @@ def _sondeo_una_regla(tmp_path: Path, regla: str, media: MediaInfo | None) -> Ch
     return DEFAULT_VALIDATORS[regla](contexto)
 
 
-# Las reglas cuyo veredicto depende de haber MIRADO el artefacto. Un validador de
-# esta clase no puede devolver FAIL cuando el probe noRespondio, porque entonces
-# le esta diciendo al operador que su contenido esta mal cuando lo que fallo fue
-# la herramienta.
+# Las reglas cuyo veredicto depende de haber MIRADO el artefacto, y entre las que
+# este archivo SI puede observar con el sondeo de `f1` (que activa el contrato minimo).
+# No incluyen las que necesitan que la campana exija watermark, silencio o assets:
+# esas se miden en #83, con su registro de assets, y aqui solo se rozarian.
 #
 # Esta lista NO es una puerta estructural y no pretende serlo. Se declaro como
 # una, y no lo era: las uniones `| {"artifact.aspect"}` eran no-ops porque la
 # entrada ya estaba, y el test que "verificaba" que la lista cubriese el catalogo
 # era una identidad que se cumple siempre. Un validador nuevo que conflara los dos
-# casos pasaba las dos.
-#
-# Lo que si funciona, y es lo unico que se afirma aqui, es que la lista no se
-# desincroniza con el catalogo por la via de inventar nombres: `test_f3` lo
-# comprueba, y esa comprobacion puede fallar de verdad.
-#
-# Lo que NO se automatiza, y conviene decirlo para que nadie lo busque: que un
-# validador NUEVO que dependa del artefacto se apunte aqui. Se puede escribir esa
-# comprobacion, y es tentadora, pero necesita saber si cada validador depende del
-# artefacto, y esa informacion no existe en ningun sitio: no hay marcador, ni tipo,
-# ni anotacion. Una version de esa puerta tendria que hardcodear la misma lista
-# que ya hay, mas un diccionario de "estas si dependen", y las dos cosas se
-# desincronizan igual. Un test que depende de una tabla que el test mismo mantiene
-# no es una puerta: es una assertion con pasos extra.
-#
-# La decision de si un validador nuevo es de esta clase o de la otra sigue siendo
-# del que lo escribe, y por eso no se disfraza de automatismo. Lo que si hay es el
-# inventario (`f1`), que dice la verdad sobre las reglas de hoy.
+# casos pasaba las dos. Se borro en vez de reemplazarlo por una version mas
+# lista de la misma nada: decidir si un validador nuevo depende del artefacto
+# necesita informacion que no existe en el codigo (no hay marcador, ni tipo, ni
+# anotacion), asi que cualquier puerta de ese tipo mantiene su propia tabla y se
+# desincroniza igual.
 _REGLAS_DEL_ARTIFACTO: frozenset[str] = frozenset(
     {
         "artifact.aspect",
@@ -571,9 +558,14 @@ def test_f1_inventario_de_validadores_que_conflan(tmp_path: Path) -> None:
     manda a depurar lo que no esta roto: eso es un problema de herramienta, no de
     contenido.
 
-    Lo que fija es el estado actual de las once reglas que dependen del artefacto.
-    Si una de ellas pasa a conflacionar, este test lo dice. Si anaden un validador
-    nuevo y no lo anaden a la lista, esto no lo vera: para eso esta `f3`.
+    ALCANCE REAL, y hay que leerlo antes de creerse el titulo: este test solo
+    puede observar las reglas que el sondeo ACTIVA. Sondea con
+    `watermark_required=False` y `audio_policy=None`, asi que `watermark.*`,
+    `audio.silence` y `assets.required` devuelven `pass` sin llegar a tocar
+    `context.media`. Para esas, este test no dice nada.
+
+    Esas tres SI conflan, y se mids en #83. Aqui no se arreglan, y este test no
+    debe leerse como que las cubre.
     """
     conflatan = [
         regla

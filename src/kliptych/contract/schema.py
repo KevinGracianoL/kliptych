@@ -194,12 +194,11 @@ class SplitScreenConfig(ContractBase):
     # 9:16 y ningun contrato podia declarar otra cosa. El default sigue siendo
     # VERTICAL, de modo que un contrato que no dice nada se comporta EXACTAMENTE
     # como antes.
-    # OJO: el gate todavia valida este lienzo contra SU PROPIA constante de 9:16
-    # (`gate/checks.py`), asi que un lienzo no vertical construye aqui pero lo
-    # rechaza el gate con un mensaje que nombra un aspecto que el contrato no
-    # declaro. Es el orden de la escalera: PR 1 declara y PR 2 mueve la
-    # constante del gate. No es alcanzable desde la CLI todavia, porque el draft
-    # no expone `aspect`.
+    # El gate valida este lienzo contra el ASPECTO DECLARADO AQUI
+    # (`gate/checks.py:check_split_screen_geometry`), no contra una constante de
+    # modulo, asi que un lienzo 16:9 con un artefacto 16:9 pasa. No es alcanzable
+    # desde la CLI: el draft no expone `aspect`, asi que todo contrato resuelto
+    # llega con VERTICAL.
     aspect: Aspect = Aspect.VERTICAL
 
     @field_validator("top_source", "bottom_source")
@@ -754,7 +753,22 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 }
 
 
+# Las reglas que el modo zero-contract declara sin brief. Cada una esta por una
+# razon concreta, y borrarla cuesta un fallo silencioso:
+#
+# - `artifact.integrity`: sin esta, `_derive_status` devuelve PASSED sobre cero
+#   checks y el gate aprueba en vacio una pieza que no existe.
+# - `artifact.video_stream`: para probar que el MP4 TIENE video. Sin ella, un
+#   contenedor sin pista de video pasaria.
+# - `artifact.aspect`: el render por defecto emite 1080x1920 y `outputs` declara
+#   9:16 por default, asi que cualquier otro aspecto es una corrida mal formada.
+#   Sin esta regla la declaracion existe y NADIE la comprueba, que es la forma
+#   exacta de D1 (#76): una regla que falta donde deberia estar, y el gate
+#   leyendo la ausencia como "no hay nada que verificar". No es redundante con
+#   `artifact.video_stream`: aquella prueba que HAY video, esta que tiene la
+#   geometria que el contrato dijo.
 _ZERO_CONTRACT_AV_RULES = (
+    "artifact.aspect",
     "artifact.integrity",
     "artifact.video_stream",
 )
