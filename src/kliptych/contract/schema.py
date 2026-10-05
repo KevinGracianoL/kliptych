@@ -764,9 +764,10 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 #   default de `_DEFAULT_OUTPUTS`, sin brief que diga otra cosa), asi que su
 #   salida DEBERIA ser vertical y el artefacto tiene que medir como tal.
 #   No esta aqui porque el render emita 1080x1920: no lo emite. El reframe
-#   cuantiza a entero par, asi que 1920x1080 -> 608x1080 y 1280x720 -> 404x720,
-#   un 0,08 % por debajo de 9:16. Por eso el gate verifica con
-#   `encoding.aspect_matches` y su tolerancia, no con una comparacion exacta.
+#   cuantiza a entero par, asi que 1920x1080 -> 608x1080 (0,08 % de 9:16) y
+#   1280x720 -> 404x720 (0,25 %). Por eso el gate verifica con
+#   `encoding.aspect_matches` y la tolerancia de la corrida, no con una
+#   comparacion exacta.
 #   Y no es redundante con `artifact.video_stream`: aquella prueba que HAY video,
 #   esta que tiene la geometria que el contrato declaro.
 _ZERO_CONTRACT_AV_RULES = (

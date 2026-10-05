@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, PlatformRules
+from kliptych.encoding import RenderConfig
 
 
 class _GateBase(BaseModel):
@@ -134,3 +135,9 @@ class GateContext:
     artifact_sha256: str | None
     media: MediaInfo | None
     assets: AssetRegistry
+    # La config de render EFECTIVA de la corrida, no un default. El gate compara
+    # el aspecto medido con la tolerancia que el render uso de verdad; leer el
+    # default de la clase seria juzgar la corrida con una declaracion que nadie
+    # hizo. Es la misma forma que el bug de `outputs` en zero-contract: el gate
+    # leyendo un DEFAULT donde debia leer una DECLARACION.
+    render: RenderConfig = field(default_factory=RenderConfig)

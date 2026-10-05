@@ -30,6 +30,7 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
+from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
 from kliptych.gate import Gate, GateResult, Piece, SubtitleSegment
@@ -181,7 +182,11 @@ def run_given_clips(
     except ProvenanceError as error:
         msg = f"error de procedencia en el contrato: {error}"
         raise PipelineError(msg) from error
-    gate = Gate(FFprobeProbe()) if request.gate is None else request.gate
+    # El gate recibe la config de render de la CORRIDA. Sin esto juzgaria el
+    # aspecto del artefacto con el default de `RenderConfig` en vez de con la
+    # tolerancia que el render uso de verdad, que es medir contra una
+    # declaracion que nadie hizo.
+    gate = Gate(FFprobeProbe(), render=RenderConfig()) if request.gate is None else request.gate
     if isinstance(model, ChatJsonModel) and hasattr(gate, "register_validator"):
         gate.register_validator(
             "brand.safety",

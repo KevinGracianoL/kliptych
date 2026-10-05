@@ -7,6 +7,7 @@ from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
 from kliptych.contract.enums import AudioRule
 from kliptych.contract.schema import PlatformRules, canonical_rule_id
+from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -87,14 +88,21 @@ class Gate:
         probe: MediaProbe,
         *,
         validators: Mapping[str, Validator] | None = None,
+        render: RenderConfig | None = None,
     ) -> None:
-        """Configura el probe y el catálogo de validadores.
+        """Configura el probe, el catálogo de validadores y la config de render.
 
         Args:
             probe: Inspección de medios del artefacto.
             validators: Catálogo rule_id -> validador; por defecto el base.
+            render: Config de render EFECTIVA de la corrida. El gate mide el
+                aspecto contra la tolerancia que el render usó, así que tiene que
+                ser la de esa corrida y no un default. Por omisión se usa
+                `RenderConfig()`, que es lo correcto solo cuando nadie
+                sobreescribió la tolerancia.
         """
         self._probe: MediaProbe = probe
+        self._render: RenderConfig = RenderConfig() if render is None else render
         self._validators: dict[str, Validator] = dict(
             DEFAULT_VALIDATORS if validators is None else validators
         )
@@ -155,6 +163,7 @@ class Gate:
             artifact_sha256=artifact_sha256,
             media=media,
             assets=assets,
+            render=self._render,
         )
         outcomes: list[tuple[RuleStrength, CheckResult]] = []
         for strength, rule_ids in (

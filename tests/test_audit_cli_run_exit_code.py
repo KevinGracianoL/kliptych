@@ -15,6 +15,7 @@ from kliptych.__main__ import main
 from kliptych.assembler import RenderSpec
 from kliptych.contract import Contract
 from kliptych.contract.draft import ContractDraft
+from kliptych.encoding import RenderConfig
 from kliptych.gate import Gate
 from kliptych.pipeline import PieceAssembler
 from kliptych.runtime import CampaignModel, Caption, PieceContext
@@ -98,9 +99,12 @@ def _build_model_factory(model: _MissingMentionModel) -> object:
     return _build
 
 
-def _gate_factory(probe: object) -> Gate:
+def _gate_factory(probe: object, *, render: RenderConfig | None = None) -> Gate:
     _ = probe
-    return Gate(probe=_probe_15s())
+    # Acepta `render`: el pipeline se lo pasa con la config efectiva de la
+    # corrida, y una firma rigid aqui romperia el cableado, no el comportamiento
+    # que este test mide (el codigo de salida segun el veredicto del gate).
+    return Gate(probe=_probe_15s(), render=render)
 
 
 @pytest.mark.parametrize(

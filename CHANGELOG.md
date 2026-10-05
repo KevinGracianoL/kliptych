@@ -3,29 +3,45 @@
 ## [Unreleased]
 
 ### Changed
-- **El gate valida el aspecto con la predicada del RENDER, no con una
-  comparacion exacta.** El reframe cuantiza a entero par
-  (`width = _even(round(height * 9/16))`), de modo que la salida del render NUNCA
-  es un 9:16 exacto: para un alto de 1080, `round(607.5)` da 606 u 608.
-  Medido con `crop_size` del propio repo: 1920x1080 -> 608x1080 (0,08 % de 9:16),
-  1280x720 -> 404x720 (0,08 %), 1080x1900 -> 1068x1900 (0,90 %).
-  Un gate que comparase a 1e-9 no era mas riguroso: exigia un valor que esta
-  aritmetica no puede emitir, y rechazaba la salida del propio render. Eso es lo
-  que hacia una version anterior de esta PR, y lo encontro una revision
-  adversarial ejecutando el crop de verdad, no leyendo el codigo.
-  Ahora gate y render llaman a la MISMA funcion, `encoding.aspect_matches`, que
+- **El gate compara el aspecto medido contra el DECLARADO con la tolerancia del
+  render de ESA corrida.** Antes lo comparaba contra un 9:16 fijo en modulo.
+  Gate y render llaman ahora a la MISMA funcion, `encoding.aspect_matches`, que
   es la predicada que decide si un video hay que reencuadrar. No se copia el
   numero: una tolerancia en dos sitios es el mismo defecto que la constante 9:16
   que esta PR quita, y divergiria en silencio la primera vez que cambiase la
-  cuantizacion del reframe.
-  **Es una relajacion frente a comparar a 1e-9, y se declara como tal.** No es una
+  cuantizacion.
+  La tolerancia se lee de `context.render`, la config EFECTIVA de la corrida, y
+  llega a `GateContext` por el campo `render`. Antes se construia un
+  `RenderConfig()` nuevo en el validador, lo cual devolvia el DEFAULT de la clase:
+  una corrida que renderizo con `aspect_tolerance=0.001` era juzgada con 0.05.
+  Medir contra un default en vez de contra una declaracion es la misma forma que
+  el `outputs` por defecto de un 1.1.
+- **Por que una tolerancia y no una comparacion exacta.** El reframe cuantiza a
+  entero par y `round` es half-to-even, asi que un alto de 1080 da
+  `round(607.5) = 608`. Medido con `crop_size` del propio repo:
+  1920x1080 -> 608x1080 (0,08 % de 9:16), 1280x720 -> 404x720 (0,25 %),
+  1080x1900 -> 1068x1900 (0,07 %). **No siempre** es exacto, pero a veces si:
+  720x1280, 1080x1920 y 1152x2048 caen exactos, porque 9:16 tiene
+  representacion entera par. "El render nunca puede emitir 9:16" seria falso; lo
+  cierto es que la cuantizacion no lo GARANTIZA, y por eso se usa la tolerancia
+  que el render ya declaraba.
+  Con un 1e-9 el gate rechazaba la salida del propio render. Eso es lo que hacia
+  una version anterior de esta PR, y lo encontro una revision adversarial
+  ejecutando el crop de verdad, no leyendo el codigo.
+- **Donde si termina: la banda sigue valiendo hasta ~24 px de lado menor.** La
+  cuantizacion al par se come el margen en origenes pequenos y el recorte sale de
+  la banda: 16x16 -> 8x16, a un 11 % de 9:16, que es un video de 2 px de ancho.
+  Ahi el rechazo del gate es CORRECTO y el defecto es del PRODUCTOR, que deberia
+  negarse a construir ese recorte. Medido con `crop_size` y la predicada real: el
+  lado menor mas grande entre recortes rechazados es 20 px (`20x38`), y sobre una
+  rejilla de origenes 2..1200 x 2..1200 no hay ni un rechazo con ambos lados
+  >= 24. Con ambos lados >= 40 tampoco, y a 22x40 el error es 2,2 %, o sea que la
+  tolerancia NO hay que tocarla. En #84, con el detalle. No se arregla aqui:
+  cambiar el productor es otro PR con su propio recorrido end-to-end.
+- **Es una relajacion frente a comparar a 1e-9, y se declara como tal.** No es una
   perdida de rigor: es la retirada de un desacuerdo que la comprobacion anterior
-  no podia detectar, porque todo artefacto conforme tenia un 0,08 % de margen y
-  ningun test miraba. Lo que ahora se acepta es lo que el render emite, y un
-  16:9 genuino (que esta a un 78 % de 9:16) sigue fallando.
-- **El aspecto se compara con tolerancia RELATIVA**
-  (`|aspect - objetivo| <= objetivo * tolerancia`), la que ya usaba el reframe.
-  El criterio escala con el objetivo en vez de depender del tamaño del lienzo.
+  no podia detectar. Un 16:9 genuino esta a un 216 % de desviacion relativa y
+  sigue fallando.
 - **El gate valida el aspecto que el CONTRATO DECLARA**, en vez de comparar
   contra un 9:16 fijo en modulo. `_SPLIT_ASPECT_W`/`_SPLIT_ASPECT_H` han
   desaparecido de `gate/checks.py`; el aspecto sale de `SplitScreenConfig.aspect`

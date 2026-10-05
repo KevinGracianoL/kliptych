@@ -372,8 +372,10 @@ def test_zero_contract_declares_the_aspect_rule() -> None:
 def test_zero_contract_rejects_a_non_vertical_artifact(tmp_path: Path) -> None:
     """El aspect que zero-contract declara tiene que VERIFICARSE.
 
-    El render por defecto emite 1080x1920, asi que un 16:9 en esta ruta es una
-    corrida mal formada. Sin la regla, pasaba. Con ella, se rechaza.
+    El render NO emite 1080x1920: el reframe cuantiza a entero par, asi que
+    1920x1080 -> 608x1080. Da igual: `outputs` declara 9:16, asi que un 16:9 en
+    esta ruta es una corrida mal formada. Sin la regla, pasaba. Con ella, se
+    rechaza.
     """
     artifact = tmp_path / "final.mp4"
     _ = artifact.write_bytes(b"media-bytes")

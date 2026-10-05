@@ -83,6 +83,17 @@ ignore = [
     # lanzan CampaignConfigError; la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
 ]
+"scripts/*" = [
+    # Herramientas de desarrollo. El barredor de mutaciones invoca `uv run
+    # pytest` con un argv fijo del propio repositorio y shell=False: no hay
+    # entrada externa, y sin subprocess no puede correr las pruebas por mutante.
+    "suspicious-subprocess-import",
+    # El reporte de mutaciones es su salida: lo lee una persona, no otro proceso.
+    "print",
+    # `main` es el punto de entrada de una herramienta, no una funcion de
+    # negocio; el contrato lo fija el nombre y el codigo de salida.
+    "undocumented-public-function",
+]
 "src/kliptych/campaign_manager.py" = [
     # El motor de video (orquestador) importa subprocess; se importa de forma
     # diferida solo para resolver los tipos de resultado de CampaignOutcome.

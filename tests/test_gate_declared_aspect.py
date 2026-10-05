@@ -18,13 +18,15 @@ La inspeccion real ya la cubre `test_gate_probe.py`.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract.enums import Aspect
+from kliptych.contract.schema import KNOWN_VALIDATOR_RULES
+from kliptych.encoding import RenderConfig
+from kliptych.gate import Gate
 from kliptych.gate.checks import (
     DEFAULT_VALIDATORS,
     CheckOutcome,
@@ -35,7 +37,7 @@ from kliptych.gate.checks import (
 )
 from kliptych.gate.models import CheckStatus, MediaInfo
 from kliptych.reframe import crop_size
-from tests.support import make_contract, make_piece
+from tests.support import FakeProbe, make_contract, make_media, make_piece
 
 _VERTICAL: dict[str, object] = {"aspect": "9:16", "index": 0}
 _HORIZONTAL: dict[str, object] = {"aspect": "16:9", "index": 1}
@@ -51,6 +53,7 @@ def _context(
     height: int | None = 1920,
     has_video: bool = True,
     with_probe: bool = True,
+    render: RenderConfig | None = None,
 ) -> GateContext:
     """Arma un contexto de gate con la declaracion y el artefacto que se eligen.
 
@@ -67,6 +70,8 @@ def _context(
         height: Alto reportado por ffprobe.
         has_video: Si el artefacto tiene pista de video.
         with_probe: Si el probe devolvio media o fallo.
+        render: Config de render EFECTIVA de la corrida; por omision la de
+            `RenderConfig()`, que es lo correcto cuando nadie la sobreescribio.
 
     Returns:
         El contexto, con el contrato ya validado.
@@ -114,6 +119,7 @@ def _context(
         artifact_sha256="a" * 64,
         media=media,
         assets=AssetRegistry(tmp_path),
+        render=RenderConfig() if render is None else render,
     )
 
 
@@ -507,8 +513,8 @@ def test_g1_regresion_artefacto_del_reframe_pasa(tmp_path: Path, ancho: int, alt
 
     Medido con `crop_size` del propio repo:
         1920x1080 -> 608x1080    (0,08 % de 9:16)
-        1280x720  -> 404x720     (0,08 % de 9:16)
-        1080x1900 -> 1068x1900   (0,90 % de 9:16)
+        1280x720  -> 404x720     (0,25 % de 9:16)
+        1080x1900 -> 1068x1900   (0,07 % de 9:16)
 
     Si alguien vuelve a endurecer la comparacion, este test falla y dice por que.
     """
@@ -535,7 +541,9 @@ def test_g2_el_artefacto_del_reframe_lo_emite_el_reframe() -> None:
     """
     for origen in ((1920, 1080), (1280, 720)):
         ancho, alto = crop_size(*origen)
-        assert matches_declared_aspect(ancho, alto, Aspect.VERTICAL), f"{origen} -> {ancho}x{alto}"
+        assert matches_declared_aspect(
+            ancho, alto, Aspect.VERTICAL, tolerancia=RenderConfig().aspect_tolerance
+        ), f"{origen} -> {ancho}x{alto}"
 
 
 @pytest.mark.parametrize(
@@ -604,60 +612,104 @@ def test_g5_el_lienzo_tambien_honra_la_predicada_del_render(tmp_path: Path) -> N
     # el guard de dimensiones falla antes. Lo que se comprueba aqui es que la
     # comparacion de aspecto reconoce 608x1080 como 9:16, que es lo que estaba
     # en litigio.
-    assert matches_declared_aspect(608, 1080, Aspect.VERTICAL)
+    assert matches_declared_aspect(
+        608, 1080, Aspect.VERTICAL, tolerancia=RenderConfig().aspect_tolerance
+    )
     assert outcome.status is CheckStatus.FAIL
     assert "dimensiones" in str(outcome.evidence["reason"])
 
 
-def test_g6_el_gate_sigue_al_render_cuando_la_tolerancia_cambia(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """El gate LEE la tolerancia del render. No la tiene copiada.
+def _con_tolerancia(tmp_path: Path, tolerancia: float) -> GateContext:
+    """Un contexto cuya corrida renderizo con la tolerancia dada.
 
-    Un numero escrito en dos sitios es el mismo defecto que la constante 9:16 que
-    esta PR quita: divergiria en silencio la primera vez que cambiase la
-    cuantizacion, y ambos lados seguirian "pasando". Comprobar que el resultado
-    coincide NO alcanza, porque mientras los dos numeros sean iguales las dos
-    implementaciones dan lo mismo. Hay que mover el valor y ver que el veredicto
-    se mueve con el.
+    Args:
+        tmp_path: Directorio de trabajo.
+        tolerancia: La tolerancia RELATIVA que uso ESA corrida.
 
-    Con una tolerancia de 1e-6, 608x1080 (0,08 % de 9:16) tiene que FALLAR. Si
-    alguien sustituye `RenderConfig().aspect_tolerance` por un 0.05 literal, este
-    test no lo pilla: por eso el numero va en el monkeypatch y no en el
-    predicado.
+    Returns:
+        El contexto, con `render` ajustado.
     """
+    return _context(
+        tmp_path,
+        outputs=[_VERTICAL],
+        split_aspect=None,
+        width=608,
+        height=1080,
+        render=RenderConfig(aspect_tolerance=tolerancia),
+    )
 
-    @dataclass(frozen=True, slots=True)
-    class RenderConfigEstricto:
-        """Un RenderConfig con la tolerancia alargada a 1e-6."""
 
-        target_aspect: float = 9.0 / 16.0
-        aspect_tolerance: float = field(default=1e-6)
+def test_g6_el_gate_juzga_con_la_tolerancia_de_la_corrida(tmp_path: Path) -> None:
+    """El gate lee la tolerancia del RENDER DE LA CORRIDA, no un default.
 
-    monkeypatch.setattr("kliptych.gate.checks.RenderConfig", RenderConfigEstricto)
+    Este test REEMPLAZA a uno anterior que no servia para nada: sombreaba la
+    clase `RenderConfig` con una tolerancia de 1e-6 y comprobaba que 608x1080
+    fallaba, pero un 1e-6 HARDCODEADO tambien cumple las dos aserciones. No
+    distinguia leer de copiar, que es justo lo que decia comprobar.
 
-    assert matches_declared_aspect(608, 1080, Aspect.VERTICAL) is False
-    assert matches_declared_aspect(1080, 1920, Aspect.VERTICAL) is True
+    Aqui los dos casos son incompatibles con cualquier constante fija:
+      - una corrida a 0,0001 tiene que RECHAZAR 608x1080: se desvía un 0,082 %
+        y la banda de 0,0001 es de 0,006 %,
+      - una corrida a 0,05 tiene que ACEPTARlo: la banda es de 2,8 %.
+    Ningun numero hardcodeado puede satisfacer los dos, asi que si pasan, el gate
+    esta leyendo la declaracion de la corrida.
+    """
+    estricto = _con_tolerancia(tmp_path, 0.0001)
+    holgado = _con_tolerancia(tmp_path, 0.05)
+
+    assert check_declared_outputs(estricto).status is CheckStatus.FAIL
+    assert check_declared_outputs(holgado).status is CheckStatus.PASS
+
+
+def test_g6b_la_tolerancia_del_contexto_llega_al_veredicto() -> None:
+    """El `RenderConfig` por omision deja el contexto utilizable.
+
+    Sin esto, anadir `render` a `GateContext` habria roto todos los validadores
+    que no pasan la config, que son la mayoria.
+    """
+    assert RenderConfig().aspect_tolerance == pytest.approx(0.05)
 
 
 def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
     """Recorre los altos que el pipeline puede producir y no encuentra ninguno rechazado.
 
-    Es la enumeracion de la revision, hecha test. `crop_size` se aplica a un rango
-    de altos representativos, y para cada uno se comprueba que el gate acepta lo
-    que el reframe devuelve. Un alto se considera alcanzable si el reframe lo
-    procesa sin excepcion.
-    """
-    rechazados: list[str] = []
-    for alto in range(320, 3841, 8):
-        try:
-            ancho, alto_efectivo = crop_size(1920, alto)
-        except ValueError:
-            continue
-        if not matches_declared_aspect(ancho, alto_efectivo, Aspect.VERTICAL):
-            rechazados.append(f"{ancho}x{alto_efectivo}")
+    Una version anterior de este test barria SOLO `crop_size(1920, alto)` con
+        `alto` en 320..3840 y concluyo que el gate no rechaza nada. No se podia ver:
+        un unico ancho fijo con esas alturas no toca la region que falla, y un
+        barrido prueba SU rango, no el espacio. Este barre las DOS dimensiones.
 
-    assert rechazados == [], f"el gate rechaza geometria que el reframe emite: {rechazados[:8]}"
+        El rango sale de la ARITMETICA del productor, no de un rango comodo. `_even`
+        redondea al par, y en un recorte pequeno el error de cuantizacion (hasta 2 px
+        de ancho) supera el 5 % relativo. El limite medido de la banda es un lado
+        menor de 24 px: por encima no hay ni un rechazo en toda la rejilla.
+
+        OJO con lo que este test NO dice: que el gate RECHAZA los recortes por debajo
+        de ese minimo es correcto, no un defecto. El defecto es del PRODUCTOR, que
+        deberia negarse a construir un recorte que su propio gate va a rechazar. Va
+        al issue #84, con su recorrido end-to-end; aqui se acota la frontera.
+    """
+    tolerancia = RenderConfig().aspect_tolerance
+
+    por_encima_del_limite: list[str] = []
+    por_debajo: list[str] = []
+    for ancho_origen in range(2, 400, 2):
+        for alto_origen in range(2, 400, 2):
+            ancho, alto = crop_size(ancho_origen, alto_origen)
+            if matches_declared_aspect(ancho, alto, Aspect.VERTICAL, tolerancia=tolerancia):
+                continue
+            caso = f"origen {ancho_origen}x{alto_origen} -> {ancho}x{alto}"
+            if min(ancho, alto) >= 24:
+                por_encima_del_limite.append(caso)
+            else:
+                por_debajo.append(caso)
+
+    assert por_encima_del_limite == [], (
+        f"el gate rechaza geometria de origenes utilizables que el reframe emite: "
+        f"{por_encima_del_limite[:8]}"
+    )
+    # El lado contrario: la region por debajo del limite TIENE que rechazar, o
+    # este test solo estaria comprobando que el gate es permisivo.
+    assert por_debajo, "esperaba recortes rechazados por debajo del lado menor de 24"
 
 
 # ------------------------------------------------- la clase, cerrada
@@ -938,3 +990,61 @@ def test_f2g_la_complementa_se_sostiene_en_el_1_1(tmp_path: Path) -> None:
     assert sin_probe.status is CheckStatus.UNSUPPORTED
     assert medido_y_mal.status is CheckStatus.FAIL
     assert medido_y_bien.status is CheckStatus.PASS
+
+
+def test_h1_el_motor_entrega_la_tolerancia_de_la_corrida(tmp_path: Path) -> None:
+    """El `RenderConfig` del motor llega al veredicto, no solo al helper.
+
+    `test_g6` arma el `GateContext` a mano, asi que deja abierta la mitad
+    importante: que la tolerancia sobreviva el camino de produccion. Aqui se
+    evalua con `Gate.run`, que es como lo llama el pipeline, y la unica variable
+    es la tolerancia del constructor. Si el motor se olvidara de `self._render` y
+    fabricase un `RenderConfig()` nuevo, aqui pasaria lo mismo y el veredicto
+    seria PASS donde tiene que ser FAIL.
+    """
+    artefacto = tmp_path / "pieza.mp4"
+    _ = artefacto.write_bytes(b"video")
+    contrato = make_contract(
+        hard=["artifact.aspect"],
+        audio_rule="any",
+        min_s=None,
+        max_s=None,
+        required_mentions=(),
+        required_hashtags=(),
+        schema_version="1.2",
+        outputs=[_VERTICAL],
+    )
+    # 608x1080 es lo que el reframe emite de verdad para un alto de 1080.
+    probe = FakeProbe(info=make_media(width=608, height=1080))
+    registro = AssetRegistry(tmp_path)
+
+    estricto = Gate(probe, render=RenderConfig(aspect_tolerance=0.0001)).run(
+        contract=contrato,
+        piece=make_piece(artefacto),
+        assets=registro,
+    )
+    holgado = Gate(probe, render=RenderConfig(aspect_tolerance=0.05)).run(
+        contract=contrato,
+        piece=make_piece(artefacto),
+        assets=registro,
+    )
+
+    estricto_asp = next(c for c in estricto.checks if c.id == "artifact.aspect")
+    holgado_asp = next(c for c in holgado.checks if c.id == "artifact.aspect")
+    assert estricto_asp.status is CheckStatus.FAIL
+    assert holgado_asp.status is CheckStatus.PASS
+
+
+def test_h2_el_catalogo_de_reglas_y_el_de_validadores_no_se_desincronizan() -> None:
+    """Toda regla con validador tiene que estar en `KNOWN_VALIDATOR_RULES`.
+
+    Sin esta puerta, `artifact.aspect` podria desaparecer del catalogo del schema
+    sin romper una sola prueba: el validador seguiria registrado, el gate seguiria
+    ejecutandolo y no habria ninguna asercion que se diera cuenta. La mutacion
+    que borra esa entrada sobrevive a la suite completa sin esto.
+    """
+    sin_entrada = sorted(set(DEFAULT_VALIDATORS) - set(KNOWN_VALIDATOR_RULES))
+    sin_validador = sorted(set(KNOWN_VALIDATOR_RULES) - set(DEFAULT_VALIDATORS))
+
+    assert sin_entrada == [], f"validadores ausentes del catalogo del schema: {sin_entrada}"
+    assert sin_validador == [], f"reglas del catalogo sin validador: {sin_validador}"

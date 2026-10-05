@@ -68,7 +68,7 @@ from kliptych.contract import (
     Format,
     SplitScreenConfig,
 )
-from kliptych.encoding import RenderConfig, aspect_matches
+from kliptych.encoding import aspect_matches
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import (
@@ -600,24 +600,25 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
             **evidencia,
             reason="el artefacto no tiene pista de video",
         )
-    return _geometry_outcome(media, split, evidencia)
+    return _geometry_outcome(media, split, evidencia, render_aspect_tolerance(context))
 
 
-def render_aspect_tolerance() -> float:
-    """La tolerancia de aspecto que declara el RENDER, leida en vivo.
+def render_aspect_tolerance(context: GateContext) -> float:
+    """La tolerancia de aspecto que el render USO en ESTA corrida.
 
-    Se lee de `RenderConfig` en cada llamada, y no se copia el numero. Copiarlo
-    seria el mismo defecto que la constante 9:16 que esta PR quita: mientras los
-    dos valores coincidan no se nota, y en cuanto el render cambie el suyo el
-    gate seguira juzgando con el viejo, sin que nada falle.
+    Se lee de `context.render`, la config efectiva de la corrida. Antes se
+    construia un `RenderConfig()` nuevo aqui, lo cual devolvia el DEFAULT de la
+    clase: una corrida que renderizo con `aspect_tolerance=0.001` era juzgada por
+    el gate con 0.05. Es la misma forma que el `outputs` por defecto de un 1.1:
+    medir contra algo que nadie declaro.
 
     Args:
-        Ninguno.
+        context: Contexto de la corrida, que lleva la config efectiva.
 
     Returns:
-        La tolerancia RELATIVA que el render admite.
+        La tolerancia RELATIVA que el render uso.
     """
-    return RenderConfig().aspect_tolerance
+    return context.render.aspect_tolerance
 
 
 def check_declared_outputs(context: GateContext) -> CheckOutcome:
@@ -690,10 +691,11 @@ def check_declared_outputs(context: GateContext) -> CheckOutcome:
             "ffprobe no reportó dimensiones utilizables del video; el aspecto no es medible",
             **evidencia,
         )
-    medido = _measured_aspect(width, height)
+    tolerancia = render_aspect_tolerance(context)
+    medido = _measured_aspect(width, height, tolerancia=tolerancia)
     evidencia["measured_aspect"] = medido
     evidencia["measured_ratio"] = round(width / height, 6)
-    if not _satisfies_declared_outputs(width, height, declarados):
+    if not _satisfies_declared_outputs(width, height, declarados, tolerancia=tolerancia):
         return _fail(
             width=width,
             height=height,
@@ -712,6 +714,7 @@ def _geometry_outcome(
     media: MediaInfo,
     split: SplitScreenConfig,
     evidencia: dict[str, object],
+    tolerancia: float,
 ) -> CheckOutcome:
     """Compara las dimensiones del artefacto contra el split declarado.
 
@@ -720,6 +723,9 @@ def _geometry_outcome(
         split: Geometría del lienzo declarado en el contrato.
         evidencia: Lo ya recogido sobre la declaración, que se propaga al
             veredicto para que el FAIL diga cuál era la exigencia.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
+
+    tolerancia: Tolerancia RELATIVA que el render uso en esta corrida.
 
     Returns:
         PASS con las dimensiones y el aspecto declarado; FAIL en cerrado ante
@@ -745,8 +751,8 @@ def _geometry_outcome(
             **evidencia,
             reason="las dimensiones del artefacto no coinciden con el split_screen",
         )
-    medido = _measured_aspect(width, height)
-    if not matches_declared_aspect(width, height, split.aspect):
+    medido = _measured_aspect(width, height, tolerancia=tolerancia)
+    if not matches_declared_aspect(width, height, split.aspect, tolerancia=tolerancia):
         return _fail(
             width=width,
             height=height,
@@ -765,7 +771,13 @@ def _geometry_outcome(
     )
 
 
-def matches_declared_aspect(width: int, height: int, declarado: Aspect) -> bool:
+def matches_declared_aspect(
+    width: int,
+    height: int,
+    declarado: Aspect,
+    *,
+    tolerancia: float,
+) -> bool:
     """Si el artefacto esta en el aspecto DECLARADO, segun el render.
 
     La predicada es `encoding.aspect_matches`, la misma que usa `_needs_reframe`
@@ -775,28 +787,36 @@ def matches_declared_aspect(width: int, height: int, declarado: Aspect) -> bool:
     cuantizacion del reframe.
 
     No es mas laxo por gusto. El reframe cuantiza a entero par
-    (`width = _even(round(height * 9/16))`), y para un alto de 1080 eso da
-    608x1080, que esta a 0,08 % de 9:16. Una comparacion a 1e-9 no seria mas
-    rigurosa: seria exigir un 9:16 exacto que esta aritmetica no puede emitir.
-    Medido: 1920x1080 -> 608x1080, 1280x720 -> 404x720, 1080x1900 -> 1068x1900.
+    (`width = _even(round(height * 9/16))`), y `round` es half-to-even, asi que
+    un alto de 1080 da `round(607.5) = 608`, no 606 ni 607. Medido: 1920x1080 ->
+    608x1080 (0,08 % de 9,16), 1280x720 -> 404x720 (0,25 %), 1080x1900 ->
+    1068x1900 (0,07 %). Un 1e-9 no seria mas riguroso: exigiria un 9:16 exacto
+    que esa aritmetica no produce de forma general. Ojo que SI cae exacta a veces
+    (1080x1920, 1920x1088, 2560x1600), asi que "nunca puede" seria falso.
+
+    Por debajo de unos 40 px la cuantizacion al par se come el margen y el
+    artefacto sale de la banda: un 16x16 da 8x16, a un 11 %. Ahi el rechazo del
+    gate es CORRECTO y el defecto es del PRODUCTOR, que deberia negarse a
+    construir un recorte que su propio gate va a rechazar. Se mide completo en el
+    issue del reframe; no se arregla aqui porque cambiar el productor es otro PR
+    con su propio recorrido end-to-end.
 
     Args:
         width: Ancho medido por ffprobe.
         height: Alto medido por ffprobe.
         declarado: El aspecto que el contrato declara.
+        tolerancia: Tolerancia RELATIVA que el render uso en ESTA corrida, leida
+            de `context.render`. Llega como argumento, y no se lee aqui de un
+            `RenderConfig()` nuevo, por el motivo que explica
+            `render_aspect_tolerance`.
 
     Returns:
         ``True`` si las dimensiones estan dentro de la tolerancia del render.
     """
-    return aspect_matches(
-        width,
-        height,
-        target_aspect=declarado.ratio,
-        tolerance=render_aspect_tolerance(),
-    )
+    return aspect_matches(width, height, target_aspect=declarado.ratio, tolerance=tolerancia)
 
 
-def _measured_aspect(width: int, height: int) -> str:
+def _measured_aspect(width: int, height: int, *, tolerancia: float) -> str:
     """El aspecto que el artefacto MIDE, para dejarlo en la evidencia.
 
     Se decide con la misma tolerancia del render, no con un epsilon propio: si el
@@ -809,13 +829,14 @@ def _measured_aspect(width: int, height: int) -> str:
     Args:
         width: Ancho medido por ffprobe.
         height: Alto medido por ffprobe.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
 
     Returns:
         El valor del aspecto si el render lo reconoceria como uno soportado; si
         no, ``f"{ancho}:{alto}"``.
     """
     for aspecto in Aspect:
-        if matches_declared_aspect(width, height, aspecto):
+        if matches_declared_aspect(width, height, aspecto, tolerancia=tolerancia):
             return aspecto.value
     return f"{width}:{height}"
 
@@ -824,6 +845,8 @@ def _satisfies_declared_outputs(
     width: int,
     height: int,
     declarados: tuple[Aspect, ...],
+    *,
+    tolerancia: float,
 ) -> bool:
     """Si el artefacto satisface ALGUNA de las salidas declaradas.
 
@@ -840,11 +863,15 @@ def _satisfies_declared_outputs(
         width: Ancho medido por ffprobe.
         height: Alto medido por ffprobe.
         declarados: Los aspectos que el contrato declara.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
 
     Returns:
         ``True`` si las dimensiones satisfacen alguna declaracion.
     """
-    return any(matches_declared_aspect(width, height, aspecto) for aspecto in declarados)
+    return any(
+        matches_declared_aspect(width, height, aspecto, tolerancia=tolerancia)
+        for aspecto in declarados
+    )
 
 
 def check_required_mentions(context: GateContext) -> CheckOutcome:
