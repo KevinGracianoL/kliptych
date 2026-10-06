@@ -7,8 +7,10 @@ sin la mención obligatoria queda rechazado y el paquete lo reporta.
 """
 
 import inspect
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -164,6 +166,33 @@ class _RunContext:
     model: CampaignModel
     engine: Gate
     builder: PieceAssembler
+    # Milisegundos por fase de ESTA ruta. Es un dict mutable a proposito dentro
+    # de un dataclass congelado: el contexto se construye una vez y las fases lo
+    # van llenando. La ruta long_video usa el checkpoint del orquestador; esta usa
+    # el manifiesto, y son los dos unicos sitios donde una corrida deja registro.
+    stage_durations_ms: dict[str, int] = field(default_factory=dict)
+
+
+@contextmanager
+def _fase(context: _RunContext, nombre: str) -> Generator[None]:
+    """Cronometra una fase de la corrida y acumula su duracion en el manifiesto.
+
+    Una fase reanudada desde cache no entra aqui: no se ejecuta, y su tiempo de
+    lectura no es trabajo de la fase.
+
+    Args:
+        context: Contexto de la corrida, destino de la duracion.
+        nombre: Nombre de la fase, tal como se vera en el manifiesto.
+
+    Yields:
+        `None` mientras corre la fase.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = int((time.monotonic() - started) * 1000)
+        context.stage_durations_ms[nombre] = context.stage_durations_ms.get(nombre, 0) + elapsed
 
 
 def run_given_clips(
@@ -324,24 +353,37 @@ def _unresolved(context: _RunContext, resolution: ResolutionResult) -> RunResult
 
 
 def _resolved(context: _RunContext, contract: Contract) -> RunResult:
-    pieces, gates, outputs = _assemble_pieces(context, contract)
+    with _fase(context, "assemble"):
+        pieces, gates, outputs = _assemble_pieces(context, contract)
     if not pieces:
         msg = "el contrato no declara clips de video para ensamblar"
         raise PipelineError(msg)
     manifest_path = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
-    delivery = export_delivery(
-        contract=contract,
-        pieces=pieces,
-        gate=context.engine,
-        assets=context.registry,
-        destination=context.request.destination,
-        approve_manual_review=context.request.approve_manual_review,
-        approved_by=context.request.approved_by,
-    )
-    if delivery.manually_approved_rules:
-        manifest_path = _write_manifest(
-            context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
+    with _fase(context, "export"):
+        delivery = export_delivery(
+            contract=contract,
+            pieces=pieces,
+            gate=context.engine,
+            assets=context.registry,
+            destination=context.request.destination,
+            approve_manual_review=context.request.approve_manual_review,
+            approved_by=context.request.approved_by,
         )
+    # El manifiesto se escribe OTRA vez siempre, no solo cuando hay aprobacion
+    # manual. La primera escritura ocurre antes de exportar y por tanto no puede
+    # contener la duracion de la exportacion: el campo existiria y valdria cero
+    # para la fase mas cara de medir. Reescribirlo aqui es lo que hace que el
+    # registro sea completo.
+    #
+    # `write_manifest` escribe con `Path.write_text`, que NO es atomico: una
+    # interrupcion a mitad deja un manifiesto truncado en vez del anterior. Con una
+    # sola escritura eso era un ventana estrecha; al reescribir siempre, la
+    # segunda escritura parte del mismo patron y hay dos. No se arregla aqui para
+    # no mezclar un arreglo de filesystem con la instrumentacion: se mide, se
+    # reporta y se corrige en su propio cambio.
+    manifest_path = _write_manifest(
+        context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
+    )
     return RunResult(
         run_id=context.identifier,
         outcome=RunOutcome(delivery.status.value),
@@ -852,6 +894,7 @@ def _write_manifest(
         outputs=tuple(outputs),
         gates=tuple(gates),
         degradations=request.environment.degradations,
+        stage_durations_ms=dict(context.stage_durations_ms),
         manually_approved_rules=manually_approved_rules,
         approved_by=approved_by,
         approved_at_utc=approved_at_utc,

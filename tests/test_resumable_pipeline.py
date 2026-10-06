@@ -436,6 +436,39 @@ def test_checkpoint_tracks_completed_stages(
         assert mgr.artifact_path(stage) is not None
 
 
+def test_el_checkpoint_registra_el_tiempo_de_cada_etapa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El orquestador tiene que ARRANCAR el cronómetro de cada etapa.
+
+    `PipelineStateManager` sabe medir y `tests/test_stage_timings.py` lo prueba,
+    pero el manager no mide nada por su cuenta: la duracion aparece solo si la
+    etapa llama a `mark_started` antes de trabajar. Sin este test, borrar esas
+    llamadas deja `durations_ms` vacio y TODO sigue en verde: el manifiesto
+    diria "no se midio" sin decir por que, que es exactamente el fallo que la
+    instrumentacion existe para evitar.
+    """
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    result = _run(config, deps, resume=False)
+    assert isinstance(result, PipelineResult)
+
+    mgr = PipelineStateManager.load(config.output_dir)
+    for stage in (
+        PipelineStage.DOWNLOAD,
+        PipelineStage.TRANSCRIBE,
+        PipelineStage.MOMENTS,
+        PipelineStage.SELECT,
+        PipelineStage.REFRAME,
+        PipelineStage.SUBTITLES,
+    ):
+        assert stage.value in mgr.checkpoint.durations_ms, (
+            f"la etapa {stage.value} no tiene duracion: no se cronometro"
+        )
+        assert mgr.checkpoint.durations_ms[stage.value] >= 0
+
+
 def test_resume_skips_completed_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     counter = _CallCounter()
     counter.detect_error = MomentDetectionError("fallo intencional en momentos")

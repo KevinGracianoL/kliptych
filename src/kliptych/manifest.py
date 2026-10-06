@@ -1,7 +1,7 @@
 """Manifiesto reproducible de cada corrida (``runs/<run_id>/run_manifest.json``)."""
 
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -60,6 +60,13 @@ class RunManifest(_ManifestBase):
     outputs: tuple[OutputHash, ...] = ()
     gates: tuple[GateResult, ...] = ()
     degradations: tuple[str, ...] = ()
+    # Milisegundos por etapa, con la etapa como clave. El brief 10.1 pide
+    # "argumentos de render, hardware detectado, hashes de los outputs" y NO pide
+    # tiempo: sin esto el registro no puede responder si una etapa es el cuello
+    # de botella, y una mitigacion que cueste "+20 min por stream" no se puede
+    # evaluar sin saber cuanto costaba antes. Las etapas reanudadas desde cache no
+    # aparecen: no se ejecutaron y no hay duracion que registrar.
+    stage_durations_ms: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     manually_approved_rules: tuple[str, ...] = ()
     approved_by: str | None = None
     approved_at_utc: str | None = None

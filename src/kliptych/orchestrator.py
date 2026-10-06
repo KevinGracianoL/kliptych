@@ -1305,6 +1305,7 @@ def _resolve_source_stage(
                 )
             return source_path
     try:
+        state.mark_started(PipelineStage.DOWNLOAD)
         source = _download(url, config=config, downloader=downloader, registry=registry)
         state.mark_done(PipelineStage.DOWNLOAD, source)
     except Exception:
@@ -1555,6 +1556,7 @@ def _resolve_transcript_stage(
                     state.mark_done(PipelineStage.TRANSCRIBE, artifact_file)
                 return transcript
     try:
+        state.mark_started(PipelineStage.TRANSCRIBE)
         transcript = _transcribe(source, transcriber=transcriber)
         _atomic_write_json(artifact, transcript.model_dump_json(indent=2))
         state.mark_done(PipelineStage.TRANSCRIBE, artifact)
@@ -1588,6 +1590,7 @@ def _resolve_moments_stage(
                     state.mark_done(PipelineStage.MOMENTS, artifact_file)
                 return moments
     try:
+        state.mark_started(PipelineStage.MOMENTS)
         moments = _detect(source, transcript=transcript, detector=detector)
         _atomic_write_json(artifact, adapter.dump_json(moments, indent=2).decode("utf-8"))
         state.mark_done(PipelineStage.MOMENTS, artifact)
@@ -1642,6 +1645,7 @@ def _resolve_selection_stage(
                     state.mark_done(PipelineStage.SELECT, artifact_file)
                 return selection
     try:
+        state.mark_started(PipelineStage.SELECT)
         rel_contract = _contract_with_relative_timestamps(
             config.contract, offset_sec=_source_time_offset_sec(config)
         )
@@ -1892,6 +1896,7 @@ def _resolve_reframe_stage(
             if video_valid:
                 _ = registry.register(reframed_video, is_artifact=True)
             return reframe, reframed_video
+    state.mark_started_if(PipelineStage.REFRAME, condition=is_primary)
     try:
         destination = config.output_dir / f"reframed{suffix}.mp4"
         reframe, reframed = _reframe(
@@ -1984,6 +1989,7 @@ def _resolve_subtitles_and_burn_stage(
         cached_subtitles = config.output_dir / subtitles_name
         return cached_subtitles, final_video
     try:
+        state.mark_started_if(PipelineStage.SUBTITLES, condition=is_primary)
         subtitles = _resolve_subtitle_file(
             is_lyric=is_lyric,
             transcript=transcript,

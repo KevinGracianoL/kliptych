@@ -755,13 +755,56 @@ def test_dos_tolerancias_dan_manifiestos_distintos(
         "si el digest difiere, este test ya no mide solo la tolerancia"
     )
     # Campos que varian entre CUALQUIER par de corridas y por tanto no dicen
-    # nada sobre la tolerancia: el reloj, el identificador de corrida y las
-    # rutas absolutas que arrastran los outputs.
-    volatiles = {"run_id", "started_at", "finished_at", "outputs", "assets"}
+    # nada sobre la tolerancia: el reloj, el identificador de corrida, las rutas
+    # absolutas que arrastran los outputs y los tiempos por fase, que dependen
+    # de lo que tardo la maquina y no de lo que se decidio.
+    volatiles = {
+        "run_id",
+        "started_at",
+        "finished_at",
+        "outputs",
+        "assets",
+        "stage_durations_ms",
+    }
     distintos = {
         clave for clave in estricto if clave not in volatiles and estricto[clave] != holgado[clave]
     }
     assert distintos == {"aspect_tolerance", "gates"}, distintos
+
+
+def test_el_manifiesto_registra_el_tiempo_por_fase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La instrumentacion existe para responder si una fase es el cuello.
+
+    Sin esto, "+20 min por stream" no se puede evaluar contra nada: no se sabe
+    cuanto costaba el resto. El test falla si alguien quita el cronometro.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=_unit_request(
+            tmp_path,
+            brief="brief del tiempo por fase",
+            assembler=_StubAssembler(),
+        ),
+    )
+
+    manifest = _json(Path(result.manifest_path))
+    duraciones = cast("dict[str, int]", manifest["stage_durations_ms"])
+    assert "assemble" in duraciones, duraciones
+    assert "export" in duraciones, duraciones
+    assert all(valor >= 0 for valor in duraciones.values()), duraciones
 
 
 def test_pipeline_blocks_duration_above_max(tmp_path: Path) -> None:
