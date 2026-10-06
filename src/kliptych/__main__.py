@@ -23,6 +23,7 @@ from kliptych.campaign_manager import CampaignManager, CampaignManagerError, Cam
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
+from kliptych.contract.enums import Aspect
 from kliptych.encoding import RenderConfig
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
@@ -66,6 +67,7 @@ class _CampaignManagerProtocol(Protocol):
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome: ...
 
 
@@ -475,6 +477,18 @@ def main(
     )
     _ = campaign_parser.add_argument("--out", required=True, help="directorio de salida")
     _ = campaign_parser.add_argument(
+        "--format",
+        dest="output_format",
+        default=None,
+        choices=sorted(aspect.value for aspect in Aspect),
+        help=(
+            "aspecto del render y del veredicto del gate (default: el de "
+            "RenderConfig). Las opciones son exactamente las de `Aspect`: "
+            "agregar un formato al enum `Aspect` es un cambio de contrato y "
+            "necesita su propia revision, no una opcion mas aqui"
+        ),
+    )
+    _ = campaign_parser.add_argument(
         "--mode",
         default="long_video",
         choices=["long_video", "audio_locked", "repost", "repost_ugc", "slideshow"],
@@ -689,7 +703,8 @@ def _cmd_campaign(args: argparse.Namespace, *, manager: _CampaignManagerProtocol
             manager
             if manager is not None
             else _make_default_campaign_manager(
-                destination=dest_path / "delivery" if dest_path else None
+                destination=dest_path / "delivery" if dest_path else None,
+                output_format=cast("str | None", getattr(args, "output_format", None)),
             )
         )
     except RuntimeError:
@@ -788,6 +803,7 @@ def _cmd_campaign_zero_contract(
             else _make_default_campaign_manager(
                 destination=destination / "delivery" if destination else None,
                 require_llm=False,
+                output_format=cast("str | None", getattr(args, "output_format", None)),
             )
         )
     except RuntimeError:
@@ -832,6 +848,7 @@ def _process_campaign(
         approved_by=approved_by,
         audio_track_path=audio_track_path,
         audio_track_url=audio_track_url,
+        output_format=cast("str | None", getattr(args, "output_format", None)),
     )
 
 
@@ -970,12 +987,40 @@ def _build_model(recorded: str | None) -> tuple[CampaignModel, str]:
     return backend, backend.model_version
 
 
+def _render_config_para(output_format: str | None) -> RenderConfig:
+    """La config de render de la corrida, derivada de `--format`.
+
+    La tolerancia no se toca: `--format` cambia el ASPECTO, que es lo que el
+    render produce y lo que el gate mide. Un flag que tambien moviera la
+    tolerancia daria dos ejes por un knob y haria imposible saber cual de los dos
+    produjo un veredicto.
+
+    Args:
+        output_format: El valor de `--format`, o ``None`` para no overriding.
+
+    Returns:
+        La config con el aspecto objetivo pedido.
+
+    Raises:
+        ValueError: Si `output_format` no corresponde a un miembro de `Aspect`.
+    """
+    if output_format is None:
+        return RenderConfig()
+    try:
+        aspecto = Aspect(output_format)
+    except ValueError as error:
+        msg = f"aspecto de salida no soportado: {output_format!r}"
+        raise ValueError(msg) from error
+    return RenderConfig(target_aspect=aspecto.ratio)
+
+
 def _make_default_campaign_manager(
     destination: Path | None = None,
     gate: Gate | None = None,
     assets: AssetRegistry | None = None,
     *,
     require_llm: bool = True,
+    output_format: str | None = None,
 ) -> _CampaignManagerProtocol:
     """Construye el gestor de campañas real.
 
@@ -988,9 +1033,16 @@ def _make_default_campaign_manager(
             zero-contract pasa False: sin brief no hay nada que clasificar ni
             que seleccionar, así que no debe exigir credenciales ni construir
             un cliente de chat que nunca se usaría.
+        output_format: Aspecto pedido con ``--format`` (los valores del enum
+            `Aspect`), o ``None`` para el default de `RenderConfig`. Cuando se
+            pasa, la config que sale de aqui es la que reciben el gate Y el
+            orquestador: son el mismo objeto.
 
     Returns:
         El gestor configurado.
+
+    Raises:
+        ValueError: Si `output_format` no es un aspecto soportado por `Aspect`.
 
     Raises:
         RuntimeError: Si ``require_llm`` y falta alguna variable ``KLIPTYCH_LLM_*``.
@@ -1022,9 +1074,12 @@ def _make_default_campaign_manager(
         backend = None
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
-    render = RenderConfig()
-    # El gate mide el aspecto con la config de render de ESTA corrida, no con el
-    # default de la clase.
+    # Una sola config para gate y orquestador. Que compartan el objeto es lo que
+    # hace que "el aspecto con el que se acepto no reencuadrar" sea el mismo en
+    # los dos lados de la comparacion. Con `--format` esto ya no es el default de
+    # la clase: antes lo era siempre, y entonces `--format` no habria podido
+    # cambiar nada aunque existiera.
+    render = _render_config_para(output_format)
     effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe(), render=render)
     effective_dest = destination if destination is not None else Path.cwd() / "delivery"
     effective_assets = assets if assets is not None else AssetRegistry(Path.cwd())
