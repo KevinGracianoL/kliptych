@@ -165,11 +165,17 @@ def _unverifiable(audio_rule: AudioRule, missing_validator: str) -> CheckOutcome
     CUALQUIER fuerza de la regla, no solo con `hard`. Nada en el motor consulta la
     fuerza antes de despachar un validador, asi que `audio.present` como
     `recommended` con `audio_rule` en {`official_required`, `no_trending`} llega
-    aqui igual. Lo que lo mantiene seguro es el resolver, que fuerza
-    `audio.present` a `hard`; el validador en si es agnostico de la fuerza, y si
-    alguien bajara esa regla, este MANUAL_REVIEW pasaria a ser un PASS. Esa
-    dependencia esta nombrada en `resolver._base_rules` y conviene no perderla de
-    vista al tocar cualquiera de las dos puntas.
+    aqui igual. Medido en las tres fuerzas: el veredicto global es
+    `pending_review` en las tres.
+
+    Que bajar la regla no produzca un `PASS` NO depende de esta coercion. Dependia
+    de ella hasta que #82 endureciera `_derive_status`; hoy depende de que el
+    motor escale cualquier `MANUAL_REVIEW` con independencia de la fuerza, igual
+    que cualquier `UNSUPPORTED`. La coercion del resolver es INTENCION (esta
+    regla debe ser dura y estar en la lista corta), no el guard que lo impide,
+    que es el motor. La misma lectura aplica a `artifact.aspect` en
+    `resolver._base_rules`, y conviene no confundir las dos cosas al tocar
+    cualquiera de las puntas.
 
     Args:
         audio_rule: Regla de audio de la plataforma, sin verificar.
@@ -804,10 +810,13 @@ def matches_declared_aspect(
     que esa aritmetica no produce de forma general. Ojo que SI cae exacta a veces
     (1080x1920, 1920x1088, 2560x1600), asi que "nunca puede" seria falso.
 
-    Por debajo de unos 40 px la cuantizacion al par se come el margen y el
-    artefacto sale de la banda: un 16x16 da 8x16, a un 11 %. Ahi el rechazo del
-    gate es CORRECTO y el defecto es del PRODUCTOR, que deberia negarse a
-    construir un recorte que su propio gate va a rechazar. Se mide completo en el
+    Por debajo de ~24 px de lado MENOR la cuantizacion al par se come el margen y el
+    artefacto sale de la banda: un 16x16 da 8x16, a un 11 %. Medido con la
+    predicada real sobre origenes 2..1200 x 2..1200: el lado menor mas grande
+    entre recortes rechazados es 20 px (`20x38`), y no hay ninguno con lado menor
+    >= 24. Ahi el rechazo del gate es CORRECTO y el defecto es del PRODUCTOR,
+    que deberia negarse a construir un recorte que su propio gate va a rechazar.
+    Se mide completo en el
     issue del reframe; no se arregla aqui porque cambiar el productor es otro PR
     con su propio recorrido end-to-end.
 

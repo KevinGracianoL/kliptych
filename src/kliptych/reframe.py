@@ -672,7 +672,8 @@ def crop_size(source_width: int, source_height: int) -> tuple[int, int]:
     `round(607.5) = 608`. Medido: 1920x1080 -> 608x1080 (0,08 % de 9:16),
     1280x720 -> 404x720 (0,25 %), 1080x1900 -> 1068x1900 (0,07 %). A veces SI cae exacto,
     porque 9:16 tiene representacion entera par: 720x1280, 1080x1920,
-    1152x2048 (todos alcanzables como crop desde un origen de ese ancho).
+    1152x2048, y tambien 612x1088 y 900x1600 (desde origenes 1920x1088 y
+    2560x1600). Verificado con `crop_size` sobre cada uno de esos origenes.
     Quien verifique un artefacto tiene que usar `encoding.aspect_matches`, con
     la tolerancia del render de esa corrida, y no una comparacion exacta.
 

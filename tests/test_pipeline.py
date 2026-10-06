@@ -666,6 +666,104 @@ def test_pipeline_juzga_el_aspecto_con_la_tolerancia_de_la_corrida(
     assert aspect["status"] == estatuso_esperado
 
 
+def test_el_lienzo_emitido_sigue_la_declaracion_de_la_corrida(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`RunRequest.render` cambia lo que se EMITE, no solo lo que se juzga.
+
+    Una tolerancia que solo mueve el veredicto es una medida desconectada de su
+    objeto: el gate certificaria una geometria que el productor nunca emitio.
+    Este test mira el `RenderSpec` que llega al ensamblador, que es el punto en
+    el que se puede ver si la declaracion llego al productor o se quedo en el
+    juez.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe", _SinteticoProbe(FakeProbe(info=make_media()))
+    )
+
+    lienzos: list[tuple[int, int]] = []
+
+    class _EspiaEnsamblador(_StubAssembler):
+        @override
+        def assemble(self, spec: RenderSpec) -> Path:
+            lienzos.append((spec.width, spec.height))
+            return super().assemble(spec)
+
+    def _correr(render: RenderConfig) -> None:
+        _ = run_given_clips(
+            model=_StaticModel(draft, _caption()),
+            settings=Settings.from_root(tmp_path),
+            request=_unit_request(
+                tmp_path,
+                brief="brief de lienzo",
+                assembler=_EspiaEnsamblador(),
+                render=render,
+            ),
+        )
+
+    _correr(RenderConfig())
+    _correr(RenderConfig(target_aspect=16.0 / 9.0))
+
+    assert lienzos == [(1080, 1920), (1920, 1080)], lienzos
+
+
+def test_dos_tolerancias_dan_manifiestos_distintos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El manifiesto registra la tolerancia con la que se JUZGO el artefacto.
+
+    Sin esto, dos corridas con el mismo `contract_sha256` y el mismo artefacto
+    dan veredictos distintos y manifiestos indistinguibles: el registro no
+    permite reproducir el veredicto. Asercion sobre lo que DIFIERE entre dos
+    manifiestos, no sobre la existencia del campo; un test que solo comprueba
+    que el campo esta no notaria que el valor sea el equivocado.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+
+    def _manifiesto(tolerancia: float) -> dict[str, object]:
+        result = run_given_clips(
+            model=_StaticModel(draft, _caption()),
+            settings=Settings.from_root(tmp_path),
+            request=_unit_request(
+                tmp_path,
+                brief="brief de tolerancia en el manifiesto",
+                assembler=_StubAssembler(),
+                render=RenderConfig(aspect_tolerance=tolerancia),
+            ),
+        )
+        return _json(Path(result.manifest_path))
+
+    estricto = _manifiesto(0.0001)
+    holgado = _manifiesto(0.05)
+
+    assert estricto["aspect_tolerance"] == pytest.approx(0.0001)
+    assert holgado["aspect_tolerance"] == pytest.approx(0.05)
+    assert estricto["contract_sha256"] == holgado["contract_sha256"], (
+        "si el digest difiere, este test ya no mide solo la tolerancia"
+    )
+    # Campos que varian entre CUALQUIER par de corridas y por tanto no dicen
+    # nada sobre la tolerancia: el reloj, el identificador de corrida y las
+    # rutas absolutas que arrastran los outputs.
+    volatiles = {"run_id", "started_at", "finished_at", "outputs", "assets"}
+    distintos = {
+        clave for clave in estricto if clave not in volatiles and estricto[clave] != holgado[clave]
+    }
+    assert distintos == {"aspect_tolerance", "gates"}, distintos
+
+
 def test_pipeline_blocks_duration_above_max(tmp_path: Path) -> None:
     _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
     draft = make_draft(

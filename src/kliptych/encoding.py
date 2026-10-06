@@ -74,11 +74,11 @@ def aspect_matches(
 
     Que sea UNA funcion y no dos copias es el punto. El reframe cuantiza a un
     entero par (`width = _even(round(height * 9/16))`), de modo que un alto de
-    1080 da 608x1080: 0,08 % por debajo de 9:16. Ninguna aritmetica de este
-    renderer puede emitir 9:16 exacto, porque `round(607.5)` no es 608 ni 606 de
-    forma exacta. Un gate que comparase a 1e-9 no estaria siendo mas riguroso,
-    estaria exigiendo un valor que el render es aritmeticamente incapaz de
-    producir, y rechazaria su propia salida.
+    1080 da 608x1080: 0,08 % por debajo de 9:16. La cuantizacion NO GARANTIZA
+    un 9:16 exacto, pero tampoco lo impide: `crop_size(1080, 1920)` da
+    `(1080, 1920)`, exacto, y tambien 720x1280 y 1152x2048. Un gate que
+    comparase a 1e-9 no estaria siendo mas riguroso en general, estaria
+    exigiendo un valor que el render produce a veces y no otras.
 
     Comparacion RELATIVA, no absoluta: `|aspect - objetivo| <= objetivo *
     tolerancia`. Importa, porque el criterio escala con el objetivo en lugar de

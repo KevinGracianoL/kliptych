@@ -917,10 +917,12 @@ def _run_command(args: argparse.Namespace) -> int:
             approve_manual_review=approve_manual_review,
             approved_by=approved_by,
             contract_draft=contract_draft,
-            # El gate de esta ruta se construye dentro del pipeline, asi que la
-            # config de render se declara aqui y viaja en la peticion. Sin esto
-            # el pipeline construiria su propio `RenderConfig()` y la CLI
-            # garantizaria una tolerancia distinta a la de la biblioteca.
+            # La CLI NO declara todavia la tolerancia: no hay bandera para
+            # cambiarla, asi que esto equivale al default de la clase y el
+            # pipeline haria lo mismo con `render=None`. Se pone de forma
+            # explicita para que el punto de entrada sea visible como UNO de los
+            # dos, y no para insinuar que la CLI puede elegir la geometria.
+            # Cuando exista la bandera, este es el sitio.
             render=RenderConfig(),
         )
         result = run_given_clips(model=model, settings=settings, request=request)

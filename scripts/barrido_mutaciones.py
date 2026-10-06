@@ -69,6 +69,16 @@ MUTACIONES: tuple[Mutacion, ...] = (
         tests=("tests/test_gate_declared_aspect.py", "tests/test_zero_contract.py"),
     ),
     Mutacion(
+        nombre="el lienzo emitido ignora la declaracion y usa el default",
+        archivo="src/kliptych/pipeline.py",
+        viejo=(
+            "    aspecto = RenderConfig().target_aspect if declaracion is None"
+            " else declaracion.target_aspect"
+        ),
+        nuevo="    aspecto = RenderConfig().target_aspect",
+        tests=("tests/test_pipeline.py", "tests/test_gate_declared_aspect.py"),
+    ),
+    Mutacion(
         nombre="la tolerancia se lee del default y no de context.render",
         archivo="src/kliptych/gate/checks.py",
         viejo="return context.render.aspect_tolerance",
@@ -181,6 +191,30 @@ def correr(comando: list[str]) -> Resultado:
     return Resultado.NO_VERIFICADA
 
 
+def clasificar(resultado: Resultado) -> tuple[str, str]:
+    """Traduce el veredicto de UNA corrida al par (etiqueta, contador).
+
+    Esta funcion es la UNICA fuente de verdad de que `FALLA` sea muerte y `PASA`
+    supervivencia. Estaba embebida en el bucle de `main`, que nadie podia
+    ejercitar sin mutar el arbol entero: seis tests de rutas de error pasaban
+    aunque la clasificacion dijese que todo moria. Al separarla, la tabla se
+    puede fijar sin tocar un solo archivo.
+
+    Args:
+        resultado: Lo que devolvio `correr`.
+
+    Returns:
+        La etiqueta que se imprime y la clave del contador que se acumula.
+    """
+    if resultado is Resultado.FALLA:
+        return ("MUERTA", "muerta")
+    if resultado is Resultado.PASA:
+        return ("SUPERVIVIENTE", "superviviente")
+    if resultado is Resultado.NO_VERIFICADA:
+        return ("NO VERIFICADA", "no_verificada")
+    return ("ERROR", "error")
+
+
 def seleccionar(argumentos: list[str]) -> tuple[Mutacion, ...]:
     """Resuelve los nombres pedidos contra la lista, y falla si no existen.
 
@@ -203,17 +237,24 @@ def seleccionar(argumentos: list[str]) -> tuple[Mutacion, ...]:
     conocidos = {m.nombre for m in MUTACIONES}
     desconocidos = sorted(set(argumentos) - conocidos)
     if desconocidos:
-        raise SystemExit(
+        msg = (
             "ERROR: no existe(n) la(s) mutacion(es) "
             + ", ".join(repr(nombre) for nombre in desconocidos)
             + f". Conocidas: {len(conocidos)}."
         )
+        raise SystemExit(msg)
     pedido = set(argumentos)
     return tuple(m for m in MUTACIONES if m.nombre in pedido)
 
 
 def main() -> int:
     mutaciones = seleccionar(sys.argv[1:])
+    if not mutaciones:
+        # Una tabla vacia no es una corrida limpia: es una corrida que no probo
+        # nada. Antes imprimia `de 0` y salia con 0, que es la forma mas
+        # barata de reportar ausencia como exito.
+        msg = "ERROR: la tabla de mutaciones esta vacia; no hay nada que verificar"
+        raise SystemExit(msg)
     conteo = {"muerta": 0, "superviviente": 0, "no_verificada": 0, "error": 0}
     for mutacion in mutaciones:
         destino = RAIZ / mutacion.archivo
@@ -247,18 +288,13 @@ def main() -> int:
             _ = shutil.copy2(copia, destino)
             copia.unlink(missing_ok=True)
 
-        if resultado is Resultado.FALLA:
-            print(f"[MUERTA] {mutacion.nombre}")
-            conteo["muerta"] += 1
-        elif resultado is Resultado.PASA:
-            print(f"[SUPERVIVIENTE] {mutacion.nombre}")
-            conteo["superviviente"] += 1
-        elif resultado is Resultado.NO_VERIFICADA:
-            print(f"[NO VERIFICADA] {mutacion.nombre}: pytest salio con un codigo inesperado")
-            conteo["no_verificada"] += 1
-        else:
-            print(f"[ERROR] {mutacion.nombre}: pytest no llego a ejecutarse (fallo del arnes)")
-            conteo["error"] += 1
+        etiqueta, contador = clasificar(resultado)
+        detalle = {
+            "NO VERIFICADA": ": pytest salio con un codigo inesperado",
+            "ERROR": ": pytest no llego a ejecutarse (fallo del arnes)",
+        }.get(etiqueta, "")
+        print(f"[{etiqueta}] {mutacion.nombre}{detalle}")
+        conteo[contador] += 1
 
     print()
     resumen = (
@@ -267,10 +303,11 @@ def main() -> int:
         f"de {len(mutaciones)}"
     )
     print(resumen)
-    # Codigo de salida distinto de cero si algo quedo sin verificar. Una corrida
-    # con una fila NO VERIFICADA o ERROR no es una corrida limpia, y quien la
-    # lee desde CI tiene que poder notarlo sin leer el texto.
-    return 1 if (conteo["no_verificada"] or conteo["error"]) else 0
+    # Un SUPERVIVIENTE es un hallazgo sobre el CODIGO, no sobre la corrida, asi
+    # que tambien es codigo de salida distinto de cero: publicar una tabla donde
+    # algo sobrevivio como si fuera una corrida limpia es el mismo defecto que
+    # el "de 0" que este archivo ya no permite.
+    return 0 if conteo["muerta"] == len(mutaciones) else 1
 
 
 if __name__ == "__main__":

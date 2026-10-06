@@ -45,6 +45,16 @@ class RunManifest(_ManifestBase):
     caption_prompt_version: str | None = None
     whisper_version: str | None = None
     ffmpeg_version: str | None = None
+    # La geometria con la que se JUZGO el artefacto. Sin estos dos campos el
+    # veredicto de `artifact.aspect` no es reconstruible desde el registro: dos
+    # corridas con el mismo `contract_sha256` y el mismo artefacto pueden dar
+    # veredictos distintos y producir manifiestos indistinguibles. El manifiesto
+    # se documenta como "registro reproducible de una corrida completa", y un
+    # veredicto que no se puede reproducir desde el registro no es un registro.
+    # No va en `contract_digest` porque no es un campo del contrato: es estado de
+    # la invocacion, como el resto de `RenderConfig`.
+    target_aspect: float | None = Field(default=None, gt=0)
+    aspect_tolerance: float | None = Field(default=None, ge=0)
     environment: EnvironmentReport
     assets: tuple[AssetRef, ...] = ()
     outputs: tuple[OutputHash, ...] = ()

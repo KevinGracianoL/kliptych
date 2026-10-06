@@ -326,13 +326,21 @@ def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> Gate
     podido verificar: por eso esto es un ENDURECIMIENTO deliberado MAS ALLA de
     §5.1, y no una transcripcion de ella.
 
-    El motivo real es que `PENDING_REVIEW` es una SALIDA. `_is_piece_exportable`
-    deja exportar una pieza en `PENDING_REVIEW` si todos sus checks estan en PASS o
-    MANUAL_REVIEW y hay firma de aprobacion. Una firma es una atestacion de una
-    persona, y una persona no puede atestiguar una geometria que no se midio: no
-    hay imagen que mirar ni medida que discutir. Degradar un UNSUPPORTED a
-    revision manual convertia "no verificable por nadie" en un estado firmable, que
-    es exactamente lo que un gate fail-closed no debe ofrecer.
+    Que `PENDING_REVIEW` sea una SALIDA es el motivo real, y por eso la
+    distincion se hace sobre el ESTADO y no sobre la fuerza: una firma es una
+    atestacion de una persona, y una persona no puede atestiguar una geometria
+    que no se midio. Degradar un `UNSUPPORTED` a revision manual convertia "no
+    verificable por nadie" en un estado firmable.
+
+    ALCANCE DE ESTA AFIRMACION, porque es facil leerla como mas de lo que es:
+    lo que este cambio cierra es la rama de `UNSUPPORTED`. La rama hermana de
+    `MANUAL_REVIEW` sigue siendo firmable: una regla clasificada `manual_review`
+    (o citada por el contrato) sin validador registrado produce `MANUAL_REVIEW`,
+    y de ahi `PENDING_REVIEW` sale con firma. Medido con `link.in_bio`, que no
+    tiene validador: la pieza se exporta bajo firma. Eso es preexistente en
+    `main` y NO lo arregla este cambio; esta en #85. Decir "nada no medido es
+    firmable" seria falso, y por eso el texto dice que el punto 2 es el que se
+    corrigio y no el 3.
 
     Por eso la fuerza NO se consulta aqui, y conviene entenderlo antes de tocarlo.
     La fuerza decide si una regla MALA bloquea o abre revision manual: por eso el
