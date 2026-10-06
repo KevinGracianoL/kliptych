@@ -103,7 +103,9 @@ class _RecordingManager:
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome:
+        _ = output_format
         _ = (mode, url, resume, approve_manual_review, approved_by)
         _ = (audio_track_path, audio_track_url)
         self.calls += 1

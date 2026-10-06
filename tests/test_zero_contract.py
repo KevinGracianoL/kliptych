@@ -580,9 +580,11 @@ class _CapturingManager:
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome:
         _ = (mode, url, resume, approve_manual_review, approved_by)
         _ = (audio_track_path, audio_track_url)
+        self.kwargs["output_format"] = output_format
         self.campaign = campaign
         return CampaignOutcome(
             campaign_id=campaign.campaign_id,

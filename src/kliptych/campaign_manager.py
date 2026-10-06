@@ -197,6 +197,7 @@ class CampaignManager:
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome:
         """Procesa la campaña según su arquetipo.
 
@@ -223,6 +224,10 @@ class CampaignManager:
             approved_by: Identificador del operador o sistema que aprueba la revisión manual.
             audio_track_path: Pista de audio local para el modo ``audio_locked``.
             audio_track_url: URL de la pista de audio para el modo ``audio_locked``.
+            output_format: Etiqueta del formato de salida (``"9:16"``,
+                ``"16:9"``) que entra en el ``piece_id`` para que dos formatos
+                del mismo span no colisionen en el paquete. ``None`` cuando hay
+                una sola salida.
 
         Returns:
             El resultado del procesamiento con su arquetipo, estado y artefactos.
@@ -284,6 +289,7 @@ class CampaignManager:
             approved_by=approved_by,
             audio_track_path=audio_track_path,
             audio_track_url=audio_track_url,
+            output_format=output_format,
         )
 
     def _process_known(
@@ -304,6 +310,7 @@ class CampaignManager:
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome:
         try:
             outcome = self._render_known(
@@ -322,6 +329,7 @@ class CampaignManager:
                 approved_by=approved_by,
                 audio_track_path=audio_track_path,
                 audio_track_url=audio_track_url,
+                output_format=output_format,
             )
         except Exception as error:
             return _error_outcome(
@@ -349,6 +357,7 @@ class CampaignManager:
         approved_by: str | None = None,
         audio_track_path: Path | None = None,
         audio_track_url: str | None = None,
+        output_format: str | None = None,
     ) -> CampaignOutcome:
         pipeline_result: PipelineResult | None = None
         slideshow_result: SlideshowResult | None = None
@@ -421,6 +430,7 @@ class CampaignManager:
                 _subtitle_sources(pipeline_result) if pipeline_result is not None else None
             ),
             assets=reg,
+            output_format=output_format,
         )
         delivery_report = export_delivery(
             contract=contract,
@@ -549,16 +559,69 @@ def _piece_caption(brief: str, rules: PlatformRules, caption: str | None) -> str
     return composed or (brief or "video")
 
 
-def _piece_id(
+def piece_id_for(
     campaign_id: str,
     platform: Platform,
     *,
     multiple_platforms: bool,
     index: int | None = None,
+    output_format: str | None = None,
 ) -> str:
+    """El identificador de una pieza, con su formato cuando hay varios.
+
+    El formato va DENTRO del id, no en el directorio: el exportador arma
+    `<campaign_id>/<platform>/<piece_id>.mp4` y dos formatos del mismo span
+    caerian en el mismo nombre. El exportador falla cerrado ante ids duplicados,
+    asi que omitir el sufijo no produce sobrescritura silenciosa: produce un
+    rechazo entero de la entrega.
+
+    Los cuatro casos que tienen que caber en 64, medidos con campaign_id de 41
+    ("campana_de_verano_del_mayor_2026_lookbook") y sufijo `-16x9`:
+
+        una plataforma, una salida    46
+        una plataforma, dos salidas   49
+        dos plataformas, una salida   53
+        dos plataformas, dos salidas  56
+
+    Los cuatro caben, con 8 caracteres de holgura en el peor caso.
+
+    Cuando NO cabe NO se trunca. Un id truncado puede colapsar dos piezas
+    distintas en un mismo nombre y el corte seria invisible: el paquete se
+    publicaria con menos archivos de los que se produjeron y el error apareceria
+    mas tarde, en el receptor. Se falla aqui, con el nombre completo en el
+    mensaje, que es la unica forma de que el operador sepa que recortar.
+
+    Args:
+        campaign_id: Identificador de la campaña.
+        platform: Plataforma de la pieza.
+        multiple_platforms: Si la campaña produce para más de una plataforma, en
+            cuyo caso la plataforma entra en el id.
+        index: Índice del video cuando hay varios, o `None` si hay uno solo.
+        output_format: Etiqueta del formato de salida, o `None` si no hay
+            varios que distinguir.
+
+    Returns:
+        El `piece_id`, que es ademas un segmento de ruta seguro.
+
+    Raises:
+        CampaignManagerError: Si el id completo excede la longitud maxima de un
+            segmento. No se trunca en silencio.
+    """
     base = f"{campaign_id}-{platform.value}" if multiple_platforms else campaign_id
-    raw = f"{base}-{index:02d}" if index is not None else base
-    return raw[:_MAX_PIECE_ID_LENGTH] if len(raw) > _MAX_PIECE_ID_LENGTH else raw
+    partes = [base]
+    if index is not None:
+        partes.append(f"{index:02d}")
+    if output_format is not None:
+        partes.append(output_format)
+    raw = "-".join(partes)
+    if len(raw) > _MAX_PIECE_ID_LENGTH:
+        msg = (
+            f"piece_id de {len(raw)} caracteres excede el maximo de "
+            f"{_MAX_PIECE_ID_LENGTH}: {raw!r}. Acorta el campaign_id o el "
+            f"formato; truncarlo colapsaria dos piezas distintas en un nombre"
+        )
+        raise CampaignManagerError(msg)
+    return raw
 
 
 def _subtitle_sources(result: PipelineResult) -> PieceSubtitleSources:
@@ -761,6 +824,7 @@ def _build_pieces(
     platform: Platform | None,
     subtitle_sources: PieceSubtitleSources | None = None,
     assets: AssetRegistry | None = None,
+    output_format: str | None = None,
 ) -> list[Piece]:
     from kliptych.gate.models import Piece
 
@@ -788,11 +852,12 @@ def _build_pieces(
             piece_tags = tuple(hashtags) if hashtags else tuple(plat_rules.required_hashtags)
             pieces.append(
                 Piece(
-                    piece_id=_piece_id(
+                    piece_id=piece_id_for(
                         campaign.campaign_id,
                         plat,
                         multiple_platforms=multiple_platforms,
                         index=index_for_id,
+                        output_format=output_format,
                     ),
                     platform=plat,
                     caption=piece_caption,
