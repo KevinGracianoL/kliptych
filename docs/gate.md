@@ -4,18 +4,31 @@
 
 `_derive_status` (`src/kliptych/gate/engine.py`) maps **any** measured
 `CheckOutcome.FAIL` to `GateStatus.REJECTED` — regardless of whether the rule
-was classified `hard`, `recommended`, or `manual_review`. A second barrier
-lives in the exporter (`src/kliptych/exporter.py`): `_is_piece_exportable`
-refuses every piece except `PASSED`, or `PENDING_REVIEW` with explicit manual
-approval **and** zero `FAIL` checks. Batch export is all-or-nothing atomic
-(staging directory + atomic rename in `_publish`); a rejected piece aborts
-the whole delivery, never a partial shipment.
+was classified `hard`, `recommended`, or `manual_review`. It also maps **any**
+`CheckOutcome.UNSUPPORTED` to `GateStatus.UNSUPPORTED`, again regardless of
+strength: an unmeasurable rule blocks at every strength, because it produced no
+verdict to judge. A second barrier lives in the exporter
+(`src/kliptych/exporter.py`): `_is_piece_exportable` refuses every piece except
+`PASSED`, or `PENDING_REVIEW` with explicit manual approval **and** zero `FAIL`
+checks. Batch export is all-or-nothing atomic (staging directory + atomic rename
+in `_publish`); a rejected piece aborts the whole delivery, never a partial
+shipment.
+
+`PENDING_REVIEW` is an exit and `UNSUPPORTED` is not, and the difference is the
+point. `PENDING_REVIEW` means a rule a *human can judge* — the check ran and its
+answer needs a person, so a signature resolves it. `UNSUPPORTED` means nobody
+measured it: there is no frame to look at and no number to dispute, so a
+signature would be attesting to a geometry that was never observed. Degrading an
+`UNSUPPORTED` rule to manual review would make "unverifiable by machine or human"
+a signable state. That is why strength is not consulted for `UNSUPPORTED`, and it
+is a deliberate hardening **beyond** the brief: `docs/brief_v2.md` §5.1 scopes
+its "jamás PASS" clause to `hard` rules, and this code no longer stops there.
 
 The validator catalog is mechanical and closed (`KNOWN_VALIDATOR_RULES`,
-17 rule ids). Declared rules without a registered validator never pass
+19 rule ids). Declared rules without a registered validator never pass
 silently: they resolve to `MANUAL_REVIEW` when the contract classified them
-so or cited them, otherwise `UNSUPPORTED` — and `UNSUPPORTED` on a `hard`
-rule blocks the piece. Requirements with no mechanical validator at all are
+so or cited them, otherwise `UNSUPPORTED` — which blocks the piece at every rule
+strength. Requirements with no mechanical validator at all are
 declared explicitly as `contract.unmapped[]` (`rule` + verbatim `quote`); the
 engine emits one aggregate `rules.unmapped` check carrying every citation,
 `MANUAL_REVIEW` by default, `FAIL` when an unmapped id collides with a known

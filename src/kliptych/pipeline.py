@@ -16,7 +16,7 @@ from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kliptych.assembler import FFmpegAssembler, RenderSpec
+from kliptych.assembler import FFmpegAssembler, RenderSpec, canvas_size
 from kliptych.assets import AssetNotFoundError, AssetRegistry
 from kliptych.config import Settings
 from kliptych.contract import (
@@ -30,6 +30,7 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
+from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
 from kliptych.gate import Gate, GateResult, Piece, SubtitleSegment
@@ -66,6 +67,11 @@ from kliptych.subtitle_text import (
 )
 
 _VIDEO_KIND = "video"
+# Lado largo del lienzo de `given_clips`. El lado corto sale de
+# `canvas_size` a partir del `target_aspect` de la corrida; con el 9:16 por
+# defecto esto da 1080x1920, que es el lienzo que emitia el ensamblador cuando
+# el ancho era una constante de modulo.
+_CANVAS_LONG_SIDE = 1920
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 
@@ -131,6 +137,18 @@ class RunRequest:
     contract_draft: ContractDraft | None = None
     subtitle_texts: Mapping[str, str] | None = None
     subtitle_segments: Mapping[str, Sequence[SubtitleSegment]] | None = None
+    # Config de render EFECTIVA de esta corrida. El gate mide el aspecto con su
+    # `aspect_tolerance`, asi que tiene que ser la que el render uso de verdad y
+    # no una construida aqui: leer un default donde va una declaracion es la
+    # forma exacta del bug de `outputs` por omision en un 1.1, y con dos puntos
+    # de entrada al pipeline producia dos geometrias de garantia distintas
+    # (la CLI la pasaba, la biblioteca no).
+    #
+    # `None` significa "nadie sobreescribio la tolerancia", y en ese caso vale
+    # `RenderConfig()`. Que hoy la ruta `given_clips` renderice siempre a 1080x1920
+    # y no lo note no es una razon para no declararlo: el dia que el reframe
+    # entre en esta ruta, el default seria una mentira silenciosa.
+    render: RenderConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +199,15 @@ def run_given_clips(
     except ProvenanceError as error:
         msg = f"error de procedencia en el contrato: {error}"
         raise PipelineError(msg) from error
-    gate = Gate(FFprobeProbe()) if request.gate is None else request.gate
+    # La config de render viaja desde `RunRequest`, no se construye aqui. Antes
+    # este sitio fabricaba `RenderConfig()`, que es el default de la clase: la
+    # CLI pasaba su config por otro camino y la biblioteca no, de modo que dos
+    # entradas al mismo pipeline garantizaban tolerancias distintas.
+    gate = (
+        Gate(FFprobeProbe(), render=RenderConfig() if request.render is None else request.render)
+        if request.gate is None
+        else request.gate
+    )
     if isinstance(model, ChatJsonModel) and hasattr(gate, "register_validator"):
         gate.register_validator(
             "brand.safety",
@@ -569,6 +595,26 @@ def _resolve_assemble_subtitles(
     return ass_path
 
 
+def _lienzo_de_la_corrida(context: _RunContext) -> tuple[int, int]:
+    """El lienzo que esta corrida EMITE, derivado de su declaracion.
+
+    Sin esto el lienzo eran constantes del ensamblador (1080x1920) mientras el
+    gate juzgaba con el `target_aspect` de la corrida: declaracion y producto
+    podian discrepar y el gate acababa midiendo una geometria que nadie pidio
+    producir. Una tolerancia que solo cambia el veredicto es una medida
+    desconectada de su objeto.
+
+    Args:
+        context: La corrida en curso.
+
+    Returns:
+        El par (ancho, alto) del lienzo a emitir.
+    """
+    declaracion = context.request.render
+    aspecto = RenderConfig().target_aspect if declaracion is None else declaracion.target_aspect
+    return canvas_size(_CANVAS_LONG_SIDE, target_aspect=aspecto)
+
+
 def _assemble_pieces(
     context: _RunContext,
     contract: Contract,
@@ -579,8 +625,8 @@ def _assemble_pieces(
     gates: list[GateResult] = []
     outputs: list[OutputHash] = []
     watermark = _watermark_path(contract, context.registry)
-    watermark_config = contract.watermark if watermark is not None else None
     mute_audio = contract_mutes_audio(contract)
+    lienzo = _lienzo_de_la_corrida(context)
     # given_clips no hace descarga quirúrgica: los clips llegan ya cortados y
     # la ventana del contrato ya está en coordenadas del clip (offset 0.0).
     lyric = _prepare_lyric_clip(context, contract, source_offset_sec=0.0)
@@ -594,7 +640,9 @@ def _assemble_pieces(
                 clip=clip,
                 destination=artifact,
                 watermark=watermark,
-                watermark_config=watermark_config,
+                watermark_config=contract.watermark if watermark is not None else None,
+                width=lienzo[0],
+                height=lienzo[1],
                 subtitles=_resolve_assemble_subtitles(context, contract, lyric, artifact),
                 mute_audio=mute_audio,
             )
@@ -780,6 +828,9 @@ def _write_manifest(
     delivery: DeliveryReport | None = None,
 ) -> Path:
     request = context.request
+    # La config de render EFECTIVA, no la de la clase: si `RunRequest.render` es
+    # `None` se aplicaron los defaults, y es eso mismo lo que hay que registrar.
+    render = RenderConfig() if request.render is None else request.render
     manually_approved_rules = delivery.manually_approved_rules if delivery is not None else ()
     approved_by = delivery.approved_by if delivery is not None else None
     approved_at_utc = delivery.approved_at_utc if delivery is not None else None
@@ -794,6 +845,8 @@ def _write_manifest(
         prompt_version=request.prompt_version,
         caption_prompt_version=request.caption_prompt_version,
         ffmpeg_version=request.environment.ffmpeg_version,
+        target_aspect=render.target_aspect,
+        aspect_tolerance=render.aspect_tolerance,
         environment=request.environment,
         assets=tuple(context.registry.assets.values()),
         outputs=tuple(outputs),

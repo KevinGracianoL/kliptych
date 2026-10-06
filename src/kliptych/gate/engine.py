@@ -7,6 +7,7 @@ from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
 from kliptych.contract.enums import AudioRule
 from kliptych.contract.schema import PlatformRules, canonical_rule_id
+from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
     CheckResult,
@@ -87,14 +88,21 @@ class Gate:
         probe: MediaProbe,
         *,
         validators: Mapping[str, Validator] | None = None,
+        render: RenderConfig | None = None,
     ) -> None:
-        """Configura el probe y el catálogo de validadores.
+        """Configura el probe, el catálogo de validadores y la config de render.
 
         Args:
             probe: Inspección de medios del artefacto.
             validators: Catálogo rule_id -> validador; por defecto el base.
+            render: Config de render EFECTIVA de la corrida. El gate mide el
+                aspecto contra la tolerancia que el render usó, así que tiene que
+                ser la de esa corrida y no un default. Por omisión se usa
+                `RenderConfig()`, que es lo correcto solo cuando nadie
+                sobreescribió la tolerancia.
         """
         self._probe: MediaProbe = probe
+        self._render: RenderConfig = RenderConfig() if render is None else render
         self._validators: dict[str, Validator] = dict(
             DEFAULT_VALIDATORS if validators is None else validators
         )
@@ -155,6 +163,7 @@ class Gate:
             artifact_sha256=artifact_sha256,
             media=media,
             assets=assets,
+            render=self._render,
         )
         outcomes: list[tuple[RuleStrength, CheckResult]] = []
         for strength, rule_ids in (
@@ -175,9 +184,10 @@ class Gate:
                     # que la pida. El contrato es incoherente, y una declaracion
                     # incoherente NO se inventa: se despacha. Omitirla en
                     # silencio seria un fail-open, y sustituirla por un
-                    # UNSUPPORTED fijo tambien: `_derive_status` solo escala
-                    # UNSUPPORTED cuando la fuerza es `hard`, asi que una regla
-                    # recommended huerfana pasaria de `rejected` a `passed`.
+                    # UNSUPPORTED fijo tambien lo seria: `_derive_status` escala
+                    # UNSUPPORTED con independencia de la fuerza, asi que una
+                    # regla recommended huerfana pasaria de `passed` a
+                    # `unsupported`, que es lo que corresponde.
                     #
                     # OJO: no hay un unico "igual que base", depende de la FORMA
                     # de la regla. Sin validador (audio.no_trending,
@@ -295,11 +305,58 @@ def rule_applies_anywhere(rule_id: str, contract: Contract) -> bool:
 
 
 def _derive_status(outcomes: Sequence[tuple[RuleStrength, CheckResult]]) -> GateStatus:
+    """Deriva el estado global del gate desde los checks y sus fuerzas.
+
+    El orden de escalado es deliberado y no se reordena:
+
+    1. Cualquier ``FAIL`` -> ``REJECTED``, sea cual sea la fuerza. Un artefacto
+       medido y malo se rechaza, y da igual que la regla fuera obligatoria o
+       recomendada.
+    2. Cualquier ``UNSUPPORTED`` -> ``UNSUPPORTED``, **tambien con independencia
+       de la fuerza**.
+    3. Cualquier ``MANUAL_REVIEW`` (por fuerza o por estado) -> ``PENDING_REVIEW``.
+    4. En otro caso -> ``PASSED``.
+
+    El punto 2 es el que se corrigio, y conviene decir con exactitud por que,
+    porque el motivo NO es que el brief lo imponga. El brief (docs/brief_v2.md
+    §5.1) dice: "Si no hay validador para una regla DURA, el resultado es
+    UNSUPPORTED o MANUAL_REVIEW, jamas PASS". La clausula "jamás PASS" esta
+    acotada a las reglas duras. Antes de este cambio el codigo cumplia esa norma
+    al pie de la letra, y aun asi dejaba pasar un artefacto que nadie habia
+    podido verificar: por eso esto es un ENDURECIMIENTO deliberado MAS ALLA de
+    §5.1, y no una transcripcion de ella.
+
+    Que `PENDING_REVIEW` sea una SALIDA es el motivo real, y por eso la
+    distincion se hace sobre el ESTADO y no sobre la fuerza: una firma es una
+    atestacion de una persona, y una persona no puede atestiguar una geometria
+    que no se midio. Degradar un `UNSUPPORTED` a revision manual convertia "no
+    verificable por nadie" en un estado firmable.
+
+    ALCANCE DE ESTA AFIRMACION, porque es facil leerla como mas de lo que es:
+    lo que este cambio cierra es la rama de `UNSUPPORTED`. La rama hermana de
+    `MANUAL_REVIEW` sigue siendo firmable: una regla clasificada `manual_review`
+    (o citada por el contrato) sin validador registrado produce `MANUAL_REVIEW`,
+    y de ahi `PENDING_REVIEW` sale con firma. Medido con `link.in_bio`, que no
+    tiene validador: la pieza se exporta bajo firma. Eso es preexistente en
+    `main` y NO lo arregla este cambio; esta en #85. Decir "nada no medido es
+    firmable" seria falso, y por eso el texto dice que el punto 2 es el que se
+    corrigio y no el 3.
+
+    Por eso la fuerza NO se consulta aqui, y conviene entenderlo antes de tocarlo.
+    La fuerza decide si una regla MALA bloquea o abre revision manual: por eso el
+    punto 3 la mira. Un UNSUPPORTED no dice que el artefacto este mal, dice que no
+    se pudo mirar, y ahi no hay nada que el operador pueda revisar a mano.
+
+    Args:
+        outcomes: Pares de (fuerza, resultado) de cada check despachado.
+
+    Returns:
+        El estado global del gate.
+    """
     checks = [check for _, check in outcomes]
     if any(check.status is CheckStatus.FAIL for check in checks):
         return GateStatus.REJECTED
-    hard = [check for strength, check in outcomes if strength is RuleStrength.HARD]
-    if any(check.status is CheckStatus.UNSUPPORTED for check in hard):
+    if any(check.status is CheckStatus.UNSUPPORTED for check in checks):
         return GateStatus.UNSUPPORTED
     if any(
         strength is RuleStrength.MANUAL_REVIEW or check.status is CheckStatus.MANUAL_REVIEW

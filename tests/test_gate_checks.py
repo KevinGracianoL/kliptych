@@ -434,8 +434,10 @@ def test_audio_rule_no_trending_is_not_a_pass(tmp_path: Path) -> None:
     """``no_trending`` no se verifica: el gate no puede emitir PASS.
 
     Este check solo sabe mirar si existe un stream de audio. Eso no dice que
-    el audio no sea trending, que es lo que la regla exige. Brief §5.1: sin
-    validador aplicable, nunca PASS.
+    el audio no sea trending, que es lo que la regla exige. Brief §5.1 (acotado
+    a reglas duras): sin validador aplicable, nunca PASS. `no_trending` no es
+    dura, y aun asi no puede pasar: es el mismo principio por el que un
+    artefacto que nadie pudo medir no se lee como conforme.
     """
     contract = make_contract(hard=["audio.present"], audio_rule="no_trending")
     media = make_media(has_audio=True)

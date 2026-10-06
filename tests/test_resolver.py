@@ -55,6 +55,7 @@ def test_full_draft_resolves_cleanly(tmp_path: Path) -> None:
     assert rules.required_hashtags == ["#marca"]
     assert rules.required_mentions == ["@marca"]
     assert set(contract.rules.hard) == {
+        "artifact.aspect",
         "artifact.integrity",
         "artifact.video_stream",
         "duration.min",
@@ -168,11 +169,44 @@ def test_conflicting_duration_goes_to_manual_review(tmp_path: Path) -> None:
     assert _issue_fields(result, IssueCode.CONFLICT) == ["platforms.tiktok.duration.min_s"]
 
 
+def test_artifact_aspect_is_forced_to_hard(tmp_path: Path) -> None:
+    """`artifact.aspect` se fuerza a `hard` por la convencion de `_base_rules`.
+
+    No es que `hard` sea necesario para la seguridad: con el arreglo del motor,
+    un UNSUPPORTED bloquea con cualquier fuerza. Es que una regla de geometria
+    que solo es segura por casualdad del motor es una regla que nadie quiere razonar
+    mas adelante. La intencion se declara aqui, no se deduce de como el motor
+    trate hoy un caso concreto.
+    """
+    draft = make_draft(
+        rules={
+            "recommended": {
+                "value": ["artifact.aspect"],
+                "evidence": {
+                    "quote": "cita del brief",
+                    "start": 0,
+                    "end": 15,
+                    "location": "brief.md#l1",
+                },
+                "confidence": "explicit",
+            }
+        }
+    )
+
+    result = resolve_contract(draft, registry=AssetRegistry(tmp_path))
+
+    assert result.contract is not None
+    assert "artifact.aspect" in result.contract.rules.hard
+    assert "artifact.aspect" not in result.contract.rules.recommended
+    assert "rules.artifact.aspect" in _issue_fields(result, IssueCode.RULE_DEFAULTED)
+
+
 def test_unclassified_restriction_defaults_to_hard(tmp_path: Path) -> None:
     result = resolve_contract(make_draft(rules=None), registry=AssetRegistry(tmp_path))
     assert result.status is ResolutionStatus.RESOLVED
     assert result.contract is not None
     assert set(result.contract.rules.hard) == {
+        "artifact.aspect",
         "artifact.integrity",
         "artifact.video_stream",
         "duration.min",

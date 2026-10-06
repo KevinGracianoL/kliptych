@@ -42,7 +42,10 @@ def _private(name: str) -> object:
 
 
 _even = cast("Callable[[int], int]", _private("_even"))
-_crop_size = cast("Callable[[int, int], tuple[int, int]]", _private("_crop_size"))
+# `crop_size` paso a ser publica en #82: el gate necesita verificar la geometria
+# que el reframe EMITE, y su test usa estas dimensiones reales en vez de unas
+# inventadas. Se importa por su nombre y no por getattr.
+_crop_size = reframe.crop_size
 _primary_face = cast(
     "Callable[[Sequence[FaceBox], float], FaceBox | None]", _private("_primary_face")
 )

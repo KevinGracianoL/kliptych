@@ -345,15 +345,90 @@ def test_geometry_fails_on_square_canvas(tmp_path: Path) -> None:
 
 
 def test_geometry_fails_without_video(tmp_path: Path) -> None:
+    """Sin pista de video es FAIL, porque ffprobe RESPONDIO.
+
+    Es una medicion, no una ausencia de medicion: el probe abrio el archivo y
+    informo de que no hay pista de video. Por eso este caso sigue siendo FAIL, y
+    solo "sin probe" o "sin dimensiones" son UNSUPPORTED. Es lo mismo que hacen
+    `artifact.video_stream` y `audio.present`; devolver UNSUPPORTED aqui dejaba
+    el mismo `gate.json` con dos diagnosticos contradictorios para el mismo
+    artefacto.
+    """
     video = _file(tmp_path, "dummy.mp4")
     outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, has_video=False))
+
     assert outcome.status is CheckStatus.FAIL
+    assert "pista de video" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+    assert outcome.evidence["has_video"] is False
 
 
-def test_geometry_fails_without_probe(tmp_path: Path) -> None:
+def test_geometry_unsupported_without_probe(tmp_path: Path) -> None:
+    """Sin probe no hay medicion: UNSUPPORTED, no FAIL.
+
+    Aqui si se cumple la distincion: ffprobe no devolvio nada, asi que el gate no
+    sabe nada del artefacto y no puede afirmar que este mal. Decirlo "rejected"
+    mandaba al operador a depurar lo que no estaba roto. La evidencia tiene que
+    traer el motivo Y el aspecto declarado, para que un cambio de estado con la
+    evidencia vacia no pueda pasar.
+    """
     video = _file(tmp_path, "dummy.mp4")
     outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, with_probe=False))
+
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "inspeccionar" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+
+
+def test_geometry_unsupported_on_zero_height(tmp_path: Path) -> None:
+    """`height == 0` es no medible, no una division por cero sin capturar.
+
+    `MediaInfo` no declara cota, asi que el cero llega desde ffprobe. Dividir ahi
+    es un `ZeroDivisionError` que ni pydantic ni el gate envuelven: el gate
+    revienta en vez de devolver un veredicto. El camino entero tiene que ser
+    fail-closed, tambien en el aritmetico.
+    """
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(_geometry_context(tmp_path, video, width=1080, height=0))
+
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "dimensiones" in str(outcome.evidence["reason"])
+
+
+def test_geometry_still_fails_on_measured_mismatch(tmp_path: Path) -> None:
+    """El complemento: SI se pudo medir y no cuadra, sigue siendo FAIL.
+
+    Es la mitad que hace que lo anterior sea una distincion y no una fusion. Si
+    las dos ramas dieran el mismo veredicto, un artefacto con la geometria
+    equivocada se reportaria como "no se pudo verificar", que es mentira: se
+    verifico y salio mal. Por eso este test exige FAIL y no "no PASS".
+    """
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=720, height=1280)
+    )
+
     assert outcome.status is CheckStatus.FAIL
+    assert "dimensiones" in str(outcome.evidence["reason"])
+    assert outcome.evidence["declared_aspect"] == "9:16"
+
+
+def test_geometry_still_fails_on_measured_square_canvas(tmp_path: Path) -> None:
+    """El complemento para un lienzo que SI se pudo medir y no cuadra.
+
+    1080x1080 es un artefacto REAL que ffprobe si midio: lo que falla es que sus
+    dimensiones no son las del lienzo declarado. Debe ser FAIL, no
+    UNSUPPORTED, porque "no se pudo verificar" seria falso aqui.
+    """
+    video = _file(tmp_path, "dummy.mp4")
+    outcome = check_split_screen_geometry(
+        _geometry_context(tmp_path, video, width=1080, height=1080)
+    )
+
+    assert outcome.status is CheckStatus.FAIL
+    assert outcome.evidence["declared_aspect"] == "9:16"
+    assert outcome.evidence["width"] == 1080
+    assert outcome.evidence["height"] == 1080
 
 
 def test_geometry_fails_without_config(tmp_path: Path) -> None:

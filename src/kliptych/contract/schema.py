@@ -194,12 +194,11 @@ class SplitScreenConfig(ContractBase):
     # 9:16 y ningun contrato podia declarar otra cosa. El default sigue siendo
     # VERTICAL, de modo que un contrato que no dice nada se comporta EXACTAMENTE
     # como antes.
-    # OJO: el gate todavia valida este lienzo contra SU PROPIA constante de 9:16
-    # (`gate/checks.py`), asi que un lienzo no vertical construye aqui pero lo
-    # rechaza el gate con un mensaje que nombra un aspecto que el contrato no
-    # declaro. Es el orden de la escalera: PR 1 declara y PR 2 mueve la
-    # constante del gate. No es alcanzable desde la CLI todavia, porque el draft
-    # no expone `aspect`.
+    # El gate valida este lienzo contra el ASPECTO DECLARADO AQUI
+    # (`gate/checks.py:check_split_screen_geometry`), no contra una constante de
+    # modulo, asi que un lienzo 16:9 con un artefacto 16:9 pasa. No es alcanzable
+    # desde la CLI: el draft no expone `aspect`, asi que todo contrato resuelto
+    # llega con VERTICAL.
     aspect: Aspect = Aspect.VERTICAL
 
     @field_validator("top_source", "bottom_source")
@@ -416,6 +415,20 @@ class UnmappedRule(ContractBase):
 
 KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
     {
+        # Este catalogo de rule_ids vive en el modulo de contrato, y no en el
+        # gate, por una dependencia que conviene no romper: `unmapped` rechaza
+        # como colision una regla que este名录ada aqui, asi que el contrato
+        # necesita conocer el catalogo para validar su propia documentacion. Si
+        # se mueve al gate, el contrato deja de poder validar ese caso y la
+        # colision pasa por alto.
+        #
+        # `artifact.aspect` verifica que el artefacto satisface alguna de las
+        # salidas que el contrato declara. Llega junto a `outputs` en el
+        # esquema 1.2. Un documento 1.1 no declara la regla porque no declaro
+        # salidas, pero el gate si lo mide igual: su conjunto efectivo es la
+        # entrada vertical por defecto, y para un conjunto de un elemento
+        # "pertenece a sus salidas" y "es 9:16" son la misma pregunta.
+        "artifact.aspect",
         "artifact.integrity",
         "artifact.video_stream",
         "assets.required",
@@ -740,7 +753,25 @@ _VOLATILE_RESOLUTION_FIELDS: dict[str, dict[str, dict[str, set[str]]]] = {
 }
 
 
+# Las reglas que el modo zero-contract declara sin brief. Cada una esta por una
+# razon concreta, y borrarla cuesta un fallo silencioso:
+#
+# - `artifact.integrity`: sin esta, `_derive_status` devuelve PASSED sobre cero
+#   checks y el gate aprueba en vacio una pieza que no existe.
+# - `artifact.video_stream`: para probar que el MP4 TIENE video. Sin ella, un
+#   contenedor sin pista de video pasaria.
+# - `artifact.aspect`: el modo zero-contract declara `outputs` = un 9:16 (el
+#   default de `_DEFAULT_OUTPUTS`, sin brief que diga otra cosa), asi que su
+#   salida DEBERIA ser vertical y el artefacto tiene que medir como tal.
+#   No esta aqui porque el render emita 1080x1920: no lo emite. El reframe
+#   cuantiza a entero par, asi que 1920x1080 -> 608x1080 (0,08 % de 9:16) y
+#   1280x720 -> 404x720 (0,25 %). Por eso el gate verifica con
+#   `encoding.aspect_matches` y la tolerancia de la corrida, no con una
+#   comparacion exacta.
+#   Y no es redundante con `artifact.video_stream`: aquella prueba que HAY video,
+#   esta que tiene la geometria que el contrato declaro.
 _ZERO_CONTRACT_AV_RULES = (
+    "artifact.aspect",
     "artifact.integrity",
     "artifact.video_stream",
 )

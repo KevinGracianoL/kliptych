@@ -10,7 +10,10 @@ approval sealed into the delivery record.
 
 `_derive_status` maps **any** measured `CheckOutcome.FAIL` to
 `GateStatus.REJECTED` — regardless of whether the rule was classified `hard`,
-`recommended`, or `manual_review`. A second barrier lives in the exporter:
+`recommended`, or `manual_review`. It also maps **any** `CheckOutcome.UNSUPPORTED`
+to `GateStatus.UNSUPPORTED` at every strength — `PENDING_REVIEW` is an exit for
+rules a human can judge, and an unmeasured rule produces no verdict to judge, so
+it must not become signable. A second barrier lives in the exporter:
 `_is_piece_exportable` refuses every piece except `PASSED`, or
 `PENDING_REVIEW` with explicit manual approval **and** zero `FAIL` checks.
 Batch export is all-or-nothing atomic (staging directory + atomic rename in
@@ -18,10 +21,10 @@ Batch export is all-or-nothing atomic (staging directory + atomic rename in
 shipment.
 
 The validator catalog is mechanical and closed (`KNOWN_VALIDATOR_RULES`,
-17 rule ids). Declared rules without a registered validator never pass
+19 rule ids). Declared rules without a registered validator never pass
 silently: they resolve to `MANUAL_REVIEW` when the contract classified them
-so or cited them, otherwise `UNSUPPORTED` — and `UNSUPPORTED` on a `hard`
-rule blocks the piece. Requirements with no mechanical validator at all are
+so or cited them, otherwise `UNSUPPORTED` - which blocks the piece at every rule
+strength. Requirements with no mechanical validator at all are
 declared explicitly as `contract.unmapped[]` (`rule` + verbatim `quote`); the
 engine emits one aggregate `rules.unmapped` check carrying every citation,
 `MANUAL_REVIEW` by default, `FAIL` when an unmapped id collides with a known

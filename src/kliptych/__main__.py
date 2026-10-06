@@ -917,6 +917,13 @@ def _run_command(args: argparse.Namespace) -> int:
             approve_manual_review=approve_manual_review,
             approved_by=approved_by,
             contract_draft=contract_draft,
+            # La CLI NO declara todavia la tolerancia: no hay bandera para
+            # cambiarla, asi que esto equivale al default de la clase y el
+            # pipeline haria lo mismo con `render=None`. Se pone de forma
+            # explicita para que el punto de entrada sea visible como UNO de los
+            # dos, y no para insinuar que la CLI puede elegir la geometria.
+            # Cuando exista la bandera, este es el sitio.
+            render=RenderConfig(),
         )
         result = run_given_clips(model=model, settings=settings, request=request)
     except (IngestError, ModelError, PipelineError, AssembleError, ExportError) as error:
@@ -1015,10 +1022,12 @@ def _make_default_campaign_manager(
         backend = None
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
-    effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe())
+    render = RenderConfig()
+    # El gate mide el aspecto con la config de render de ESTA corrida, no con el
+    # default de la clase.
+    effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe(), render=render)
     effective_dest = destination if destination is not None else Path.cwd() / "delivery"
     effective_assets = assets if assets is not None else AssetRegistry(Path.cwd())
-    render = RenderConfig()
     work_dir = effective_dest.parent / f"{effective_dest.name}-work"
     segment_model = _ChatSegmentModel(backend) if backend is not None else None
     return CampaignManager(

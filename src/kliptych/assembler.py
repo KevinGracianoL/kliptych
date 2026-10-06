@@ -35,6 +35,43 @@ class AssembleError(Exception):
     """La pieza no se pudo ensamblar."""
 
 
+def canvas_size(long_side: int, *, target_aspect: float) -> tuple[int, int]:
+    """El lienzo que se emite para un lado largo y un aspecto objetivo dados.
+
+    El lado CORTO sale de `_even(round(long_side / target_aspect))`, con la misma
+    cuantizacion a entero par que usa `reframe.crop_size`, para que productor y
+    juez compartan la misma desviacion en vez de tener cada uno la suya. Con el
+    9:16 por defecto y lado largo 1920 da 1080x1920, que es lo que emitia el
+    ensamblador cuando el lienzo eran constantes de modulo. Medido con 16:9 da
+    1920x1080.
+
+    Que sea una funcion y no una constante es lo que hace que `RunRequest.render`
+    sea una DECLARACION de la corrida y no un adorno: si el aspecto objetivo lo
+    cambia la corrida, el lienzo lo sigue.
+
+    Args:
+        long_side: El lado largo del lienzo, en pixeles.
+        target_aspect: El aspecto objetivo de la corrida (ancho / alto).
+
+    Returns:
+        El par (ancho, alto) del lienzo, con el lado corto par y minimo 2.
+
+    Raises:
+        ValueError: Si `long_side` no es positivo o `target_aspect` no lo es.
+    """
+    if long_side <= 0:
+        msg = f"lado largo de lienzo invalido: {long_side}"
+        raise ValueError(msg)
+    if target_aspect <= 0:
+        msg = f"aspecto objetivo invalido: {target_aspect}"
+        raise ValueError(msg)
+    if target_aspect >= 1.0:
+        # Paisaje: el ancho es el lado largo y el alto se deriva.
+        return long_side, max(2, math.floor(round(long_side / target_aspect) / 2) * 2)
+    # Vertical: el alto es el lado largo y el ancho se deriva.
+    return max(2, math.floor(round(long_side * target_aspect) / 2) * 2), long_side
+
+
 @dataclass(frozen=True, slots=True)
 class RenderSpec:
     """Entradas inmutables de un render ``given_clips``.
@@ -46,6 +83,12 @@ class RenderSpec:
     ``bottom_clip`` (``clip`` se ignora pero se conserva por compatibilidad);
     el audio mezcla ambos paneles cuando los dos aportan pista, o conserva
     el único que la aporta (un panel con audio jamás queda silenciado).
+
+    ``width`` y ``height`` son el lienzo que se EMITE, y los calcula
+    `canvas_size` a partir del ``target_aspect`` de la corrida. El campo existe
+    porque el lienzo es una entrada del render, no una constante del
+    ensamblador: si el aspecto objetivo lo declarara la corrida, el lienzo tiene
+    que seguirlo o el gate mediria una geometria que nadie pidio producir.
     """
 
     clip: Path

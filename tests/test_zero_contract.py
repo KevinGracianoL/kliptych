@@ -35,7 +35,7 @@ from kliptych.contract.schema import GlobalRestrictions, active_restriction_rule
 from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS
 from kliptych.gate.engine import Gate
-from kliptych.gate.models import GateStatus
+from kliptych.gate.models import GateResult, GateStatus
 from kliptych.git_proposals import ProposalEngine, PullRequest
 from kliptych.hashing import brief_key
 from kliptych.intelligence import (
@@ -49,7 +49,7 @@ from tests.support import FakeProbe, make_media, make_piece
 if TYPE_CHECKING:
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
-_AV_HARD_RULES = ("artifact.integrity", "artifact.video_stream")
+_AV_HARD_RULES = ("artifact.aspect", "artifact.integrity", "artifact.video_stream")
 _LLM_ENV_VARS = ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
 
 
@@ -347,6 +347,77 @@ def test_gate_rejects_vanilla_contract_without_video_stream(tmp_path: Path) -> N
     gate = Gate(probe=FakeProbe(info=make_media(has_video=False)))
     result = gate.evaluate_piece(make_piece(artifact), contract=contract)
     assert result.status is GateStatus.REJECTED
+
+
+def test_zero_contract_declares_the_aspect_rule() -> None:
+    """`vanilla_contract` declara la geometria que su propio `outputs` afirma.
+
+    RED primero, y esta es la prueba de que hace falta. Sin `artifact.aspect` en
+    `_ZERO_CONTRACT_AV_RULES`, un contrato zero-contract declara `outputs` = 9:16
+    (por default del esquema) y no declara la regla que lo verifica: la
+    declaracion existe y nadie la comprueba. Un artefacto 16:9 pasaba con gate
+    `passed`.
+
+    Es la forma exacta de D1 (#76): una regla que falta donde deberia estar, y el
+    gate leyendo la ausencia como "no hay nada que comprobar". No es que el
+    artefacto fuera aceptado; es que nadie pregunto.
+    """
+    contract = vanilla_contract(campaign_id="abc123def456")
+
+    assert "artifact.aspect" in contract.rules.hard
+    assert contract.schema_version == "1.2"
+    assert [spec.aspect.value for spec in contract.outputs] == ["9:16"]
+
+
+def test_zero_contract_rejects_a_non_vertical_artifact(tmp_path: Path) -> None:
+    """El aspect que zero-contract declara tiene que VERIFICARSE.
+
+    El render NO emite 1080x1920: el reframe cuantiza a entero par, asi que
+    1920x1080 -> 608x1080. Da igual: `outputs` declara 9:16, asi que un 16:9 en
+    esta ruta es una corrida mal formada. Sin la regla, pasaba. Con ella, se
+    rechaza.
+    """
+    artifact = tmp_path / "final.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(width=1920, height=1080)))
+
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.REJECTED
+    assert _check_status(result, "artifact.aspect") == "fail"
+
+
+def test_zero_contract_accepts_the_vertical_artifact_it_renders(tmp_path: Path) -> None:
+    """La mitad positiva: anadir la regla no puede romper la ruta conforme.
+
+    Si esto fallara, la correccion habria roto el modo zero-contract entero en vez
+    de cerrar el agujero.
+    """
+    artifact = tmp_path / "final.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(width=1080, height=1920)))
+
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.PASSED
+    assert _check_status(result, "artifact.aspect") == "pass"
+
+
+def _check_status(result: GateResult, rule_id: str) -> str:
+    """El estado de un check concreto, por id.
+
+    Args:
+        result: Resultado del gate.
+        rule_id: Identificador de la regla buscada.
+
+    Returns:
+        El valor del estado del check.
+    """
+    matches = [check for check in result.checks if check.id == rule_id]
+    assert len(matches) == 1, f"{rule_id} no aparece en {[c.id for c in result.checks]}"
+    return matches[0].status.value
 
 
 def test_vanilla_contract_cannot_pass_without_an_artifact(tmp_path: Path) -> None:

@@ -60,7 +60,15 @@ from pathlib import Path
 from typing import assert_never
 
 from kliptych.assets import AssetError, AssetNotFoundError, AssetRegistry
-from kliptych.contract import AudioPolicy, AudioRule, Contract, Format, SplitScreenConfig
+from kliptych.contract import (
+    Aspect,
+    AudioPolicy,
+    AudioRule,
+    Contract,
+    Format,
+    SplitScreenConfig,
+)
+from kliptych.encoding import aspect_matches
 from kliptych.gate.brand_safety import check_brand_safety
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import (
@@ -92,6 +100,7 @@ __all__ = [
     "check_audio_present",
     "check_audio_silence",
     "check_brand_safety",
+    "check_declared_outputs",
     "check_duration_max",
     "check_duration_min",
     "check_first_line",
@@ -105,12 +114,14 @@ __all__ = [
     "check_video_stream",
     "check_watermark_full_video",
     "check_watermark_present",
+    "matches_declared_aspect",
 ]
 
 _SILENCE_THRESHOLD_DB = -80.0
-_SPLIT_ASPECT_W = 9
-_SPLIT_ASPECT_H = 16
 _VOLUMEDETECT_TIMEOUT_S = 60.0
+# Version del contrato que puede declarar `outputs`. Un 1.1 llego antes del
+# campo, asi que su `outputs` es el default y no una declaracion.
+_CONTRACT_WITH_OUTPUTS = "1.2"
 _FFPROBE_TIMEOUT_S = 30.0
 _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-inf|inf|-?\d+(?:\.\d+)?)\s*dB")
 _STDERR_TAIL = 500
@@ -127,16 +138,44 @@ def _fail(**evidence: object) -> CheckOutcome:
     return CheckOutcome(status=CheckStatus.FAIL, evidence=dict(evidence))
 
 
-def _unsupported(reason: str) -> CheckOutcome:
-    return CheckOutcome(status=CheckStatus.UNSUPPORTED, evidence={"reason": reason})
+def _unsupported(reason: str, **evidence: object) -> CheckOutcome:
+    """``unsupported`` con la evidencia que la rama tenga a mano.
+
+    Args:
+        reason: Por que no se pudo verificar, en castellano y en una frase.
+        **evidence: Lo que si se sabe: lo declarado, lo medido, lo que falto.
+
+    Returns:
+        El veredicto, con el motivo en `reason` y el resto junto a el.
+    """
+    return CheckOutcome(status=CheckStatus.UNSUPPORTED, evidence={"reason": reason, **evidence})
 
 
 def _unverifiable(audio_rule: AudioRule, missing_validator: str) -> CheckOutcome:
     """MANUAL_REVIEW para una regla que exige audio y aqui no se puede comprobar.
 
     La evidencia dice literalmente que no se verifico y que validador falta,
-    para que ``gate.json`` no se lea como una atestación de audio verificado
-    (brief §5.1: sin validador aplicable nunca PASS).
+    para que ``gate.json`` no se lea como una atestación de audio verificado.
+
+    El brief §5.1 lo dice para las reglas DURAS ("si no hay validador para una
+    regla dura, el resultado es UNSUPPORTED o MANUAL_REVIEW, jamás PASS"), y esta
+    función devuelve MANUAL_REVIEW, que cumple el enunciado del brief.
+
+    Lo que el brief NO cubre, y hay que decir aqui: esta función se alcanza con
+    CUALQUIER fuerza de la regla, no solo con `hard`. Nada en el motor consulta la
+    fuerza antes de despachar un validador, asi que `audio.present` como
+    `recommended` con `audio_rule` en {`official_required`, `no_trending`} llega
+    aqui igual. Medido en las tres fuerzas: el veredicto global es
+    `pending_review` en las tres.
+
+    Que bajar la regla no produzca un `PASS` NO depende de esta coercion. Dependia
+    de ella hasta que #82 endureciera `_derive_status`; hoy depende de que el
+    motor escale cualquier `MANUAL_REVIEW` con independencia de la fuerza, igual
+    que cualquier `UNSUPPORTED`. La coercion del resolver es INTENCION (esta
+    regla debe ser dura y estar en la lista corta), no el guard que lo impide,
+    que es el motor. La misma lectura aplica a `artifact.aspect` en
+    `resolver._base_rules`, y conviene no confundir las dos cosas al tocar
+    cualquiera de las puntas.
 
     Args:
         audio_rule: Regla de audio de la plataforma, sin verificar.
@@ -522,46 +561,202 @@ def check_split_screen_geometry(context: GateContext) -> CheckOutcome:
     """Verifica la geometría del lienzo split_screen contra el artefacto.
 
     El ``MediaInfo`` del contexto sale de la inspección con ffprobe del MP4
-    final: el gate nunca confía en los parámetros del render. Fail-closed:
-    sin configuración declarada, sin probe, sin pista de video o con
-    dimensiones distintas a las del contrato, el resultado es ``fail``.
+    final: el gate nunca confía en los parámetros del render.
+
+    El aspecto exigido sale del CONTRACTO, no de una constante de módulo: un
+    contrato que declara 16:9 se valida contra 16:9. Antes el gate comparaba
+    contra un 9 y un 16 de módulo, así que un contrato 16:9 no podía pasar ni
+    con un artefacto 16:9 perfecto, y el mensaje de FAIL culpaba al contrato de
+    algo que el contrato había dicho bien.
+
+    Fail-closed, y la frontera entre FAIL y UNSUPPORTED es si hubo MEDICIÓN:
+    - ``split_screen`` ausente -> FAIL: la falta está en el contrato, que es
+      legible.
+    - sin pista de video -> FAIL: ffprobe respondió y dijo que no hay video. Eso
+      es una medición, y el veredicto es FAIL, igual que en
+      ``artifact.video_stream`` y ``audio.present``.
+    - sin probe, o sin dimensiones utilizables -> UNSUPPORTED: lo que falta es
+      poder MIRAR el artefacto. Un artefacto que nadie pudo medir no se lee como
+      conforme, que es la misma regla que ya rige sobre las reglas sin validador
+      mecánico. El brief §5.1 lo dice para las reglas DURAS ("si no hay
+      validador para una regla dura, el resultado es UNSUPPORTED o
+      MANUAL_REVIEW, jamás PASS"); aquí no hay una regla dura en juego, sino un
+      artefacto que nadie pudo medir, y por eso es UNSUPPORTED igual: no hay
+      veredicto que revisar a mano.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS con las dimensiones y el aspecto 9:16 cuando el artefacto
-        coincide con el ``split_screen`` del contrato; FAIL en cerrado en
-        cualquier otro caso.
+        PASS con las dimensiones, el aspecto medido y el declarado cuando el
+        artefacto coincide con el ``split_screen`` del contrato; FAIL en cerrado
+        ante dimensiones distintas o ausencia de declaración; UNSUPPORTED ante
+        cualquier cosa que impida medir.
     """
     split = context.contract.split_screen
     if split is None:
         return _fail(reason="la regla 'layout.geometry' exige split_screen en el contrato")
+    declarado = split.aspect
+    evidencia: dict[str, object] = {"declared_aspect": declarado.value}
+    if context.contract.schema_version != _CONTRACT_WITH_OUTPUTS:
+        # Un documento 1.1 no declaro salidas: su `outputs` es el default, no una
+        # promesa. Verificar el artefacto contra el seria medir contra algo que
+        # nadie dijo, con la apariencia de estar obedeciendo el contrato.
+        evidencia["declared_by_version"] = context.contract.schema_version
+    else:
+        declarados = [spec.aspect.value for spec in context.contract.outputs]
+        evidencia["declared_aspects"] = declarados
     media = context.media
     if media is None:
-        return _fail(reason="no se pudo inspeccionar el artefacto; la geometría no es verificable")
+        return _unsupported(
+            "no se pudo inspeccionar el artefacto; la geometría no es verificable",
+            **evidencia,
+        )
     if not media.has_video:
-        return _fail(has_video=False, reason="el artefacto no tiene pista de video")
-    return _geometry_outcome(media, split)
+        return _fail(
+            has_video=False,
+            **evidencia,
+            reason="el artefacto no tiene pista de video",
+        )
+    return _geometry_outcome(media, split, evidencia, render_aspect_tolerance(context))
 
 
-def _geometry_outcome(media: MediaInfo, split: SplitScreenConfig) -> CheckOutcome:
+def render_aspect_tolerance(context: GateContext) -> float:
+    """La tolerancia de aspecto que el render USO en ESTA corrida.
+
+    Se lee de `context.render`, la config efectiva de la corrida. Antes se
+    construia un `RenderConfig()` nuevo aqui, lo cual devolvia el DEFAULT de la
+    clase: una corrida que renderizo con `aspect_tolerance=0.001` era juzgada por
+    el gate con 0.05. Es la misma forma que el `outputs` por defecto de un 1.1:
+    medir contra algo que nadie declaro.
+
+    Args:
+        context: Contexto de la corrida, que lleva la config efectiva.
+
+    Returns:
+        La tolerancia RELATIVA que el render uso.
+    """
+    return context.render.aspect_tolerance
+
+
+def check_declared_outputs(context: GateContext) -> CheckOutcome:
+    """Verifica que el artefacto SATISFA alguna de las salidas declaradas.
+
+    Es el otro lado de la declaración de PR 1, y va en su propio validador
+    porque su disparador es distinto al de `layout.geometry`: este corre
+    siempre que el contrato declare salidas, con o sin `split_screen`. Meterlo
+    en el validador del lienzo lo ataría a que el contrato traiga un lienzo, y
+    un contrato multi-formato no puede traerlo (limitación deliberada de PR 1),
+    así que la comprobación no existiría justo donde importa.
+
+    La regla es de pertenencia, no de igualdad: el artefacto tiene que
+    satisfacer AL MENOS una salida declarada. Satisfacer una sola no es
+    suficiente para decir que el artefacto es válido si el contrato prometió más
+    cosas; lo que se verifica aquí es que el artefacto no contradiga la
+    declaración.
+
+    NO hay exencion por version, y conviene decir por que. Un 1.1 no declaro
+    salidas, asi que no hay pertenencia que exigirle... pero su conjunto EFECTIVO
+    es exactamente una entrada vertical, porque asi lo define el schema. Para un
+    conjunto de un solo elemento, "pertenece a sus salidas" y "es 9:16" son la
+    misma pregunta, asi que la exencion no protegia nada: solo dejaba el
+    artefacto sin medir. El render de un 1.1 produce 9:16, de modo que un
+    artefacto 16:9 venia de una corrida mal formada y el gate no la podia
+    detectar. `declared_by_version` sigue en la evidencia, pero es un campo de
+    PROCEDENCIA, no una exencion: dice que el aspecto vino de un default de
+    version y no de una declaracion, para que el operador lo vea.
+
+    UNSUPPORTED, nunca PASS, cuando el aspecto del artefacto no se puede
+    medir: sin probe, o sin dimensiones utilizables. Un artefacto que nadie pudo
+    medir no se lee como conforme.
+
+    `has_video=False` NO es un caso de no medicion: ffprobe respondio y dijo que
+    no hay pista de video. Eso es una medicion, y el veredicto es FAIL, que es
+    lo que ya hacen `artifact.video_stream` y `audio.present`. Confundir las dos
+    cosas deja el mismo `gate.json` con dos diagnosticos contradictorios para el
+    mismo artefacto.
+
+    Args:
+        context: Contexto resuelto del gate.
+
+    Returns:
+        PASS con el aspecto medido y cuál salida satisface; FAIL si el medido no
+        está entre las declaradas; UNSUPPORTED si no se pudo medir.
+    """
+    contract = context.contract
+    declarados = tuple(spec.aspect for spec in contract.outputs)
+    evidencia: dict[str, object] = {
+        "declared_aspects": [aspecto.value for aspecto in declarados],
+        "contract_schema_version": contract.schema_version,
+    }
+    if contract.schema_version != _CONTRACT_WITH_OUTPUTS:
+        evidencia["declared_by_version"] = contract.schema_version
+    media = context.media
+    if media is None:
+        return _unsupported(
+            "no se pudo inspeccionar el artefacto; el aspecto no es medible",
+            **evidencia,
+        )
+    if not media.has_video:
+        return _fail(
+            has_video=False,
+            **evidencia,
+            reason="el artefacto no tiene pista de video",
+        )
+    width, height = media.width, media.height
+    if width is None or height is None or width <= 0 or height <= 0:
+        return _unsupported(
+            "ffprobe no reportó dimensiones utilizables del video; el aspecto no es medible",
+            **evidencia,
+        )
+    tolerancia = render_aspect_tolerance(context)
+    medido = _measured_aspect(width, height, tolerancia=tolerancia)
+    evidencia["measured_aspect"] = medido
+    evidencia["measured_ratio"] = round(width / height, 6)
+    if not _satisfies_declared_outputs(width, height, declarados, tolerancia=tolerancia):
+        return _fail(
+            width=width,
+            height=height,
+            **evidencia,
+            reason=(
+                f"el artefacto mide {width}x{height} (ratio {width / height:.6f}), "
+                f"que no es ninguna de las salidas declaradas "
+                f"({', '.join(a.value for a in declarados)})"
+            ),
+        )
+    evidencia["satisfied_by"] = medido
+    return _pass(width=width, height=height, **evidencia)
+
+
+def _geometry_outcome(
+    media: MediaInfo,
+    split: SplitScreenConfig,
+    evidencia: dict[str, object],
+    tolerancia: float,
+) -> CheckOutcome:
     """Compara las dimensiones del artefacto contra el split declarado.
 
     Args:
         media: Metadatos del artefacto inspeccionado con ffprobe.
         split: Geometría del lienzo declarado en el contrato.
+        evidencia: Lo ya recogido sobre la declaración, que se propaga al
+            veredicto para que el FAIL diga cuál era la exigencia.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
 
     Returns:
-        PASS con las dimensiones y el aspecto 9:16; FAIL en cerrado ante
-        dimensiones ausentes, distintas o fuera del aspecto exigido.
+        PASS con las dimensiones y el aspecto declarado; FAIL en cerrado ante
+        dimensiones ausentes o distintas; UNSUPPORTED si no hubo medición.
     """
     width, height = media.width, media.height
-    if width is None or height is None:
-        return _fail(
+    if width is None or height is None or width <= 0 or height <= 0:
+        # `height == 0` no es teorico del todo: `MediaInfo` no declara cota, y
+        # dividir por ahi es un ZeroDivisionError que pydantic y el gate no
+        # envuelven. Es no medible, no medido y malo, asi que es UNSUPPORTED.
+        return _unsupported(
+            "ffprobe no reportó dimensiones utilizables del video; el aspecto no es medible",
             expected_width=split.width,
             expected_height=split.height,
-            reason="ffprobe no reportó las dimensiones del video",
+            **evidencia,
         )
     if width != split.width or height != split.height:
         return _fail(
@@ -569,15 +764,133 @@ def _geometry_outcome(media: MediaInfo, split: SplitScreenConfig) -> CheckOutcom
             expected_height=split.height,
             width=width,
             height=height,
+            **evidencia,
             reason="las dimensiones del artefacto no coinciden con el split_screen",
         )
-    if width * _SPLIT_ASPECT_H != height * _SPLIT_ASPECT_W:
+    medido = _measured_aspect(width, height, tolerancia=tolerancia)
+    if not matches_declared_aspect(width, height, split.aspect, tolerancia=tolerancia):
         return _fail(
             width=width,
             height=height,
-            reason="el lienzo split_screen exige aspecto 9:16",
+            measured_aspect=medido,
+            **evidencia,
+            reason=(
+                f"el lienzo split_screen declara el aspecto {split.aspect.value} "
+                f"y el artefacto mide {medido}"
+            ),
         )
-    return _pass(width=width, height=height, aspect_ratio="9:16")
+    return _pass(
+        width=width,
+        height=height,
+        aspect_ratio=medido,
+        **evidencia,
+    )
+
+
+def matches_declared_aspect(
+    width: int,
+    height: int,
+    declarado: Aspect,
+    *,
+    tolerancia: float,
+) -> bool:
+    """Si el artefacto esta en el aspecto DECLARADO, segun el render.
+
+    La predicada es `encoding.aspect_matches`, la misma que usa `_needs_reframe`
+    para decidir si un video hay que reencuadrar. Se llama, no se copia: una
+    tolerancia escrita en dos sitios es el mismo defecto que la constante 9:16
+    que esta PR quita, y divergiria en silencio la primera vez que cambiase la
+    cuantizacion del reframe.
+
+    No es mas laxo por gusto. El reframe cuantiza a entero par
+    (`width = _even(round(height * 9/16))`), y `round` es half-to-even, asi que
+    un alto de 1080 da `round(607.5) = 608`, no 606 ni 607. Medido: 1920x1080 ->
+    608x1080 (0,08 % de 9,16), 1280x720 -> 404x720 (0,25 %), 1080x1900 ->
+    1068x1900 (0,07 %). Un 1e-9 no seria mas riguroso: exigiria un 9:16 exacto
+    que esa aritmetica no produce de forma general. Ojo que SI cae exacta a veces
+    (1080x1920, 1920x1088, 2560x1600), asi que "nunca puede" seria falso.
+
+    Por debajo de ~24 px de lado MENOR la cuantizacion al par se come el margen y el
+    artefacto sale de la banda: un 16x16 da 8x16, a un 11 %. Medido con la
+    predicada real sobre origenes 2..1200 x 2..1200: el lado menor mas grande
+    entre recortes rechazados es 20 px (`20x38`), y no hay ninguno con lado menor
+    >= 24. Ahi el rechazo del gate es CORRECTO y el defecto es del PRODUCTOR,
+    que deberia negarse a construir un recorte que su propio gate va a rechazar.
+    Se mide completo en el
+    issue del reframe; no se arregla aqui porque cambiar el productor es otro PR
+    con su propio recorrido end-to-end.
+
+    Args:
+        width: Ancho medido por ffprobe.
+        height: Alto medido por ffprobe.
+        declarado: El aspecto que el contrato declara.
+        tolerancia: Tolerancia RELATIVA que el render uso en ESTA corrida, leida
+            de `context.render`. Llega como argumento, y no se lee aqui de un
+            `RenderConfig()` nuevo, por el motivo que explica
+            `render_aspect_tolerance`.
+
+    Returns:
+        ``True`` si las dimensiones estan dentro de la tolerancia del render.
+    """
+    return aspect_matches(width, height, target_aspect=declarado.ratio, tolerance=tolerancia)
+
+
+def _measured_aspect(width: int, height: int, *, tolerancia: float) -> str:
+    """El aspecto que el artefacto MIDE, para dejarlo en la evidencia.
+
+    Se decide con la misma tolerancia del render, no con un epsilon propio: si el
+    gate reconociera "9:16" con un criterio mas estricto que el del render,
+    la evidencia y el veredicto contarian historias distintas sobre el mismo
+    artefacto. Cuando no es ninguno de los soportados se devuelve el par tal
+    cual, SIN reducir: `608x1080` es lo que se midio, y `152:270` seria una
+    segunda representacion del mismo numero.
+
+    Args:
+        width: Ancho medido por ffprobe.
+        height: Alto medido por ffprobe.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
+
+    Returns:
+        El valor del aspecto si el render lo reconoceria como uno soportado; si
+        no, ``f"{ancho}:{alto}"``.
+    """
+    for aspecto in Aspect:
+        if matches_declared_aspect(width, height, aspecto, tolerancia=tolerancia):
+            return aspecto.value
+    return f"{width}:{height}"
+
+
+def _satisfies_declared_outputs(
+    width: int,
+    height: int,
+    declarados: tuple[Aspect, ...],
+    *,
+    tolerancia: float,
+) -> bool:
+    """Si el artefacto satisface ALGUNA de las salidas declaradas.
+
+    Satisfacer una no basta: hay que satisfacer alguna. Sin esta comprobacion un
+    contrato que declara (9:16, 16:9) aceptaria cualquier artefacto, porque
+    siempre habria un formato declarado que "podria" ser el suyo.
+
+    La comparacion es sobre las DIMENSIONES, no sobre la etiqueta de
+    `_measured_aspect`: decidir con el string obligaria a que la tolerancia del
+    render se aplicase dos veces, y a que un artefacto se aceptase por la FORMA
+    de su etiqueta y no por su medida.
+
+    Args:
+        width: Ancho medido por ffprobe.
+        height: Alto medido por ffprobe.
+        declarados: Los aspectos que el contrato declara.
+        tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
+
+    Returns:
+        ``True`` si las dimensiones satisfacen alguna declaracion.
+    """
+    return any(
+        matches_declared_aspect(width, height, aspecto, tolerancia=tolerancia)
+        for aspecto in declarados
+    )
 
 
 def check_required_mentions(context: GateContext) -> CheckOutcome:
@@ -1290,6 +1603,7 @@ def check_required_assets(context: GateContext) -> CheckOutcome:
 
 
 DEFAULT_VALIDATORS: dict[str, Validator] = {
+    "artifact.aspect": check_declared_outputs,
     "artifact.integrity": check_artifact_integrity,
     "artifact.video_stream": check_video_stream,
     "assets.required": check_required_assets,

@@ -659,7 +659,43 @@ def _num(value: float) -> str:
     return f"{value:g}"
 
 
-def _crop_size(source_width: int, source_height: int) -> tuple[int, int]:
+def crop_size(source_width: int, source_height: int) -> tuple[int, int]:
+    """El tamaño del recorte 9:16 que el reframe emite para unas dimensiones dadas.
+
+    Es PUBLICA, y antes no lo era, por una razon concreta: el gate tiene que
+    verificar la geometria que el render produce, y su test necesita las
+    dimensiones reales en vez de unas inventadas. Exportar el calculo es mejor
+    que duplicar la formula en el test, que es como se cuelan las divergencias.
+
+    Y explica por que esta salida NO SIEMPRE es un 9:16 exacto: `_even` cuantiza a
+    entero par y `round` es half-to-even, asi que un alto de 1080 da
+    `round(607.5) = 608`. Medido: 1920x1080 -> 608x1080 (0,08 % de 9:16),
+    1280x720 -> 404x720 (0,25 %), 1080x1900 -> 1068x1900 (0,07 %). A veces SI cae exacto,
+    porque 9:16 tiene representacion entera par: 720x1280, 1080x1920,
+    1152x2048, y tambien 612x1088 y 900x1600 (desde origenes 1920x1088 y
+    2560x1600). Verificado con `crop_size` sobre cada uno de esos origenes.
+    Quien verifique un artefacto tiene que usar `encoding.aspect_matches`, con
+    la tolerancia del render de esa corrida, y no una comparacion exacta.
+
+    Y el otro extremo: en origenes pequenos la cuantizacion al par se come el
+    margen y el recorte sale de la banda (16x16 -> 8x16, a un 11 %). Ahi el
+    artefacto es basura y el rechazo de quien lo verifique es correcto; lo que
+    falla es que esta funcion la produzca. Medido con la predicada del gate: el
+    lado menor mas grande entre recortes rechazados es 20 px (`20x38`), y sobre
+    origenes 2..1200 x 2..1200 no hay ninguno con ambos lados >= 24. Con >= 40
+    tampoco, y a 22x40 el error es 2,2 %: la tolerancia no hay que tocarla.
+    En #84. No se cambia aqui.
+
+    Args:
+        source_width: Ancho del origen, positivo.
+        source_height: Alto del origen, positivo.
+
+    Returns:
+        El par ``(ancho, alto)`` del recorte, ambos pares y dentro del origen.
+
+    Raises:
+        ValueError: Si alguna dimension no es positiva.
+    """
     if source_width <= 0 or source_height <= 0:
         msg = f"dimensiones de origen inválidas: {source_width}x{source_height}"
         raise ValueError(msg)
@@ -728,7 +764,7 @@ class _CropGeometry:
 
 
 def _crop_geometry(source_width: int, source_height: int) -> _CropGeometry:
-    crop_width, crop_height = _crop_size(source_width, source_height)
+    crop_width, crop_height = crop_size(source_width, source_height)
     return _CropGeometry(
         width=crop_width,
         height=crop_height,

@@ -83,6 +83,25 @@ ignore = [
     # lanzan CampaignConfigError; la sección Raises documenta el contrato.
     "docstring-extraneous-exception",
 ]
+"scripts/*" = [
+    # Herramientas de desarrollo. El barredor de mutaciones invoca `uv run
+    # pytest` con un argv fijo del propio repositorio y shell=False: no hay
+    # entrada externa, y sin subprocess no puede correr las pruebas por mutante.
+    "suspicious-subprocess-import",
+    # El reporte de mutaciones es su salida: lo lee una persona, no otro proceso.
+    "print",
+    # `main` es el punto de entrada de una herramienta, no una funcion de
+    # negocio; el contrato lo fija el nombre y el codigo de salida.
+    "undocumented-public-function",
+]
+"tests/test_barrido_mutaciones.py" = [
+    # Estos tests invocan el barredor como subproceso con argv fijo y shell=False:
+    # tiene que ser un proceso real para poder observar su codigo de salida, que
+    # es justo lo que fijan. El ejecutable es `sys.executable`, no el PATH.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    "start-process-with-partial-path",
+]
 "src/kliptych/campaign_manager.py" = [
     # El motor de video (orquestador) importa subprocess; se importa de forma
     # diferida solo para resolver los tipos de resultado de CampaignOutcome.
@@ -568,6 +587,9 @@ exclude_also = [
 
 [tool.basedpyright]
 typeCheckingMode = "all"
-include = ["src", "tests"]
+# `scripts` entra al typeCheckingMode "all" a proposito: el barredor de
+# mutaciones es la evidencia de mutacion de este repositorio, y una herramienta
+# que la suite no puede ni typecheckar es una caja negra con salida en Markdown.
+include = ["src", "tests", "scripts"]
 venvPath = "."
 venv = ".venv"
