@@ -94,6 +94,12 @@ ignore = [
     # negocio; el contrato lo fija el nombre y el codigo de salida.
     "undocumented-public-function",
 ]
+"tools/*" = [
+    # Instrumentos de medicion, misma categoria que `scripts`. `print` es su
+    # salida de consola y lo lee una persona. `perfil_transcript.py` escribe su
+    # informe en disco; el texto de stdout es un resumen, no un canal de datos.
+    "print",
+]
 "tests/test_barrido_mutaciones.py" = [
     # Estos tests invocan el barredor como subproceso con argv fijo y shell=False:
     # tiene que ser un proceso real para poder observar su codigo de salida, que
@@ -590,6 +596,9 @@ typeCheckingMode = "all"
 # `scripts` entra al typeCheckingMode "all" a proposito: el barredor de
 # mutaciones es la evidencia de mutacion de este repositorio, y una herramienta
 # que la suite no puede ni typecheckar es una caja negra con salida en Markdown.
-include = ["src", "tests", "scripts"]
+# `tools` entra por lo mismo: los instrumentos de medicion y el informe que
+# generan tienen que estar tan type-checkeados como el producto.
+include = ["src", "tests", "scripts", "tools"]
 venvPath = "."
 venv = ".venv"
+
