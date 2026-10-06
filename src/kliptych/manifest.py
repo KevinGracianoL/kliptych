@@ -28,7 +28,15 @@ class OutputHash(_ManifestBase):
 class RunManifest(_ManifestBase):
     """Registro reproducible de una corrida completa."""
 
-    manifest_version: Literal["1.1"] = "1.1"
+    # El documento gana campos, asi que se versiona ESTE manifiesto. Se aceptan
+    # "1.1" y "1.2" porque un manifiesto anterior tiene que seguir leyendose: con
+    # `extra="forbid"` lo unico que rechaza un manifiesto viejo son las claves
+    # desconocidas, y los campos nuevos son opcionales. Un lector de "1.1" que
+    # conozca el documento viejo rechazara este con un error de Literal que no
+    # explica nada, que es exactamente el motivo por el que el campo de abajo
+    # acepta las dos versiones del contrato.
+    manifest_version: Literal["1.1", "1.2"] = "1.2"
+
     run_id: str = Field(min_length=1)
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
@@ -37,7 +45,8 @@ class RunManifest(_ManifestBase):
     # tiene que aceptar todas las que el contrato sepa leer. Sin "1.2" aqui,
     # escribir el manifiesto de cualquier corrida que use el contrato actual
     # revienta con un error de Literal que no explica nada. Este campo NO es el
-    # `manifest_version` de arriba: ese versiona ESTE documento y no cambia.
+    # `manifest_version` de arriba: ese versiona el documento del manifiesto, que
+    # SI cambia cuando el manifiesto gana campos.
     contract_schema_version: Literal["1.1", "1.2"] | None = None
     contract_sha256: str | None = Field(default=None, pattern=_SHA256)
     model_version: str | None = None
@@ -74,6 +83,14 @@ class RunManifest(_ManifestBase):
 
 def write_manifest(manifest: RunManifest, run_dir: Path) -> Path:
     """Escribe ``run_manifest.json`` dentro del directorio de la corrida.
+
+    La escritura NO es atomica: usa ``Path.write_text``, y una interrupcion a
+    mitad deja un manifiesto truncado en vez del anterior. ``_resolved`` reescribe
+    el manifiesto al final de la corrida para poder incluir la duracion de la
+    exportacion, asi que hay dos ventanas donde un corte deja el registro
+    inutilizable. Es un defecto conocido y sin corregir: el patron atomico ya
+    existe en ``orchestrator._atomic_write_json`` y en ``PipelineStateManager.save``,
+    y consolidarlo es un cambio propio, no una nota al pie de la instrumentacion.
 
     Args:
         manifest: Manifiesto a persistir.

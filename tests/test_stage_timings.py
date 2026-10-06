@@ -89,11 +89,24 @@ def test_una_fase_fallida_tambien_deja_duracion(tmp_path: Path) -> None:
     assert "reframe" in manager.checkpoint.durations_ms
 
 
-def test_el_reloj_de_wall_no_fabrica_duraciones_negativas(tmp_path: Path) -> None:
-    """La medicion sale de `monotonic`: el reloj de pared puede saltar atras."""
+def test_el_reloj_de_wall_no_fabrica_duraciones_negativas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La medicion sale de `monotonic`: el reloj de pared puede saltar atras.
+
+    El reloj de pared se hace retroceder a proposito. Si la medicion saliera de
+    `time.time()`, la duracion seria negativa y este test fallaria; si sale de
+    `time.monotonic()`, el reloj de pared no la toca. Un `assert >= 0` sin
+    manipular el reloj NO probaria nada: con cualquiera de los dos relojes sale
+    no negativo, asi que la mutacion `monotonic` -> `time` sobrevivia.
+    """
     manager = _manager(tmp_path)
     artifact = tmp_path / "out.mp4"
     _ = artifact.write_bytes(b"x")
+
+    # Dos instantes de pared, el segundo ANTERIOR al primero.
+    ticks = iter([1_000.0, 900.0])
+    monkeypatch.setattr("time.time", lambda: next(ticks))
 
     _ = manager.mark_started(PipelineStage.DOWNLOAD)
     _ = manager.mark_done(PipelineStage.DOWNLOAD, artifact)
@@ -101,20 +114,79 @@ def test_el_reloj_de_wall_no_fabrica_duraciones_negativas(tmp_path: Path) -> Non
     assert manager.checkpoint.durations_ms["download"] >= 0
 
 
-def test_un_segmento_secundario_no_cronometrea_la_etapa(tmp_path: Path) -> None:
-    """REFRAME y SUBTITLES corren por segmento; solo el primario cuenta.
+def test_un_segmento_secundario_no_hereda_el_estado_del_primario(
+    tmp_path: Path,
+) -> None:
+    """`record_duration` cierra el cronometro sin marcar la etapa.
 
-    Sumarlos mediria el trabajo varias veces y presentaria una etapa partida en
-    N como si fuera una sola pasada.
+    Los segmentos secundarios de reframe y subtitulos llaman a este metodo: si
+    marcaran `done`, el estado de la etapa pasaria a describir el ultimo
+    segmento en vez del primario, que es el unico con artefacto registrado.
     """
     manager = _manager(tmp_path)
     artifact = tmp_path / "out.mp4"
     _ = artifact.write_bytes(b"x")
 
-    _ = manager.mark_started_if(PipelineStage.REFRAME, condition=False)
-    _ = manager.mark_done(PipelineStage.REFRAME, artifact)
+    _ = manager.mark_started(PipelineStage.REFRAME)
+    _ = manager.record_duration(PipelineStage.REFRAME)
 
-    assert "reframe" not in manager.checkpoint.durations_ms
+    assert "reframe" in manager.checkpoint.durations_ms
+    assert not manager.is_done(PipelineStage.REFRAME)
+    assert manager.artifact_path(PipelineStage.REFRAME) is None
+
+
+def test_los_tiempos_de_todos_los_segmentos_se_suman(tmp_path: Path) -> None:
+    """N segmentos dan el coste de render del paquete, no el del primero.
+
+    Es la cifra que `#91` necesita: cuanto costo renderizar, no cuanto costo el
+    clip principal. Medir solo el primario dejaria el numero sin qualifier en el
+    artefacto, y un lector no tendria forma de saber que le falta la mayor parte.
+    """
+    manager = _manager(tmp_path)
+    artifact = tmp_path / "out.mp4"
+    _ = artifact.write_bytes(b"x")
+
+    for _segmento in range(4):
+        _ = manager.mark_started(PipelineStage.REFRAME)
+        _ = manager.mark_done(PipelineStage.REFRAME, artifact)
+
+    assert len(manager.checkpoint.durations_ms) == 1
+    assert manager.checkpoint.durations_ms["reframe"] >= 0
+
+
+def test_invalidar_una_etapa_borra_su_duracion(tmp_path: Path) -> None:
+    """Una duracion sin artefacto que la produjo es un numero sin comando.
+
+    `invalidate_downstream_stages` borra `stages` y `artifacts`. Si dejara la
+    duracion, el checkpoint seguiria anunciando el coste de un `transcript.json`
+    que ya no existe: la cifra de un trabajo anulado, mezclada con la del
+    reejecutado.
+    """
+    manager = _manager(tmp_path)
+    artifact = tmp_path / "out.mp4"
+    _ = artifact.write_bytes(b"x")
+
+    _ = manager.mark_started(PipelineStage.TRANSCRIBE)
+    _ = manager.mark_done(PipelineStage.TRANSCRIBE, artifact)
+    assert "transcribe" in manager.checkpoint.durations_ms
+
+    _ = manager.invalidate_downstream_stages()
+
+    assert "transcribe" not in manager.checkpoint.durations_ms
+    assert not manager.is_done(PipelineStage.TRANSCRIBE)
+
+
+def test_invalidar_el_audio_borra_su_duracion(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    artifact = tmp_path / "out.mp4"
+    _ = artifact.write_bytes(b"x")
+
+    _ = manager.mark_started(PipelineStage.SUBTITLES)
+    _ = manager.mark_done(PipelineStage.SUBTITLES, artifact)
+
+    _ = manager.invalidate_audio_dependents()
+
+    assert "subtitles" not in manager.checkpoint.durations_ms
 
 
 def test_reset_descarta_las_duraciones(tmp_path: Path) -> None:

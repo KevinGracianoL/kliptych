@@ -1896,7 +1896,7 @@ def _resolve_reframe_stage(
             if video_valid:
                 _ = registry.register(reframed_video, is_artifact=True)
             return reframe, reframed_video
-    state.mark_started_if(PipelineStage.REFRAME, condition=is_primary)
+    state.mark_started(PipelineStage.REFRAME)
     try:
         destination = config.output_dir / f"reframed{suffix}.mp4"
         reframe, reframed = _reframe(
@@ -1906,14 +1906,20 @@ def _resolve_reframe_stage(
             registry=registry,
         )
         _atomic_write_json(reframe_json, reframe.model_dump_json(indent=2))
-        if is_primary:
-            state.mark_done(PipelineStage.REFRAME, reframed)
     except Exception:
         if is_primary:
             state.mark_failed(PipelineStage.REFRAME)
+        else:
+            state.record_duration(PipelineStage.REFRAME)
         raise
+    # El primario marca estado y artefacto; los secundarios solo contribution de
+    # tiempo. Los dos caminos terminan el cronometro, o el `mark_started` de un
+    # segmento sin cerrar contaminaria el del siguiente.
+    if is_primary:
+        state.mark_done(PipelineStage.REFRAME, reframed)
     else:
-        return reframe, reframed
+        state.record_duration(PipelineStage.REFRAME)
+    return reframe, reframed
 
 
 def _resolve_subtitle_file(
@@ -1988,8 +1994,8 @@ def _resolve_subtitles_and_burn_stage(
     ):
         cached_subtitles = config.output_dir / subtitles_name
         return cached_subtitles, final_video
+    state.mark_started(PipelineStage.SUBTITLES)
     try:
-        state.mark_started_if(PipelineStage.SUBTITLES, condition=is_primary)
         subtitles = _resolve_subtitle_file(
             is_lyric=is_lyric,
             transcript=transcript,
@@ -2008,14 +2014,17 @@ def _resolve_subtitles_and_burn_stage(
             final_name=final_name,
             mute_audio=mute_audio,
         )
-        if is_primary:
-            state.mark_done(PipelineStage.SUBTITLES, final)
     except Exception:
         if is_primary:
             state.mark_failed(PipelineStage.SUBTITLES)
+        else:
+            state.record_duration(PipelineStage.SUBTITLES)
         raise
+    if is_primary:
+        state.mark_done(PipelineStage.SUBTITLES, final)
     else:
-        return subtitles, final
+        state.record_duration(PipelineStage.SUBTITLES)
+    return subtitles, final
 
 
 def _render_segment(

@@ -177,6 +177,7 @@ class PipelineStateManager:
             stage_name = stage.value
             _ = self.checkpoint.stages.pop(stage_name, None)
             _ = self.checkpoint.artifacts.pop(stage_name, None)
+            _ = self.checkpoint.durations_ms.pop(stage_name, None)
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 
@@ -194,6 +195,12 @@ class PipelineStateManager:
             stage_name = stage.value
             _ = self.checkpoint.stages.pop(stage_name, None)
             _ = self.checkpoint.artifacts.pop(stage_name, None)
+            # La duracion se borra con el estado y el artefacto porque mide un
+            # trabajo cuyo resultado ya no esta en disco. Sin esta linea el
+            # checkpoint announces `subtitles: 1 ms` para un `final.mp4` que se
+            # borro: un numero sin artefacto que lo produjo es exactamente el
+            # registro que este proyecto no quiere.
+            _ = self.checkpoint.durations_ms.pop(stage_name, None)
         self.checkpoint.segment_coords = ()
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
@@ -242,24 +249,23 @@ class PipelineStateManager:
         stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
         self._started_at[stage_name] = time.monotonic()
 
-    def mark_started_if(self, stage: str | PipelineStage, *, condition: bool) -> None:
-        """Arranca el cronómetro de una etapa solo si se cumple la condición.
+    def record_duration(self, stage: str | PipelineStage) -> None:
+        """Acumula la duracion de una etapa SIN tocar su estado ni su artefacto.
 
-        Las etapas de reframe y subtitulos se ejecutan una vez por segmento, pero
-        el checkpoint tiene UNA sola entrada por etapa: la del segmento principal.
-        Los segmentos secundarios no se cronometran porque sumarlos mediría el
-        trabajo dos veces, y porque no son la pregunta.
+        ``reframe`` y ``subtitles`` corren una vez por segmento y el checkpoint
+        tiene una sola entrada por etapa: la del segmento principal. De ahi que su
+        tiempo se cierre con este metodo en los segmentos secundarios, donde no se
+        debe marcar `done` porque ese estado es del primario.
 
-        La condición vive aquí y no en el llamador para que las funciones de etapa
-        no acumulen ramas: si el `if` estuviera en el orquestador, cada una cruzaria
-        su umbral de complejidad por añadir instrumentación.
+        El tiempo, en cambio, se SUMA el de todos los segmentos. Medir solo el
+        primario daria el coste de 1 de N clips sin ninguna marca en el artefacto
+        que lo dijera, y el numero que se busca es cuanto costo renderizar el
+        paquete, no cuanto costo el primer clip.
 
         Args:
             stage: Nombre de la etapa o miembro de ``PipelineStage``.
-            condition: Si es ``False``, no arranca nada.
         """
-        if condition:
-            self.mark_started(stage)
+        self._record_duration(stage)
 
     def _record_duration(self, stage: str | PipelineStage) -> None:
         """Acumula la duración de una etapa si se había marcado su arranque.

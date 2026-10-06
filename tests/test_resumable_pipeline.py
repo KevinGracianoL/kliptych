@@ -469,6 +469,60 @@ def test_el_checkpoint_registra_el_tiempo_de_cada_etapa(
         assert mgr.checkpoint.durations_ms[stage.value] >= 0
 
 
+def test_el_tiempo_de_reframe_cubre_todos_los_segmentos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con N segmentos, `reframe` mide el render del paquete, no el del primero.
+
+    El estado y el artefacto de la etapa son del segmento primario, pero su
+    TIEMPO es el de todos: la pregunta que responde este registro es cuanto costo
+    renderizar, y medir solo el primario daria una cifra sin qualifier en un
+    artefacto que nadie puede reinterpretar.
+
+    El test espia el cierre del cronometro de los segmentos secundarios en vez de
+    comparar milisegundos: los milisegundos de una corrida de test son ruido, y
+    un assert sobre su magnitud no distinguiria "sumo N" de "sumo 1".
+    """
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    seleccion = SegmentSelection(
+        segments=(Segment(start_s=0.0, end_s=5.0), Segment(start_s=12.0, end_s=17.0)),
+        rationale="dos segmentos",
+    )
+
+    def _dos_segmentos(_raw: object) -> SegmentSelection:
+        return seleccion
+
+    monkeypatch.setattr(deps.selector, "parse_response", _dos_segmentos)
+
+    cerrados: list[str] = []
+    original = PipelineStateManager.record_duration
+
+    def _espia(self: PipelineStateManager, stage: str | PipelineStage) -> None:
+        cerrados.append(str(stage.value if isinstance(stage, PipelineStage) else stage))
+        original(self, stage)
+
+    monkeypatch.setattr(PipelineStateManager, "record_duration", _espia)
+
+    result = _run(config, deps, resume=False)
+    assert isinstance(result, PipelineResult)
+    assert counter.reframe_calls == 2, counter.reframe_calls
+    assert counter.subtitles_calls == 2, counter.subtitles_calls
+
+    # Un cierre por segmento secundario: con dos segmentos, el primario marca
+    # estado y el secundario solo aporta tiempo.
+    assert cerrados.count(PipelineStage.REFRAME.value) == 1, cerrados
+    assert cerrados.count(PipelineStage.SUBTITLES.value) == 1, cerrados
+
+    mgr = PipelineStateManager.load(config.output_dir)
+    assert mgr.checkpoint.durations_ms[PipelineStage.REFRAME.value] >= 0
+    assert mgr.checkpoint.durations_ms[PipelineStage.SUBTITLES.value] >= 0
+    # El estado sigue siendo del primario: medir mas no puede cambiar quien es
+    # el dueno de la etapa.
+    assert mgr.is_done(PipelineStage.REFRAME)
+
+
 def test_resume_skips_completed_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     counter = _CallCounter()
     counter.detect_error = MomentDetectionError("fallo intencional en momentos")

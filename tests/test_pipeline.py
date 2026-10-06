@@ -807,6 +807,50 @@ def test_el_manifiesto_registra_el_tiempo_por_fase(
     assert all(valor >= 0 for valor in duraciones.values()), duraciones
 
 
+def test_el_manifiesto_conserva_el_tiempo_de_export_cuando_export_falla(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una exportacion que se ejecuto y fallo tiene que estar en el registro.
+
+    `_fase` mide en su `finally`, asi que la duracion existe aunque la fase
+    lance. Si el manifiesto no se reescribe en el fallo, queda en disco el de la
+    primera escritura, que no menciona `export`: el registro dira "no se midio"
+    de una fase que si se ejecuto. Es la misma mentira que registrar `0 ms` para
+    una etapa reanudada desde cache.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+
+    def _exporta_fallando(*_args: object, **_kwargs: object) -> None:
+        msg = "fallo de exportacion inyectado"
+        raise PipelineError(msg)
+
+    _ = monkeypatch.setattr("kliptych.pipeline.export_delivery", _exporta_fallando)
+
+    with pytest.raises(PipelineError):
+        _ = run_given_clips(
+            model=_StaticModel(draft, _caption()),
+            settings=Settings.from_root(tmp_path),
+            request=_unit_request(
+                tmp_path,
+                brief="brief del fallo de exportacion",
+                assembler=_StubAssembler(),
+            ),
+        )
+
+    manifiesto = next(tmp_path.rglob("run_manifest.json"))
+    duraciones = cast("dict[str, int]", _json(manifiesto)["stage_durations_ms"])
+    assert "export" in duraciones, duraciones
+    assert duraciones["export"] >= 0
+
+
 def test_pipeline_blocks_duration_above_max(tmp_path: Path) -> None:
     _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
     draft = make_draft(

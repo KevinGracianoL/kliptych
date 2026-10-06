@@ -359,28 +359,32 @@ def _resolved(context: _RunContext, contract: Contract) -> RunResult:
         msg = "el contrato no declara clips de video para ensamblar"
         raise PipelineError(msg)
     manifest_path = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
-    with _fase(context, "export"):
-        delivery = export_delivery(
-            contract=contract,
-            pieces=pieces,
-            gate=context.engine,
-            assets=context.registry,
-            destination=context.request.destination,
-            approve_manual_review=context.request.approve_manual_review,
-            approved_by=context.request.approved_by,
-        )
     # El manifiesto se escribe OTRA vez siempre, no solo cuando hay aprobacion
     # manual. La primera escritura ocurre antes de exportar y por tanto no puede
     # contener la duracion de la exportacion: el campo existiria y valdria cero
     # para la fase mas cara de medir. Reescribirlo aqui es lo que hace que el
     # registro sea completo.
     #
-    # `write_manifest` escribe con `Path.write_text`, que NO es atomico: una
-    # interrupcion a mitad deja un manifiesto truncado en vez del anterior. Con una
-    # sola escritura eso era un ventana estrecha; al reescribir siempre, la
-    # segunda escritura parte del mismo patron y hay dos. No se arregla aqui para
-    # no mezclar un arreglo de filesystem con la instrumentacion: se mide, se
-    # reporta y se corrige en su propio cambio.
+    # Y se reescribe tambien cuando la exportacion FALLA. `_fase` mide en su
+    # `finally`, asi que la duracion ya esta en el contexto cuando la excepcion
+    # llega aqui; sin esta rama el manifiesto que queda en disco seria el de la
+    # primera escritura, que no menciona `export`. Un registro que dice "no se
+    # midio export" cuando export se ejecuto y fallo es el mismo defecto que una
+    # etapa reanudada desde cache resuelta como "tardo 0 ms".
+    try:
+        with _fase(context, "export"):
+            delivery = export_delivery(
+                contract=contract,
+                pieces=pieces,
+                gate=context.engine,
+                assets=context.registry,
+                destination=context.request.destination,
+                approve_manual_review=context.request.approve_manual_review,
+                approved_by=context.request.approved_by,
+            )
+    except BaseException:
+        _ = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
+        raise
     manifest_path = _write_manifest(
         context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
     )

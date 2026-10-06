@@ -69,7 +69,25 @@ def test_write_and_read_manifest_round_trip(tmp_path: Path) -> None:
     assert path.name == "run_manifest.json"
     restored = read_manifest(path)
     assert restored == manifest
-    assert restored.manifest_version == "1.1"
+    assert restored.manifest_version == "1.2"
+
+
+def test_un_manifiesto_1_1_sin_duraciones_sigue_leyendose() -> None:
+    """Un manifiesto escrito antes de este campo tiene que seguir siendo valido.
+
+    `RunManifest` usa `extra="forbid"`, que rechaza claves desconocidas pero no
+    las que faltan: por eso los campos nuevos son opcionales y por eso la
+    version antigua se acepta en el mismo Literal que la nueva. Si esto falla, una
+    migracion deja de poder leer las corridas que ya estan en disco.
+    """
+    payload = _manifest().model_dump()
+    payload["manifest_version"] = "1.1"
+    del payload["stage_durations_ms"]
+
+    restaurado = RunManifest.model_validate(payload)
+
+    assert restaurado.manifest_version == "1.1"
+    assert restaurado.stage_durations_ms == {}
 
 
 def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
