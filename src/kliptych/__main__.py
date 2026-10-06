@@ -917,6 +917,11 @@ def _run_command(args: argparse.Namespace) -> int:
             approve_manual_review=approve_manual_review,
             approved_by=approved_by,
             contract_draft=contract_draft,
+            # El gate de esta ruta se construye dentro del pipeline, asi que la
+            # config de render se declara aqui y viaja en la peticion. Sin esto
+            # el pipeline construiria su propio `RenderConfig()` y la CLI
+            # garantizaria una tolerancia distinta a la de la biblioteca.
+            render=RenderConfig(),
         )
         result = run_given_clips(model=model, settings=settings, request=request)
     except (IngestError, ModelError, PipelineError, AssembleError, ExportError) as error:

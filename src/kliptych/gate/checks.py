@@ -155,9 +155,21 @@ def _unverifiable(audio_rule: AudioRule, missing_validator: str) -> CheckOutcome
     """MANUAL_REVIEW para una regla que exige audio y aqui no se puede comprobar.
 
     La evidencia dice literalmente que no se verifico y que validador falta,
-    para que ``gate.json`` no se lea como una atestación de audio verificado
-    (brief §5.1, para reglas duras: sin validador aplicable nunca PASS; esta función
-    se invoca solo en ese caso).
+    para que ``gate.json`` no se lea como una atestación de audio verificado.
+
+    El brief §5.1 lo dice para las reglas DURAS ("si no hay validador para una
+    regla dura, el resultado es UNSUPPORTED o MANUAL_REVIEW, jamás PASS"), y esta
+    función devuelve MANUAL_REVIEW, que cumple el enunciado del brief.
+
+    Lo que el brief NO cubre, y hay que decir aqui: esta función se alcanza con
+    CUALQUIER fuerza de la regla, no solo con `hard`. Nada en el motor consulta la
+    fuerza antes de despachar un validador, asi que `audio.present` como
+    `recommended` con `audio_rule` en {`official_required`, `no_trending`} llega
+    aqui igual. Lo que lo mantiene seguro es el resolver, que fuerza
+    `audio.present` a `hard`; el validador en si es agnostico de la fuerza, y si
+    alguien bajara esa regla, este MANUAL_REVIEW pasaria a ser un PASS. Esa
+    dependencia esta nombrada en `resolver._base_rules` y conviene no perderla de
+    vista al tocar cualquiera de las dos puntas.
 
     Args:
         audio_rule: Regla de audio de la plataforma, sin verificar.
@@ -724,8 +736,6 @@ def _geometry_outcome(
         evidencia: Lo ya recogido sobre la declaración, que se propaga al
             veredicto para que el FAIL diga cuál era la exigencia.
         tolerancia: Tolerancia RELATIVA que el render usó en esta corrida.
-
-    tolerancia: Tolerancia RELATIVA que el render uso en esta corrida.
 
     Returns:
         PASS con las dimensiones y el aspecto declarado; FAIL en cerrado ante

@@ -132,6 +132,18 @@ class RunRequest:
     contract_draft: ContractDraft | None = None
     subtitle_texts: Mapping[str, str] | None = None
     subtitle_segments: Mapping[str, Sequence[SubtitleSegment]] | None = None
+    # Config de render EFECTIVA de esta corrida. El gate mide el aspecto con su
+    # `aspect_tolerance`, asi que tiene que ser la que el render uso de verdad y
+    # no una construida aqui: leer un default donde va una declaracion es la
+    # forma exacta del bug de `outputs` por omision en un 1.1, y con dos puntos
+    # de entrada al pipeline producia dos geometrias de garantia distintas
+    # (la CLI la pasaba, la biblioteca no).
+    #
+    # `None` significa "nadie sobreescribio la tolerancia", y en ese caso vale
+    # `RenderConfig()`. Que hoy la ruta `given_clips` renderice siempre a 1080x1920
+    # y no lo note no es una razon para no declararlo: el dia que el reframe
+    # entre en esta ruta, el default seria una mentira silenciosa.
+    render: RenderConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,11 +194,15 @@ def run_given_clips(
     except ProvenanceError as error:
         msg = f"error de procedencia en el contrato: {error}"
         raise PipelineError(msg) from error
-    # El gate recibe la config de render de la CORRIDA. Sin esto juzgaria el
-    # aspecto del artefacto con el default de `RenderConfig` en vez de con la
-    # tolerancia que el render uso de verdad, que es medir contra una
-    # declaracion que nadie hizo.
-    gate = Gate(FFprobeProbe(), render=RenderConfig()) if request.gate is None else request.gate
+    # La config de render viaja desde `RunRequest`, no se construye aqui. Antes
+    # este sitio fabricaba `RenderConfig()`, que es el default de la clase: la
+    # CLI pasaba su config por otro camino y la biblioteca no, de modo que dos
+    # entradas al mismo pipeline garantizaban tolerancias distintas.
+    gate = (
+        Gate(FFprobeProbe(), render=RenderConfig() if request.render is None else request.render)
+        if request.gate is None
+        else request.gate
+    )
     if isinstance(model, ChatJsonModel) and hasattr(gate, "register_validator"):
         gate.register_validator(
             "brand.safety",

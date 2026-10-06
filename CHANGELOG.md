@@ -16,6 +16,13 @@
   una corrida que renderizo con `aspect_tolerance=0.001` era juzgada con 0.05.
   Medir contra un default en vez de contra una declaracion es la misma forma que
   el `outputs` por defecto de un 1.1.
+  La config viaja por los DOS puntos de entrada, no por uno: `RunRequest` lleva
+  ahora `render`, asi que la biblioteca tambien declara la tolerancia de su
+  corrida. Antes la CLI la pasaba y `run_given_clips` fabricaba su propio
+  `RenderConfig()`, de modo que la misma invariante estaba garantizada a distinta
+  medida segun por donde se entrara. Que hoy la ruta `given_clips` renderice
+  siempre a 1080x1920 y no lo note no era razon para dejarlo asi: el dia que el
+  reframe entre en esa ruta, el default seria una mentira silenciosa.
 - **Por que una tolerancia y no una comparacion exacta.** El reframe cuantiza a
   entero par y `round` es half-to-even, asi que un alto de 1080 da
   `round(607.5) = 608`. Medido con `crop_size` del propio repo:
@@ -27,7 +34,9 @@
   que el render ya declaraba.
   Con un 1e-9 el gate rechazaba la salida del propio render. Eso es lo que hacia
   una version anterior de esta PR, y lo encontro una revision adversarial
-  ejecutando el crop de verdad, no leyendo el codigo.
+  ejecutando el crop de verdad, no leyendo el codigo. Ese 1e-9 es HISTORIA de
+  esta rama, no un estado released: el delta de producto esta mas abajo, medido
+  contra `1eb49cb`.
 - **Donde si termina: la banda sigue valiendo hasta ~24 px de lado menor.** La
   cuantizacion al par se come el margen en origenes pequenos y el recorte sale de
   la banda: 16x16 -> 8x16, a un 11 % de 9:16, que es un video de 2 px de ancho.
@@ -38,10 +47,26 @@
   >= 24. Con ambos lados >= 40 tampoco, y a 22x40 el error es 2,2 %, o sea que la
   tolerancia NO hay que tocarla. En #84, con el detalle. No se arregla aqui:
   cambiar el productor es otro PR con su propio recorrido end-to-end.
-- **Es una relajacion frente a comparar a 1e-9, y se declara como tal.** No es una
-  perdida de rigor: es la retirada de un desacuerdo que la comprobacion anterior
-  no podia detectar. Un 16:9 genuino esta a un 216 % de desviacion relativa y
-  sigue fallando.
+- **Lo que cambia, medido contra `1eb49cb` (main).** La version anterior de esta
+  entrada declaraba una "relajacion frente a comparar a 1e-9". Eso era verdad y
+  a la vez irrelevante: la comparacion a 1e-9 solo existio en commits
+  intermedios de esta misma rama y nunca llego a `main`, asi que medir la
+  relajacion contra ella no le dice nada a quien use el producto. Lo que se puede
+  afirmar es lo que se midio contra el commit de partida, y son tres cosas:
+  1. **Ningun veredicto alcanzable se relaja.** Con lienzo 9:16 por defecto y
+     artefacto 1080x1920, base y head dan lo mismo. Con artefacto 608x1080, los
+     dos fallan por la misma comprobacion de dimensiones exactas.
+  2. **`artifact.aspect` ENDURECE el caso sin lienzo.** En `main` un contrato
+     resuelto sin `split_screen` no tenia ninguna regla que midiera el aspecto:
+     medido, `main` daba `passed` a un 16:9. Con esta PR se bloquea. Ese es el
+     perfil de una regla que falta donde deberia estar, y es el cambio real.
+  3. **El unico caso donde el head pasa y la base falla** es un lienzo declarado
+     16:9 con artefacto 16:9. Es **inalcanzable desde la CLI**:
+     `SplitScreenDraft` no tiene campo `aspect`, asi que ningun contrato resuelto
+     desde un draft declara 16:9 en el lienzo. Queda como mejora para cuando el
+     draft lo exponga, no como capacidad.
+  La nota de la comparacion a 1e-9 se conserva abajo como HISTORIA de esta
+  rama, no como delta de producto.
 - **El gate valida el aspecto que el CONTRATO DECLARA**, en vez de comparar
   contra un 9:16 fijo en modulo. `_SPLIT_ASPECT_W`/`_SPLIT_ASPECT_H` han
   desaparecido de `gate/checks.py`; el aspecto sale de `SplitScreenConfig.aspect`

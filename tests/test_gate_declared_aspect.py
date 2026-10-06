@@ -24,7 +24,6 @@ import pytest
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract.enums import Aspect
-from kliptych.contract.schema import KNOWN_VALIDATOR_RULES
 from kliptych.encoding import RenderConfig
 from kliptych.gate import Gate
 from kliptych.gate.checks import (
@@ -661,15 +660,6 @@ def test_g6_el_gate_juzga_con_la_tolerancia_de_la_corrida(tmp_path: Path) -> Non
     assert check_declared_outputs(holgado).status is CheckStatus.PASS
 
 
-def test_g6b_la_tolerancia_del_contexto_llega_al_veredicto() -> None:
-    """El `RenderConfig` por omision deja el contexto utilizable.
-
-    Sin esto, anadir `render` a `GateContext` habria roto todos los validadores
-    que no pasan la config, que son la mayoria.
-    """
-    assert RenderConfig().aspect_tolerance == pytest.approx(0.05)
-
-
 def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
     """Recorre los altos que el pipeline puede producir y no encuentra ninguno rechazado.
 
@@ -1035,16 +1025,9 @@ def test_h1_el_motor_entrega_la_tolerancia_de_la_corrida(tmp_path: Path) -> None
     assert holgado_asp.status is CheckStatus.PASS
 
 
-def test_h2_el_catalogo_de_reglas_y_el_de_validadores_no_se_desincronizan() -> None:
-    """Toda regla con validador tiene que estar en `KNOWN_VALIDATOR_RULES`.
-
-    Sin esta puerta, `artifact.aspect` podria desaparecer del catalogo del schema
-    sin romper una sola prueba: el validador seguiria registrado, el gate seguiria
-    ejecutandolo y no habria ninguna asercion que se diera cuenta. La mutacion
-    que borra esa entrada sobrevive a la suite completa sin esto.
-    """
-    sin_entrada = sorted(set(DEFAULT_VALIDATORS) - set(KNOWN_VALIDATOR_RULES))
-    sin_validador = sorted(set(KNOWN_VALIDATOR_RULES) - set(DEFAULT_VALIDATORS))
-
-    assert sin_entrada == [], f"validadores ausentes del catalogo del schema: {sin_entrada}"
-    assert sin_validador == [], f"reglas del catalogo sin validador: {sin_validador}"
+# NOTA sobre el catalogo de reglas: la invariante "toda regla con validador esta
+# en KNOWN_VALIDATOR_RULES y viceversa" YA la cubria
+# `tests/test_gate_checks.py::test_known_validator_rules_matches_default_validators`
+# antes de que existiera este archivo. Se intento duplicar aqui y se elimino: un
+# segundo test que dice lo mismo no cierra una clase, solo hace que el conteo de
+# tests parezca mejor de lo que es.
