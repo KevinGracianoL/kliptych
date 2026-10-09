@@ -107,6 +107,20 @@ attributed signature that is sealed into the delivery record next to
   stage at a time, no parallel model execution.
 - Under heavy load, manual CUDA garbage collection/purging between models
   is required to reclaim VRAM before loading the next stage.
+- Exported clip text comes from a speech model and can be text nobody said.
+  Measured on a real 3 h 07 m stream (11 247 s): the transcript carries one
+  contiguous region of 908,6 s built from 35 repetitions of `gracias por ver
+  el video`; a 44-second clip was cut from it, subtitled, exported, and
+  **passed the gate**. Nothing in the delivered package marks it. There is no
+  detection today. Audio energy does not locate these regions — the invented
+  region measures ~5 dB **louder** than real speech (median −34,65 dB against
+  −40,38 dB over four speech controls), so an energy floor keeps the invention
+  and discards quiet speech. Word confidence does not locate them either: the
+  best threshold misses 81,1 % of the invented words and 0,3 misses 70,9 %,
+  while 96,4 % of the words under 0,3 confidence are real speech. A larger ASR
+  model does not fix it — `large-v3-turbo` reproduces the same phrase — so
+  consensus between two models is not a mitigation. Details in
+  [#91](https://github.com/KevinGracianoL/kliptych/issues/91).
 
 ## Project Status
 
