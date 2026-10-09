@@ -20,6 +20,7 @@ from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import ExportError, ExportStatus
 from kliptych.gate import Gate
+from kliptych.manifest import RunManifest, write_manifest
 from kliptych.pipeline import (
     PieceAssembler,
     PipelineError,
@@ -834,18 +835,61 @@ def test_el_manifiesto_lleva_el_tiempo_de_cada_fase(
     assert "export" in duraciones, duraciones
 
 
-def test_export_no_queda_en_cero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """La segunda escritura del manifiesto es la que hace que esto sea cierto.
+def test_export_queda_registrado_tras_la_segunda_escritura(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La segunda escritura del manifiesto es la que pone `export` en el registro.
 
-    La PRIMERA escritura ocurre antes de exportar, asi que sin la segunda el campo
-    no tendria entrada para `export`. Un 0 aqui seria el sintoma exacto de esa
-    omision: el campo existe, se ve, y no dice nada.
+    La PRIMERA escritura ocurre ANTES de exportar, asi que todavia no conoce la
+    duracion de la exportacion. Sin la segunda, el manifiesto en disco seria el de
+    antes y `export` no apareceria.
+
+    Esta asercion no mira la MAGNITUD. Una version anterior de este test
+    afirmaba `export != 0` y fallo en el runner de Ubuntu con
+    `{'assemble': 0, 'export': 0}`: `_fase` trunca con `int()`, y una operacion
+    por debajo de 1 ms vale cero sin que falte nada. Esa asercion media la
+    velocidad de la maquina, no el comportamiento.
     """
+    escrituras = _espiar_escrituras(monkeypatch)
     manifest = _corrida_con_tiempos(tmp_path, monkeypatch, brief="brief del tiempo por fase")
 
     duraciones = cast("dict[str, int]", manifest["stage_durations_ms"])
 
-    assert duraciones["export"] != 0, duraciones
+    # El sintoma de que falte la segunda escritura NO es un cero: es que `export`
+    # no esta en el mapa. Sin ella el manifiesto en disco es el de antes de
+    # exportar, y ese no conoce la duracion de la exportacion porque todavia no
+    # habia ocurrido.
+    assert "export" in duraciones, duraciones
+    assert "assemble" in duraciones, duraciones
+
+    # Y la segunda escritura se comprueba por lo que es: hubo una despues de
+    # exportar, y esa es la que trae la clave.
+    assert len(escrituras) == 2, escrituras
+    primera = cast("dict[str, int]", escrituras[0]["stage_durations_ms"])
+    ultima = cast("dict[str, int]", escrituras[-1]["stage_durations_ms"])
+    assert "export" not in primera, primera
+    assert "export" in ultima, ultima
+
+
+def _espiar_escrituras(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Registra el contenido de cada escritura del manifiesto de la corrida.
+
+    Args:
+        monkeypatch: Fixture de pytest que aplica el reemplazo.
+
+    Returns:
+        Una lista con el payload de cada llamada, en orden de escritura.
+    """
+    registradas: list[dict[str, object]] = []
+    real = write_manifest
+
+    def _spy(manifest: RunManifest, run_dir: Path) -> Path:
+        payload = cast("dict[str, object]", json.loads(manifest.model_dump_json()))
+        registradas.append(payload)
+        return real(manifest, run_dir)
+
+    _ = monkeypatch.setattr("kliptych.pipeline.write_manifest", _spy)
+    return registradas
 
 
 def test_las_fases_usan_el_reloj_monotonico_y_no_el_de_pared(
