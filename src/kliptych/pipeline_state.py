@@ -60,6 +60,16 @@ class PipelineCheckpoint(BaseModel):
     # cuello de botella: una mitigacion que suma 20 min por corrida vale distinta
     # cosa sobre un pipeline de 40 min que sobre uno de 4 horas.
     #
+    # QUANTO mide, para quien lo lea sin conocer este PR:
+    #   `reframe` y `subtitles` suman TODOS los segmentos de la corrida, porque
+    #   N segmentos son N trabajos distintos y la pregunta es cuanto tardo el
+    #   paquete. `stages` y `artifacts` los describe el segmento PRIMARIO, que es
+    #   un solo archivo. El numero de segmentos se deduce de `segment_coords`
+    #   mientras la corrida termina bien.
+    #   Mide el COSTE DEL ARTEFACTO QUE SOBREVIVE, no el gasto total: un intento
+    #   fallido o invalidado no suma. El gasto total de reloj de la corrida,
+    #   reintentos incluidos, sigue en `updated_at - created_at`.
+    #
     # Una etapa reanudada desde cache NO aparece: no se ejecuto. Escribir 0 seria
     # una cifra, y una cifra se lee como medicion.
     #
@@ -82,6 +92,10 @@ class PipelineStateManager:
     # `time.monotonic()` no tiene sentido entre dos procesos, asi que persistirlo
     # daria duraciones que miden el reloj, no el trabajo.
     _started_at: dict[str, float]
+    # Etapas que YA arrancaron en este proceso. Distingue "segundo segmento de la
+    # misma corrida, que suma" de "reanudacion, que descarta": sin este conjunto
+    # la politica de coste del artefacto vivo no se puede aplicar.
+    _arrancadas_en_este_proceso: set[str]
 
     def __init__(self, output_dir: Path, *, input_fingerprint: str | None = None) -> None:
         """Inicializa el administrador de estado en el directorio de salida.
@@ -97,6 +111,7 @@ class PipelineStateManager:
         self.output_dir = output_dir
         self.checkpoint_path = output_dir / _CHECKPOINT_FILE
         self._started_at = {}
+        self._arrancadas_en_este_proceso = set()
         existing = self._try_load_existing()
         if existing is not None:
             self.checkpoint = existing
@@ -130,6 +145,7 @@ class PipelineStateManager:
         """
         self.is_loaded = False
         self._started_at.clear()
+        self._arrancadas_en_este_proceso.clear()
         now = datetime.now(UTC).isoformat()
         self.checkpoint = PipelineCheckpoint(
             run_id=uuid.uuid4().hex,
@@ -184,10 +200,21 @@ class PipelineStateManager:
     def _invalidate(self, stages: Sequence[PipelineStage]) -> None:
         """Borra estado, artefacto y duracion de las etapas dadas.
 
-        La duracion se borra con el resto porque las tres cosas describen el MISMO
-        trabajo. Si se conservara, una etapa reejecutada sumaria su intento
-        descartado con el vivo, y el checkpoint anunciaria una duracion sobre un
-        archivo que ya no existe. Ese numero no seria un promedio: seria falso.
+        `durations_ms` mide el COSTE DEL ARTEFACTO QUE SOBREVIVE. Un intento
+        descartado no contribuye, y por eso su duracion se borra junto con el
+        estado y el artefacto: las tres cosas describen el MISMO trabajo. Si se
+        conservara, una etapa reejecutada sumaria su intento muerto con el vivo, y
+        el checkpoint anunciaria una duracion sobre un archivo que ya no existe.
+
+        La invalidacion no es la UNICA via por la que se descarta un intento.
+        Reanudar tras un fallo no invalida nada, porque no cambio el contenido de
+        la entrada, y aun asi el intento fallido no produjo el artefacto que
+        sobrevive. Por eso `mark_started` tambien descarta, en su primer arranque
+        dentro de un proceso. Las dos reglas son la misma politica aplicada a los
+        dos caminos por los que un intento deja de contar.
+
+        El total de reloj de pared de la corrida, reintentos incluidos, NO se
+        pierde: sigue en la diferencia entre `created_at` y `updated_at`.
 
         Args:
             stages: Etapas cuyo trabajo deja de ser valido.
@@ -337,14 +364,29 @@ class PipelineStateManager:
         a una etapa: dos etapas que empiezan a la vez siguen teniendo duraciones
         distintas.
 
-        No persiste nada. `time.monotonic()` no significa nada en otro proceso,
-        asi que un arranque guardado en disco seria una promesa que una reanudacion
-        no podria cumplir.
+        La PRIMERA vez que una etapa arranca en este proceso descarta la duracion
+        que traia del checkpoint. Esa cifra es de una corrida anterior, y bajo la
+        politica de coste del artefacto vivo un intento que no produjo el
+        artefacto que sobrevive no cuenta. Sin esto, reanudar tras un fallo sumaria
+        el intento muerto con el vivo, que es justo lo que `_invalidate` ya evita
+        cuando la invalidacion si ocurre.
+
+        Las siguientes arrancadas de la MISMA etapa en el mismo proceso NO
+        descartan nada: ahi si se esta sumando el trabajo de varios segmentos,
+        que es lo que hace la cifra utilizable para pregunta cuanto tardo el
+        paquete.
+
+        No persiste el arranque. `time.monotonic()` no significa nada en otro
+        proceso, asi que guardarlo seria una promesa que una reanudacion no
+        podria cumplir.
 
         Args:
             stage: Nombre de la etapa o miembro de ``PipelineStage``.
         """
         stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
+        if stage_name not in self._arrancadas_en_este_proceso:
+            _ = self.checkpoint.durations_ms.pop(stage_name, None)
+            self._arrancadas_en_este_proceso.add(stage_name)
         self._started_at[stage_name] = time.monotonic()
 
     def _record_duration(self, stage: str) -> None:
