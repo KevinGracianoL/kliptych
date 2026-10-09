@@ -86,14 +86,17 @@ class RelojPinhado:
     """
 
     ahora: float
+    paso_s: float
 
-    def __init__(self, inicio: float = 0.0) -> None:
+    def __init__(self, inicio: float = 0.0, *, paso_s: float = 0.0) -> None:
         self.ahora = inicio
+        self.paso_s = paso_s
 
     def avanzar(self, segundos: float) -> None:
         self.ahora += segundos
 
     def __call__(self) -> float:
+        self.ahora += self.paso_s
         return self.ahora
 
 
@@ -1286,14 +1289,21 @@ def test_reanudar_no_cronometra_lo_que_no_se_ejecuta(
 
 
 def test_las_duraciones_se_suman_entre_segmentos_y_el_estado_queda_en_el_primario(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """H2: sumar tiempos no puede cambiar lo que `stages` y `artifacts` significan.
 
     Esos dos campos describen el segmento PRIMARIO y siguen siendo suyos. El
     tiempo es la suma de todos, porque la pregunta que responde es "cuanto tardo
     en renderizarse el paquete", no "cuanto tardo el primer clip".
+
+    El reloj va PINADO y el valor se comprueba exacto. Antes este test solo
+    afirmaba que la clave existia, lo cual no puede fallar: con reloj real los
+    cinco segmentos duran 0 ms, y acumular y sobrescribir dan el mismo cero. Con
+    250 ms por segmento, acumular da 1250 y sobrescribir da 250.
     """
+    reloj = RelojPinhado(paso_s=0.250)
+    monkeypatch.setattr(time, "monotonic", reloj)
     manager = PipelineStateManager(tmp_path)
 
     for _indice in range(4):
@@ -1306,7 +1316,7 @@ def test_las_duraciones_se_suman_entre_segmentos_y_el_estado_queda_en_el_primari
 
     assert manager.checkpoint.stages[PipelineStage.REFRAME.value] == "done"
     assert manager.checkpoint.artifacts[PipelineStage.REFRAME.value] == str(primario)
-    assert PipelineStage.REFRAME.value in manager.checkpoint.durations_ms
+    assert manager.checkpoint.durations_ms[PipelineStage.REFRAME.value] == 1250
 
 
 def test_un_segmento_secundario_no_toma_el_estado_de_la_etapa(tmp_path: Path) -> None:

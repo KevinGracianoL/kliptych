@@ -14,7 +14,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -62,7 +62,13 @@ class PipelineCheckpoint(BaseModel):
     #
     # Una etapa reanudada desde cache NO aparece: no se ejecuto. Escribir 0 seria
     # una cifra, y una cifra se lee como medicion.
-    durations_ms: dict[str, int] = Field(default_factory=dict)
+    #
+    # `ge=0` igual que en `RunManifest.stage_durations_ms`. Los dos archivos son el
+    # registro de reproducibilidad y un tiempo negativo no es una medida extrema:
+    # con reloj monotonico es imposible, asi que si aparece es un defecto. Dejar
+    # el checkpoint sin la restriccion mientras el manifiesto la exige permitiria
+    # que un numero imposible llegara a uno de los dos artefactos y no al otro.
+    durations_ms: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
 
 
 class PipelineStateManager:
@@ -309,11 +315,20 @@ class PipelineStateManager:
         quiere responder es "cuanto tardo en renderizarse el paquete", no "cuanto
         tardo el primer clip".
 
+        PERSISTE, y no por simetria con las otras marcas sino porque es lo unico
+        que hace visible el peor caso. Un secundario que falla va seguido de un
+        `raise`: si esta suma viviera solo en memoria, el proceso se desarmaria y
+        el tiempo quemado por ese segmento se perderia sin dejar rastro. El
+        comentario que dice "el peor caso tiene que quedar visible" seria falso
+        sin este `save`.
+
         Args:
             stage: Nombre de la etapa o miembro de ``PipelineStage``.
         """
         stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
         self._record_duration(stage_name)
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
 
     def mark_started(self, stage: str | PipelineStage) -> None:
         """Marca el instante de arranque de una etapa para medir su duracion.

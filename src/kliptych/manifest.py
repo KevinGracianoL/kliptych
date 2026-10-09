@@ -28,7 +28,17 @@ class OutputHash(_ManifestBase):
 class RunManifest(_ManifestBase):
     """Registro reproducible de una corrida completa."""
 
-    manifest_version: Literal["1.1"] = "1.1"
+    # `manifest_version` versiona ESTE documento. El valor por defecto es lo que se
+    # EMITE; el conjunto del Literal es lo que se puede LEER, y tiene que incluir
+    # las versiones anteriores o un manifiesto ya escrito dejaria de validar.
+    #
+    # La "1.2" aparece porque `stage_durations_ms` es un campo que `extra="forbid"`
+    # no conoce en la 1.1: un lector construido contra el modelo 1.1 rechaza un
+    # manifiesto 1.2 con un error de campo extra que no explica nada. Subir la
+    # version sin estrechar el conjunto hace visible ese salto en vez de
+    # esconderlo. Al reves, un manifiesto 1.1 sin el campo sigue validando y toma
+    # `{}`: migrar no puede romper el registro historico.
+    manifest_version: Literal["1.1", "1.2"] = "1.2"
     run_id: str = Field(min_length=1)
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None

@@ -75,3 +75,24 @@ def test_un_manifiesto_sin_instrumentar_sigue_siendo_valido() -> None:
     validacion: seria romper el registro historico para acomodar el nuevo.
     """
     assert _manifiesto().stage_durations_ms == {}
+
+
+def test_el_manifiesto_nuevo_se_anuncia_como_1_2() -> None:
+    """El campo nuevo cambia el documento, y el documento dice que cambio.
+
+    Sin esto, un lector 1.1 se encontraria un `stage_durations_ms` inesperado y
+    solo veria un error de `extra_forbidden`, que no dice nada de por que.
+    """
+    assert _manifiesto().manifest_version == "1.2"
+
+
+def test_un_manifiesto_1_1_antiguo_sigue_validando() -> None:
+    """El conjunto aceptado NO se estrecha: 1.1 se sigue leyendo.
+
+    Estrechar el Literal a un solo valor convertiria cada corrida ya escrita en
+    un archivo ilegible. El valor emitido y el valor aceptado no son lo mismo.
+    """
+    viejo = _manifiesto(manifest_version="1.1")
+
+    assert viejo.manifest_version == "1.1"
+    assert viejo.stage_durations_ms == {}
