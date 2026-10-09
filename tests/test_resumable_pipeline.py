@@ -77,6 +77,29 @@ def _private(name: str) -> object:
     return cast("object", getattr(orchestrator, name))
 
 
+class RelojPinhado:
+    """Reloj monotónico falso con avance explicito.
+
+    Los tests de duracion necesitan una cifra EXACTA, no `>= 0`. Sin un reloj
+    pinchado, cualquier reloj da un numero no negativo y el test no puede
+    distinguir una implementacion correcta de una mutada.
+    """
+
+    ahora: float
+    paso_s: float
+
+    def __init__(self, inicio: float = 0.0, *, paso_s: float = 0.0) -> None:
+        self.ahora = inicio
+        self.paso_s = paso_s
+
+    def avanzar(self, segundos: float) -> None:
+        self.ahora += segundos
+
+    def __call__(self) -> float:
+        self.ahora += self.paso_s
+        return self.ahora
+
+
 _cleanup_registry = cast("Callable[[], _Registry]", _private("_CleanupRegistry"))
 
 
@@ -1205,3 +1228,194 @@ def test_resume_invalidates_downstream_stages_when_source_content_changes(
     assert counter.transcribe_calls == 2
     assert counter.reframe_calls == 2
     assert counter.subtitles_calls == 2
+
+
+# --------------------------------------------------------------------------
+# Tiempo por etapa. Vive aqui y no en un archivo aparte porque necesita los
+# dobles de este modulo, y porque el valor de estos tests es precisamente que
+# corren el orquestador de verdad.
+# --------------------------------------------------------------------------
+
+_ETAPAS_CRONOMETRADAS = (
+    PipelineStage.DOWNLOAD,
+    PipelineStage.TRANSCRIBE,
+    PipelineStage.MOMENTS,
+    PipelineStage.SELECT,
+    PipelineStage.REFRAME,
+    PipelineStage.SUBTITLES,
+)
+
+
+def test_el_orquestador_cronometra_cada_etapa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El cableado, no la mecanica de medir.
+
+    `PipelineStateManager` sabe medir pero no mide nada por si mismo: si falta un
+    `mark_started` en cualquier etapa, las duraciones salen vacias y el resto de
+    la suite sigue en verde. Este test mira el REGISTRO de una corrida real.
+    """
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    result = _run(config, deps, resume=False)
+    assert isinstance(result, PipelineResult)
+
+    mgr = PipelineStateManager.load(config.output_dir)
+    for stage in _ETAPAS_CRONOMETRADAS:
+        assert stage.value in mgr.checkpoint.durations_ms, (
+            f"{stage.value} no quedo cronometrada; durations_ms={mgr.checkpoint.durations_ms}"
+        )
+
+
+def test_reanudar_no_cronometra_lo_que_no_se_ejecuta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una reanudacion lee artefactos; no ejecuta, y no puede inventar duracion."""
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+    primera = _run(config, deps, resume=False)
+    assert isinstance(primera, PipelineResult)
+
+    antes = dict(PipelineStateManager.load(config.output_dir).checkpoint.durations_ms)
+    assert antes, "la primera corrida debe cronometrar algo"
+
+    segunda = _run(config, deps, resume=True)
+    assert isinstance(segunda, PipelineResult)
+
+    despues = PipelineStateManager.load(config.output_dir).checkpoint.durations_ms
+
+    assert despues == antes
+
+
+def test_las_duraciones_se_suman_entre_segmentos_y_el_estado_queda_en_el_primario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H2: sumar tiempos no puede cambiar lo que `stages` y `artifacts` significan.
+
+    Esos dos campos describen el segmento PRIMARIO y siguen siendo suyos. El
+    tiempo es la suma de todos, porque la pregunta que responde es "cuanto tardo
+    en renderizarse el paquete", no "cuanto tardo el primer clip".
+
+    El reloj va PINADO y el valor se comprueba exacto. Antes este test solo
+    afirmaba que la clave existia, lo cual no puede fallar: con reloj real los
+    cinco segmentos duran 0 ms, y acumular y sobrescribir dan el mismo cero. Con
+    250 ms por segmento, acumular da 1250 y sobrescribir da 250.
+    """
+    reloj = RelojPinhado(paso_s=0.250)
+    monkeypatch.setattr(time, "monotonic", reloj)
+    manager = PipelineStateManager(tmp_path)
+
+    for _indice in range(4):
+        _ = manager.mark_started(PipelineStage.REFRAME)
+        _ = manager.mark_accumulated(PipelineStage.REFRAME)
+    primario = tmp_path / "primario.mp4"
+    _ = primario.write_bytes(b"x")
+    _ = manager.mark_started(PipelineStage.REFRAME)
+    _ = manager.mark_segment_done(PipelineStage.REFRAME, primario, is_primary=True)
+
+    assert manager.checkpoint.stages[PipelineStage.REFRAME.value] == "done"
+    assert manager.checkpoint.artifacts[PipelineStage.REFRAME.value] == str(primario)
+    assert manager.checkpoint.durations_ms[PipelineStage.REFRAME.value] == 1250
+
+
+def test_un_segmento_secundario_no_toma_el_estado_de_la_etapa(tmp_path: Path) -> None:
+    """El primario es el dueno del estado de la etapa.
+
+    Con ocho clips, llamar `mark_done` en un secundario haria que el artefacto
+    registrado fuera el del ULTIMO segmento, no el del primario.
+    """
+    manager = PipelineStateManager(tmp_path)
+    secundario = tmp_path / "segundario.mp4"
+    _ = secundario.write_bytes(b"x")
+
+    _ = manager.mark_started(PipelineStage.SUBTITLES)
+    _ = manager.mark_segment_done(PipelineStage.SUBTITLES, secundario, is_primary=False)
+
+    assert PipelineStage.SUBTITLES.value not in manager.checkpoint.stages
+    assert PipelineStage.SUBTITLES.value not in manager.checkpoint.artifacts
+    assert PipelineStage.SUBTITLES.value in manager.checkpoint.durations_ms
+
+
+def test_un_fallo_de_un_segmento_secundario_tambien_se_cronometra(tmp_path: Path) -> None:
+    """El fallo de un secundario tambien consume tiempo, y es el caso caro.
+
+    Si no se contara, el registro subestimaria el coste de la etapa justo cuando
+    mas caro sale, que es justo cuando se necesita el numero.
+    """
+    manager = PipelineStateManager(tmp_path)
+
+    _ = manager.mark_started(PipelineStage.REFRAME)
+    _ = manager.mark_segment_failed(PipelineStage.REFRAME, is_primary=False)
+
+    assert PipelineStage.REFRAME.value in manager.checkpoint.durations_ms
+    assert PipelineStage.REFRAME.value not in manager.checkpoint.stages
+
+
+def test_una_etapa_invalidada_no_conserva_la_duracion_de_su_intento_descartado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: sin esto, el checkpoint anunciaria trabajo sobre un archivo que no existe.
+
+    Se transcribe, se invalida porque cambio la fuente, y se transcribe otra vez.
+    Si el intento muerto sobreviviera, la suma mediria dos transcripciones cuando
+    solo hubo una viva.
+    """
+    reloj = RelojPinhado()
+    monkeypatch.setattr(time, "monotonic", reloj)
+    manager = PipelineStateManager(tmp_path)
+    artefacto = tmp_path / "transcript.json"
+    _ = artefacto.write_bytes(b"{}")
+
+    _ = manager.mark_started(PipelineStage.TRANSCRIBE)
+    reloj.avanzar(10.0)
+    _ = manager.mark_done(PipelineStage.TRANSCRIBE, artefacto)
+    assert manager.checkpoint.durations_ms["transcribe"] == 10_000
+
+    _ = manager.invalidate_downstream_stages()
+
+    assert "transcribe" not in manager.checkpoint.durations_ms
+
+    _ = manager.mark_started(PipelineStage.TRANSCRIBE)
+    reloj.avanzar(7.0)
+    _ = manager.mark_done(PipelineStage.TRANSCRIBE, artefacto)
+
+    # 7 s del intento vivo. Si el descartado sobreviviera, serian 17.
+    assert manager.checkpoint.durations_ms["transcribe"] == 7_000
+
+
+def test_invalidate_audio_dependents_tambien_descarta_la_duracion(tmp_path: Path) -> None:
+    """La misma verdad para las etapas que dependen de la pista de audio."""
+    manager = PipelineStateManager(tmp_path)
+    artefacto = tmp_path / "final.mp4"
+    _ = artefacto.write_bytes(b"x")
+
+    _ = manager.mark_started(PipelineStage.SUBTITLES)
+    _ = manager.mark_done(PipelineStage.SUBTITLES, artefacto)
+    _ = manager.invalidate_audio_dependents()
+
+    assert "subtitles" not in manager.checkpoint.durations_ms
+
+
+def test_la_duracion_usa_el_reloj_monotonico_y_no_el_de_pared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H4: una asercion `>= 0` NO distingue `monotonic` de `time`.
+
+    Los dos dan diferencias no negativas en la practica, asi que el test pasaria
+    con cualquiera de los dos relojes y la mutacion `monotonic` -> `time`
+    sobreviviria. Aqui el reloj de pared queda FIJO en 5000 y el monotónico avanza
+    250 ms: con `monotonic` la duracion es 250, con `time` seria 4 000 000.
+    """
+    reloj = RelojPinhado(inicio=1000.0)
+    monkeypatch.setattr(time, "monotonic", reloj)
+    monkeypatch.setattr(time, "time", lambda: 5000.0)
+    manager = PipelineStateManager(tmp_path)
+    artefacto = tmp_path / "source.mp4"
+    _ = artefacto.write_bytes(b"x")
+
+    _ = manager.mark_started(PipelineStage.DOWNLOAD)
+    reloj.avanzar(0.250)
+    _ = manager.mark_done(PipelineStage.DOWNLOAD, artefacto)
+
+    assert manager.checkpoint.durations_ms["download"] == 250

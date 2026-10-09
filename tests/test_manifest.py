@@ -69,7 +69,7 @@ def test_write_and_read_manifest_round_trip(tmp_path: Path) -> None:
     assert path.name == "run_manifest.json"
     restored = read_manifest(path)
     assert restored == manifest
-    assert restored.manifest_version == "1.1"
+    assert restored.manifest_version == "1.2"
 
 
 def test_manifest_json_records_gate_and_hashes(tmp_path: Path) -> None:
