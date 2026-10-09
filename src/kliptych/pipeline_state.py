@@ -7,6 +7,7 @@ con su artefacto correspondiente para garantizar idempotencia en la reanudación
 
 import os
 import tempfile
+import time
 import uuid
 from collections.abc import Sequence
 from contextlib import suppress
@@ -54,6 +55,14 @@ class PipelineCheckpoint(BaseModel):
     source_content_hash: str | None = None
     audio_content_hash: str | None = None
     segment_coords: tuple[tuple[float, float], ...] = ()
+    # Milisegundos que tardo cada etapa. Sin esto el registro dice QUE se hizo y
+    # nunca CUANTO costo, y sin ese numero no se puede decidir si una etapa es el
+    # cuello de botella: una mitigacion que suma 20 min por corrida vale distinta
+    # cosa sobre un pipeline de 40 min que sobre uno de 4 horas.
+    #
+    # Una etapa reanudada desde cache NO aparece: no se ejecuto. Escribir 0 seria
+    # una cifra, y una cifra se lee como medicion.
+    durations_ms: dict[str, int] = Field(default_factory=dict)
 
 
 class PipelineStateManager:
@@ -63,6 +72,10 @@ class PipelineStateManager:
     checkpoint_path: Path
     checkpoint: PipelineCheckpoint
     is_loaded: bool
+    # Instantes monotónicos de arranque, por etapa. Vive en memoria a proposito:
+    # `time.monotonic()` no tiene sentido entre dos procesos, asi que persistirlo
+    # daria duraciones que miden el reloj, no el trabajo.
+    _started_at: dict[str, float]
 
     def __init__(self, output_dir: Path, *, input_fingerprint: str | None = None) -> None:
         """Inicializa el administrador de estado en el directorio de salida.
@@ -77,6 +90,7 @@ class PipelineStateManager:
         """
         self.output_dir = output_dir
         self.checkpoint_path = output_dir / _CHECKPOINT_FILE
+        self._started_at = {}
         existing = self._try_load_existing()
         if existing is not None:
             self.checkpoint = existing
@@ -109,6 +123,7 @@ class PipelineStateManager:
                 checkpoint limpio.
         """
         self.is_loaded = False
+        self._started_at.clear()
         now = datetime.now(UTC).isoformat()
         self.checkpoint = PipelineCheckpoint(
             run_id=uuid.uuid4().hex,
@@ -160,29 +175,41 @@ class PipelineStateManager:
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 
-    def invalidate_audio_dependents(self) -> None:
-        """Invalida las etapas que dependen de la pista de audio externa."""
-        for stage in (PipelineStage.SUBTITLES, PipelineStage.COMPLETED):
+    def _invalidate(self, stages: Sequence[PipelineStage]) -> None:
+        """Borra estado, artefacto y duracion de las etapas dadas.
+
+        La duracion se borra con el resto porque las tres cosas describen el MISMO
+        trabajo. Si se conservara, una etapa reejecutada sumaria su intento
+        descartado con el vivo, y el checkpoint anunciaria una duracion sobre un
+        archivo que ya no existe. Ese numero no seria un promedio: seria falso.
+
+        Args:
+            stages: Etapas cuyo trabajo deja de ser valido.
+        """
+        for stage in stages:
             stage_name = stage.value
             _ = self.checkpoint.stages.pop(stage_name, None)
             _ = self.checkpoint.artifacts.pop(stage_name, None)
+            _ = self.checkpoint.durations_ms.pop(stage_name, None)
+
+    def invalidate_audio_dependents(self) -> None:
+        """Invalida las etapas que dependen de la pista de audio externa."""
+        self._invalidate((PipelineStage.SUBTITLES, PipelineStage.COMPLETED))
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 
     def invalidate_downstream_stages(self) -> None:
         """Invalida las etapas dependientes del video fuente."""
-        downstream = [
-            PipelineStage.TRANSCRIBE,
-            PipelineStage.MOMENTS,
-            PipelineStage.SELECT,
-            PipelineStage.REFRAME,
-            PipelineStage.SUBTITLES,
-            PipelineStage.COMPLETED,
-        ]
-        for stage in downstream:
-            stage_name = stage.value
-            _ = self.checkpoint.stages.pop(stage_name, None)
-            _ = self.checkpoint.artifacts.pop(stage_name, None)
+        self._invalidate(
+            (
+                PipelineStage.TRANSCRIBE,
+                PipelineStage.MOMENTS,
+                PipelineStage.SELECT,
+                PipelineStage.REFRAME,
+                PipelineStage.SUBTITLES,
+                PipelineStage.COMPLETED,
+            )
+        )
         self.checkpoint.segment_coords = ()
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
@@ -224,8 +251,105 @@ class PipelineStateManager:
         stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
         self.checkpoint.stages[stage_name] = StageStatus.DONE
         self.checkpoint.artifacts[stage_name] = str(artifact)
+        self._record_duration(stage_name)
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
+
+    def mark_segment_done(
+        self, stage: str | PipelineStage, artifact: Path, *, is_primary: bool
+    ) -> None:
+        """Cronometra una etapa por segmentos sin perder de vista al primario.
+
+        `reframe` y `subtitles` corren una vez por segmento, pero el checkpoint
+        tiene UNA entrada por etapa y esa entrada describe el segmento PRINCIPAL.
+        Un secundario no puede llamar a `mark_done`: se quedaria con el estado y el
+        artefacto de la etapa, y con ocho clips el artefacto registrado seria el
+        del ultimo, no el del primario.
+
+        El tiempo si se suma en todos: N segmentos son N trabajos distintos, y lo
+        que se quiere responder es "cuanto tardo en renderizarse el paquete", no
+        "cuanto tardo el primer clip".
+
+        Args:
+            stage: Etapa cronometrada.
+            artifact: Artefacto del segmento, solo si es el primario.
+            is_primary: Si este segmento es el dueno del estado de la etapa.
+        """
+        if is_primary:
+            self.mark_done(stage, artifact)
+        else:
+            self.mark_accumulated(stage)
+
+    def mark_segment_failed(self, stage: str | PipelineStage, *, is_primary: bool) -> None:
+        """Marca el fallo de un segmento cronometrandolo, sea primario o no.
+
+        Un intento fallido de un secundario tambien consumio tiempo real. Si no se
+        contara, el registro subestimaria el coste de la etapa justo en el caso en
+        que mas caro sale.
+
+        Args:
+            stage: Etapa que fallo.
+            is_primary: Si el segmento fallido es el dueno del estado de la etapa.
+        """
+        if is_primary:
+            self.mark_failed(stage)
+        else:
+            self.mark_accumulated(stage)
+
+    def mark_accumulated(self, stage: str | PipelineStage) -> None:
+        """Acumula la duracion de una etapa SIN tomar posesion de su estado.
+
+        `reframe` y `subtitles` corren una vez por segmento, pero el checkpoint
+        tiene UNA sola entrada por etapa, y esa entrada describe el segmento
+        principal. Un segmento secundario no puede usar `mark_done`: haria que ese
+        segmento fuera el dueno del estado y del artefacto de la etapa, que es
+        exactamente lo que `stages` y `artifacts` significan.
+
+        El tiempo si se suma: N segmentos son N trabajos distintos, y lo que se
+        quiere responder es "cuanto tardo en renderizarse el paquete", no "cuanto
+        tardo el primer clip".
+
+        Args:
+            stage: Nombre de la etapa o miembro de ``PipelineStage``.
+        """
+        stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
+        self._record_duration(stage_name)
+
+    def mark_started(self, stage: str | PipelineStage) -> None:
+        """Marca el instante de arranque de una etapa para medir su duracion.
+
+        Registrar el INICIO y no solo el final es lo que hace el tiempo atribuible
+        a una etapa: dos etapas que empiezan a la vez siguen teniendo duraciones
+        distintas.
+
+        No persiste nada. `time.monotonic()` no significa nada en otro proceso,
+        asi que un arranque guardado en disco seria una promesa que una reanudacion
+        no podria cumplir.
+
+        Args:
+            stage: Nombre de la etapa o miembro de ``PipelineStage``.
+        """
+        stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
+        self._started_at[stage_name] = time.monotonic()
+
+    def _record_duration(self, stage: str) -> None:
+        """Suma al registro la duracion de una etapa si se marco su arranque.
+
+        Una etapa reanudada desde cache no llega aqui: no se llamo `mark_started`,
+        no hay arranque que fechar y por tanto no hay duracion que registrar. Esa
+        es la diferencia entre "tardo 0 ms", que es una cifra, y "no se ejecuto",
+        que es un hecho.
+
+        Args:
+            stage: Nombre de la etapa, ya normalizado a ``str``.
+        """
+        started = self._started_at.pop(stage, None)
+        if started is None:
+            return
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        self.checkpoint.durations_ms[stage] = (
+            self.checkpoint.durations_ms.get(stage, 0) + elapsed_ms
+        )
 
     def mark_failed(self, stage: str | PipelineStage) -> None:
         """Marca una etapa como fallida y persiste el estado.
@@ -235,6 +359,7 @@ class PipelineStateManager:
         """
         stage_name = str(stage.value if isinstance(stage, PipelineStage) else stage)
         self.checkpoint.stages[stage_name] = StageStatus.FAILED
+        self._record_duration(stage_name)
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 

@@ -7,8 +7,10 @@ sin la mención obligatoria queda rechazado y el paquete lo reporta.
 """
 
 import inspect
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -164,6 +166,37 @@ class _RunContext:
     model: CampaignModel
     engine: Gate
     builder: PieceAssembler
+    # Milisegundos por fase de ESTA ruta. Un dict mutable a proposito dentro de un
+    # dataclass congelado: el contexto se construye una vez y las fases lo van
+    # llenando. La ruta `long_video` usa el checkpoint del orquestador; esta usa el
+    # manifiesto, y son los dos unicos sitios donde una corrida deja registro.
+    stage_durations_ms: dict[str, int] = field(default_factory=dict)
+
+
+@contextmanager
+def _fase(context: _RunContext, nombre: str) -> Generator[None]:
+    """Cronometra una fase de la corrida y guarda su duracion en el contexto.
+
+    Mide en `finally` a proposito: una fase que falla tambien consumio tiempo, y
+    ese es justo el numero que hace falta para decidir si el cuello de botella es
+    un problema de rendimiento o de fiabilidad.
+
+    Una fase reanudada desde cache no entra aqui: no se ejecuta, y el tiempo de
+    leer su artefacto no es trabajo suyo.
+
+    Args:
+        context: Contexto de la corrida, destino de la duracion.
+        nombre: Nombre de la fase, tal como aparece en el manifiesto.
+
+    Yields:
+        `None` mientras corre la fase.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        context.stage_durations_ms[nombre] = context.stage_durations_ms.get(nombre, 0) + elapsed_ms
 
 
 def run_given_clips(
@@ -324,24 +357,38 @@ def _unresolved(context: _RunContext, resolution: ResolutionResult) -> RunResult
 
 
 def _resolved(context: _RunContext, contract: Contract) -> RunResult:
-    pieces, gates, outputs = _assemble_pieces(context, contract)
+    with _fase(context, "assemble"):
+        pieces, gates, outputs = _assemble_pieces(context, contract)
     if not pieces:
         msg = "el contrato no declara clips de video para ensamblar"
         raise PipelineError(msg)
+    # Primera escritura: deja constancia de la corrida aunque `export` reviente, y
+    # por eso todavia no puede contener la duracion de la exportacion.
     manifest_path = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
-    delivery = export_delivery(
-        contract=contract,
-        pieces=pieces,
-        gate=context.engine,
-        assets=context.registry,
-        destination=context.request.destination,
-        approve_manual_review=context.request.approve_manual_review,
-        approved_by=context.request.approved_by,
+    try:
+        with _fase(context, "export"):
+            delivery = export_delivery(
+                contract=contract,
+                pieces=pieces,
+                gate=context.engine,
+                assets=context.registry,
+                destination=context.request.destination,
+                approve_manual_review=context.request.approve_manual_review,
+                approved_by=context.request.approved_by,
+            )
+    except BaseException:
+        # Segunda escritura en el camino de fallo. Sin ella el manifiesto en disco
+        # seria el de antes de exportar y diria que `export` no se midio, cuando si
+        # se ejecuto y fallo: eso es el peor sitio para callar un dato. Aqui no hay
+        # `delivery` que registrar y no hace falta; `_fase` ya acumulo su tiempo.
+        _ = _write_manifest(context, contract=contract, outputs=outputs, gates=gates)
+        raise
+    # Segunda escritura en el camino de exito, y no solo cuando hay aprobacion
+    # manual. Sin ella el campo existiria y valdria exactamente cero para la fase
+    # mas cara de medir.
+    manifest_path = _write_manifest(
+        context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
     )
-    if delivery.manually_approved_rules:
-        manifest_path = _write_manifest(
-            context, contract=contract, outputs=outputs, gates=gates, delivery=delivery
-        )
     return RunResult(
         run_id=context.identifier,
         outcome=RunOutcome(delivery.status.value),
@@ -852,6 +899,7 @@ def _write_manifest(
         outputs=tuple(outputs),
         gates=tuple(gates),
         degradations=request.environment.degradations,
+        stage_durations_ms=dict(context.stage_durations_ms),
         manually_approved_rules=manually_approved_rules,
         approved_by=approved_by,
         approved_at_utc=approved_at_utc,

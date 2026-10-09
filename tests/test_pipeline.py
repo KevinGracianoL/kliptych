@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast, override
@@ -755,13 +756,160 @@ def test_dos_tolerancias_dan_manifiestos_distintos(
         "si el digest difiere, este test ya no mide solo la tolerancia"
     )
     # Campos que varian entre CUALQUIER par de corridas y por tanto no dicen
-    # nada sobre la tolerancia: el reloj, el identificador de corrida y las
-    # rutas absolutas que arrastran los outputs.
-    volatiles = {"run_id", "started_at", "finished_at", "outputs", "assets"}
+    # nada sobre la tolerancia: el reloj, el identificador de corrida, las rutas
+    # absolutas que arrastran los outputs y los tiempos por fase, que dependen de
+    # lo que tardo la maquina y no de lo que se decidio.
+    volatiles = {
+        "run_id",
+        "started_at",
+        "finished_at",
+        "outputs",
+        "assets",
+        "stage_durations_ms",
+    }
     distintos = {
         clave for clave in estricto if clave not in volatiles and estricto[clave] != holgado[clave]
     }
     assert distintos == {"aspect_tolerance", "gates"}, distintos
+
+
+# --------------------------------------------------------------------------
+# Tiempo por fase en el manifiesto. Sin esto no se puede saber si una fase es el
+# cuello de botella, y sin saberlo no se puede decidir si una mitigacion que suma
+# 20 min por corrida vale el precio.
+# --------------------------------------------------------------------------
+
+
+class _RelojPinhado:
+    """Reloj monotónico falso con avance explicito, para exigir cifras exactas.
+
+    Un `>= 0` no distingue `monotonic` de `time`: los dos dan diferencias no
+    negativas. Pinchar el reloj convierte "tardo lo que tardo" en una cifra que un
+    reloj de pared no puede reproducir.
+    """
+
+    ahora: float
+    paso: float
+
+    def __init__(self, inicio: float = 0.0, *, paso: float = 0.0) -> None:
+        self.ahora = inicio
+        self.paso = paso
+
+    def avanzar(self, segundos: float) -> None:
+        self.ahora += segundos
+
+    def __call__(self) -> float:
+        self.ahora += self.paso
+        return self.ahora
+
+
+def _corrida_con_tiempos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, brief: str
+) -> dict[str, object]:
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=_unit_request(tmp_path, brief=brief, assembler=_StubAssembler()),
+    )
+    return _json(Path(result.manifest_path))
+
+
+def test_el_manifiesto_lleva_el_tiempo_de_cada_fase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _corrida_con_tiempos(tmp_path, monkeypatch, brief="brief del tiempo por fase")
+
+    duraciones = cast("dict[str, int]", manifest["stage_durations_ms"])
+
+    assert "assemble" in duraciones, duraciones
+    assert "export" in duraciones, duraciones
+
+
+def test_export_no_queda_en_cero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """La segunda escritura del manifiesto es la que hace que esto sea cierto.
+
+    La PRIMERA escritura ocurre antes de exportar, asi que sin la segunda el campo
+    no tendria entrada para `export`. Un 0 aqui seria el sintoma exacto de esa
+    omision: el campo existe, se ve, y no dice nada.
+    """
+    manifest = _corrida_con_tiempos(tmp_path, monkeypatch, brief="brief del tiempo por fase")
+
+    duraciones = cast("dict[str, int]", manifest["stage_durations_ms"])
+
+    assert duraciones["export"] != 0, duraciones
+
+
+def test_las_fases_usan_el_reloj_monotonico_y_no_el_de_pared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H4 para `_fase`: con reloj de pared las duraciones serian de otro orden.
+
+    El reloj de pared queda FIJO en 5000 y el monotónico avanza 250 ms por
+    llamada. `_fase` mide con `time.monotonic`, asi que cada fase vale 250 ms
+    exactos. Con la mutacion `monotonic` -> `time` la misma corrida devuelve
+    3 999 750 ms. Una asercion `>= 0` no distinguiria los dos casos.
+    """
+    reloj = _RelojPinhado(inicio=1000.0, paso=0.250)
+    monkeypatch.setattr(time, "monotonic", reloj)
+    monkeypatch.setattr(time, "time", lambda: 5000.0)
+
+    manifest = _corrida_con_tiempos(tmp_path, monkeypatch, brief="brief del reloj")
+
+    duraciones = cast("dict[str, int]", manifest["stage_durations_ms"])
+
+    assert duraciones == {"assemble": 250, "export": 250}
+
+
+def test_una_fase_que_falla_tambien_queda_cronometrada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H3: si `export` revienta, el manifiesto en disco no dice "no medido".
+
+    `_fase` mide en `finally` y la segunda escritura del manifiesto tambien. Si
+    cualquiera de las dos estuviera solo en el camino de exito, el registro en
+    disco seria el de antes de exportar: diria que `export` no se midio, cuando si
+    se ejecuto y fallo. Ese es el peor sitio para callar un dato.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+
+    def _explota(**_kwargs: object) -> object:
+        msg = "destino no escribible"
+        raise ExportError(msg)
+
+    _ = monkeypatch.setattr("kliptych.pipeline.export_delivery", _explota)
+
+    with pytest.raises(ExportError):
+        _ = run_given_clips(
+            model=_StaticModel(draft, _caption()),
+            settings=Settings.from_root(tmp_path),
+            request=_unit_request(
+                tmp_path, brief="brief de exportacion rota", assembler=_StubAssembler()
+            ),
+        )
+
+    manifiestos = sorted((tmp_path / "runs").glob("*/run_manifest.json"))
+    assert manifiestos, "la corrida fallida debe dejar manifiesto"
+    duraciones = cast("dict[str, int]", _json(manifiestos[-1])["stage_durations_ms"])
+
+    assert "assemble" in duraciones, duraciones
+    assert "export" in duraciones, duraciones
 
 
 def test_pipeline_blocks_duration_above_max(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 """Manifiesto reproducible de cada corrida (``runs/<run_id>/run_manifest.json``)."""
 
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -60,6 +60,16 @@ class RunManifest(_ManifestBase):
     outputs: tuple[OutputHash, ...] = ()
     gates: tuple[GateResult, ...] = ()
     degradations: tuple[str, ...] = ()
+    # Milisegundos por fase, con la fase como clave. El brief 10.1 pide argumentos
+    # de render, hardware y hashes de outputs, y NO pide tiempo: sin este campo el
+    # registro no puede responder si una fase es el cuello de botella, y una
+    # mitigacion que cuesta "+20 min por corrida" no se puede evaluar sin saber
+    # cuanto costaba antes.
+    #
+    # `ge=0` porque un tiempo negativo es imposible: el reloj que las produce es
+    # monotónico, y si alguna vez apareciera un negativo seria un defecto, no una
+    # medida. Las fases reanudadas desde cache no aparecen: no se ejecutaron.
+    stage_durations_ms: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     manually_approved_rules: tuple[str, ...] = ()
     approved_by: str | None = None
     approved_at_utc: str | None = None
