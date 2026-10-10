@@ -41,6 +41,7 @@ from kliptych.contract import (
 from kliptych.contract.draft import ContractDraft, DurationDraft, PlatformDraft
 from kliptych.contract.evidence import Confidence, SourceEvidence
 from kliptych.contract.schema import Segment
+from kliptych.degradations import recolectar
 from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
@@ -565,7 +566,12 @@ def test_audit_10_traceability_in_manual_approval(tmp_path: Path) -> None:
 def test_audit_14_nvenc_fallback_in_reframe_and_subtitles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifica que reframe y subtitles usen fallback h264_nvenc -> libx264 ante fallos de NVENC."""
+    """Verifica que reframe y subtitles usen fallback h264_nvenc -> libx264 ante fallos de NVENC.
+
+    Desde que el fallback es fail-closed, provocarlo exige un colector activo: sin
+    el, la caida revienta en vez de embarcar en silencio. El colector se abre aqui
+    y ademas se comprueba que el evento quedo registrado con ambos codecs.
+    """
     calls: list[list[str]] = []
 
     def mock_subprocess_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -580,10 +586,31 @@ def test_audit_14_nvenc_fallback_in_reframe_and_subtitles(
     monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
 
     render = RenderConfig(nvenc_available=True)
+
+    with recolectar() as degradaciones:
+        _ejecutar_casos_de_fallback(tmp_path, render, calls)
+
+    eventos = degradaciones.como_tupla()
+    assert len(eventos) == 2, eventos
+    for evento in eventos:
+        assert "h264_nvenc" in evento
+        assert "libx264" in evento
+
+
+def _ejecutar_casos_de_fallback(
+    tmp_path: Path,
+    render: RenderConfig,
+    calls: list[list[str]],
+) -> None:
+    """Provoca las dos caidas del test 14.
+
+    Args:
+        tmp_path: Directorio de trabajo.
+        render: Config con NVENC declarado disponible.
+        calls: Lista donde se acumulan los argv recibidos.
+    """
     temp_reframe = tmp_path / "temp_reframe.mp4"
     _ = temp_reframe.write_bytes(b"temp")
-
-    # 1. Probar fallback con ReframeError
     reframe_cmd = [
         "ffmpeg",
         "-i",

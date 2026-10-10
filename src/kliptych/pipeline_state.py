@@ -18,6 +18,8 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kliptych.degradations import activas
+
 _CHECKPOINT_FILE = "checkpoint.json"
 
 
@@ -55,6 +57,12 @@ class PipelineCheckpoint(BaseModel):
     source_content_hash: str | None = None
     audio_content_hash: str | None = None
     segment_coords: tuple[tuple[float, float], ...] = ()
+    # Degradaciones EN CALIENTE de la corrida: lo que se pidio y lo que se uso
+    # de verdad. Distintas de las de pre-vuelo de `EnvironmentReport`, que solo
+    # ven el estado antes de arrancar. Se rellenan en cada `save()` leyendo el
+    # colector activo, para que el archivo nunca pueda afirmar un encoder que no
+    # codifico el artefacto.
+    degradations: tuple[str, ...] = ()
     # Milisegundos que tardo cada etapa. Sin esto el registro dice QUE se hizo y
     # nunca CUANTO costo, y sin ese numero no se puede decidir si una etapa es el
     # cuello de botella: una mitigacion que suma 20 min por corrida vale distinta
@@ -422,6 +430,9 @@ class PipelineStateManager:
 
     def save(self) -> None:
         """Escribe el checkpoint a disco de forma atómica."""
+        colector = activas()
+        if colector is not None:
+            self.checkpoint.degradations = colector.como_tupla()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.output_dir, prefix=".checkpoint-", suffix=".tmp")
         try:

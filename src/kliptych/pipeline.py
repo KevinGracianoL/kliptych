@@ -32,6 +32,7 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
+from kliptych.degradations import activas
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
@@ -881,6 +882,16 @@ def _write_manifest(
     manually_approved_rules = delivery.manually_approved_rules if delivery is not None else ()
     approved_by = delivery.approved_by if delivery is not None else None
     approved_at_utc = delivery.approved_at_utc if delivery is not None else None
+    # Las degradaciones del manifiesto son las DOS clases, no solo las de
+    # pre-vuelo. `environment.degradations` vio la maquina antes de arrancar; el
+    # colector vio lo que paso dentro. Quedarse con las primeras dejaria fuera
+    # toda caida en caliente, que es justo la que no se puede detectar mirando.
+    en_caliente = activas()
+    degradaciones = (
+        tuple(request.environment.degradations) + en_caliente.como_tupla()
+        if en_caliente is not None
+        else tuple(request.environment.degradations)
+    )
     manifest = RunManifest(
         run_id=context.identifier,
         started_at=context.started_at,
@@ -898,7 +909,7 @@ def _write_manifest(
         assets=tuple(context.registry.assets.values()),
         outputs=tuple(outputs),
         gates=tuple(gates),
-        degradations=request.environment.degradations,
+        degradations=degradaciones,
         stage_durations_ms=dict(context.stage_durations_ms),
         manually_approved_rules=manually_approved_rules,
         approved_by=approved_by,
