@@ -45,6 +45,9 @@ class _MissingMentionModel(CampaignModel):
 class _CopyAssembler(PieceAssembler):
     """Ensamblador que copia los bytes del clip al artefacto."""
 
+    def __init__(self, *, render: RenderConfig | None = None) -> None:
+        _ = render
+
     @override
     def assemble(self, spec: RenderSpec) -> Path:
         _ = (spec.watermark, spec.watermark_config, spec.subtitles, spec.mute_audio)

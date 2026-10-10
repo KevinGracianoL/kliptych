@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import assert_never
 
 from kliptych.contract import Layout, SplitScreenConfig, Watermark, WatermarkPosition
-from kliptych.encoding import muted_audio_arguments
+from kliptych.encoding import RenderConfig, muted_audio_arguments, video_encoder_arguments
 
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
@@ -114,6 +114,7 @@ class FFmpegAssembler:
         ffmpeg: str = "ffmpeg",
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         ffprobe: str = "ffprobe",
+        render: RenderConfig | None = None,
     ) -> None:
         """Configura el binario y el timeout del ensamblado.
 
@@ -122,10 +123,14 @@ class FFmpegAssembler:
             timeout_s: Timeout máximo del ensamblado, en segundos.
             ffprobe: Nombre o ruta del binario ffprobe para contar el audio
                 de cada panel del split antes de elegir el mapa final.
+            render: Config de render. Su `nvenc_available` decide el codec; sin
+                ella vale el default de la clase (`libx264`), que es lo mismo que
+                hacia el string que habia antes.
         """
         self._ffmpeg: str = ffmpeg
         self._timeout_s: float = timeout_s
         self._ffprobe: str = ffprobe
+        self._render: RenderConfig = RenderConfig() if render is None else render
 
     def assemble(self, spec: RenderSpec) -> Path:
         """Ensambla un clip entregado en una pieza vertical para el gate.
@@ -523,15 +528,8 @@ class FFmpegAssembler:
             ]
         if mute_audio:
             argv += list(muted_audio_arguments())
+        argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
         argv += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -651,15 +649,8 @@ class FFmpegAssembler:
             video_label=video_label,
             mute_audio=mute_audio,
         )
+        argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
         argv += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",

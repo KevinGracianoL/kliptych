@@ -326,6 +326,19 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"tests/test_nvenc_encoder.py" = [
+    # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
+    # argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+    # Los espian reconstructores de argv viven dentro de los tests: es el patron
+    # del repo para sustituir la clase del modulo sin tocar su firma.
+    "docstring-missing-returns",
+    "no-self-use",
+    # Alcanzar `_render_config_para` de la CLI por atributo, no por import:
+    # importar el nombre privado cruzaria modulos de test.
+    "import-outside-top-level",
+]
 "tests/test_audio_locked.py" = [
     # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
     # argumentos y shell=False.

@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
@@ -25,7 +26,7 @@ from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
 from kliptych.contract.enums import Aspect
 from kliptych.encoding import RenderConfig
-from kliptych.environment import SubprocessRunner, detect_environment
+from kliptych.environment import EnvironmentReport, SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
 from kliptych.gate import Gate
 from kliptych.gate.probe import FFprobeProbe
@@ -888,6 +889,14 @@ def _load_contract_draft_file(path_str: str | None) -> tuple[ContractDraft | Non
 
 
 def _run_command(args: argparse.Namespace) -> int:
+    """Punto de entrada de `kliptych run`.
+
+    Args:
+        args: Argumentos parseados del comando.
+
+    Returns:
+        El codigo de salida del proceso.
+    """
     brief_path = cast(
         "str",
         getattr(args, "brief_option", None) or getattr(args, "brief", "") or "",
@@ -898,8 +907,6 @@ def _run_command(args: argparse.Namespace) -> int:
         )
         return 1
     out = cast("str", getattr(args, "out", ""))
-    recorded = cast("str | None", getattr(args, "recorded", None))
-    root = cast("str | None", getattr(args, "root", None))
     approve_manual_review = cast("bool", getattr(args, "approve_manual_review", False))
     approved_by = cast("str | None", getattr(args, "approved_by", None))
     if approve_manual_review and (approved_by is None or not approved_by.strip()):
@@ -920,34 +927,91 @@ def _run_command(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        brief_text = _load_run_brief(brief_path)
-        model, model_version = _build_model(recorded)
-        settings = Settings.from_root(Path(root)) if root is not None else Settings.from_env()
-        request = RunRequest(
-            brief=brief_text,
-            destination=Path(out),
-            environment=detect_environment(SubprocessRunner()),
-            model_version=model_version,
-            prompt_version=PROMPT_VERSION,
-            caption_prompt_version=CAPTION_PROMPT_VERSION,
-            brief_path=Path(brief_path),
+        peticion = _construir_peticion_run(
+            args,
+            root=getattr(args, "root", None),
+            out=out,
+            brief_path=brief_path,
             approve_manual_review=approve_manual_review,
             approved_by=approved_by,
             contract_draft=contract_draft,
-            # La CLI NO declara todavia la tolerancia: no hay bandera para
-            # cambiarla, asi que esto equivale al default de la clase y el
-            # pipeline haria lo mismo con `render=None`. Se pone de forma
-            # explicita para que el punto de entrada sea visible como UNO de los
-            # dos, y no para insinuar que la CLI puede elegir la geometria.
-            # Cuando exista la bandera, este es el sitio.
-            render=RenderConfig(),
         )
-        result = run_given_clips(model=model, settings=settings, request=request)
+        result = run_given_clips(
+            model=peticion.model, settings=peticion.settings, request=peticion.run
+        )
     except (IngestError, ModelError, PipelineError, AssembleError, ExportError) as error:
         _ = sys.stderr.write(json.dumps({"error": str(error)}, indent=2) + "\n")
         return 1
     _ = sys.stdout.write(json.dumps(_run_payload(result), indent=2) + "\n")
     return 0 if result.outcome is RunOutcome.EXPORTED else 1
+
+
+@dataclass(frozen=True, slots=True)
+class _PeticionRun:
+    """La peticion de corrida junto al modelo que la resuelve."""
+
+    run: RunRequest
+    model: CampaignModel
+    settings: Settings
+
+
+def _construir_peticion_run(
+    args: argparse.Namespace,
+    *,
+    root: str | None,
+    out: str,
+    brief_path: str,
+    approve_manual_review: bool,
+    approved_by: str | None,
+    contract_draft: ContractDraft | None,
+) -> _PeticionRun:
+    """Construye la peticion de `kliptych run` con el entorno ya detectado.
+
+    Un solo `detect_environment()` por corrida: alimenta el manifiesto Y la
+    config de render. Antes el manifiesto recibia la deteccion y el
+    `RenderConfig` se construia con el default, asi que NVENC nunca llegaba a
+    ningun render aunque la maquina lo tuviera.
+
+    Args:
+        args: Argumentos parseados del comando.
+        root: Raiz del workspace, o ``None`` para usar la del entorno.
+        out: Directorio de salida de la corrida.
+        brief_path: Ruta del brief ya validada.
+        approve_manual_review: Si se admite aprobacion manual.
+        approved_by: Responsable de la aprobacion, si la hay.
+        contract_draft: Borrador de contrato ya cargado, o ``None``.
+
+    Returns:
+        La peticion, el modelo y las rutas resueltas.
+    """
+    brief_text = _load_run_brief(
+        cast("str", getattr(args, "brief_option", None) or getattr(args, "brief", ""))
+    )
+    model, model_version = _build_model(cast("str | None", getattr(args, "recorded", None)))
+    settings = Settings.from_root(Path(root)) if root is not None else Settings.from_env()
+    environment = detect_environment(SubprocessRunner())
+    request = RunRequest(
+        brief=brief_text,
+        destination=Path(out),
+        environment=environment,
+        model_version=model_version,
+        prompt_version=PROMPT_VERSION,
+        caption_prompt_version=CAPTION_PROMPT_VERSION,
+        brief_path=Path(brief_path),
+        approve_manual_review=approve_manual_review,
+        approved_by=approved_by,
+        contract_draft=contract_draft,
+        # La CLI NO declara todavia la tolerancia: no hay bandera para
+        # cambiarla, asi que esto equivale al default de la clase y el
+        # pipeline haria lo mismo con `render=None`. Se pone de forma
+        # explicita para que el punto de entrada sea visible como UNO de los
+        # dos, y no para insinuar que la CLI puede elegir la geometria.
+        # Cuando exista la bandera, este es el sitio.
+        # El encoder se decide aqui, donde esta la deteccion. Los cinco
+        # lectores de `nvenc_available` leen el campo; esta es la escritura.
+        render=RenderConfig(nvenc_available=environment.nvenc_available),
+    )
+    return _PeticionRun(run=request, model=model, settings=settings)
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
@@ -987,31 +1051,39 @@ def _build_model(recorded: str | None) -> tuple[CampaignModel, str]:
     return backend, backend.model_version
 
 
-def _render_config_para(output_format: str | None) -> RenderConfig:
-    """La config de render de la corrida, derivada de `--format`.
+def _render_config_para(
+    output_format: str | None, environment: EnvironmentReport | None = None
+) -> RenderConfig:
+    """La config de render de la corrida, derivada de `--format` y del entorno.
 
     La tolerancia no se toca: `--format` cambia el ASPECTO, que es lo que el
     render produce y lo que el gate mide. Un flag que tambien moviera la
     tolerancia daria dos ejes por un knob y haria imposible saber cual de los dos
     produjo un veredicto.
 
+    `nvenc_available` sale de la deteccion. Sin esto el campo se quedaba en su
+    default y los cinco lectores de todo el pipeline leian siempre `False`, con
+    NVENC disponible en la maquina y sin usar.
+
     Args:
         output_format: El valor de `--format`, o ``None`` para no overriding.
+        environment: Deteccion del entorno; ``None`` usa el default de la clase.
 
     Returns:
-        La config con el aspecto objetivo pedido.
+        La config con el aspecto objetivo pedido y el encoder disponible.
 
     Raises:
         ValueError: Si `output_format` no corresponde a un miembro de `Aspect`.
     """
+    nvenc = environment.nvenc_available if environment is not None else False
     if output_format is None:
-        return RenderConfig()
+        return RenderConfig(nvenc_available=nvenc)
     try:
         aspecto = Aspect(output_format)
     except ValueError as error:
         msg = f"aspecto de salida no soportado: {output_format!r}"
         raise ValueError(msg) from error
-    return RenderConfig(target_aspect=aspecto.ratio)
+    return RenderConfig(target_aspect=aspecto.ratio, nvenc_available=nvenc)
 
 
 def _make_default_campaign_manager(
@@ -1074,12 +1146,15 @@ def _make_default_campaign_manager(
         backend = None
     repo = os.environ.get("KLIPTYCH_GIT_REPO", "owner/repo")
     provider = GitHubCliProvider(workdir=Path.cwd(), repo=repo)
+    # Una sola deteccion para las dos cosas que la necesitan: la config de render
+    # y el entorno que va al manifiesto.
+    environment = detect_environment(SubprocessRunner())
     # Una sola config para gate y orquestador. Que compartan el objeto es lo que
     # hace que "el aspecto con el que se acepto no reencuadrar" sea el mismo en
     # los dos lados de la comparacion. Con `--format` esto ya no es el default de
     # la clase: antes lo era siempre, y entonces `--format` no habria podido
     # cambiar nada aunque existiera.
-    render = _render_config_para(output_format)
+    render = _render_config_para(output_format, environment)
     effective_gate = gate if gate is not None else Gate(probe=FFprobeProbe(), render=render)
     effective_dest = destination if destination is not None else Path.cwd() / "delivery"
     effective_assets = assets if assets is not None else AssetRegistry(Path.cwd())
