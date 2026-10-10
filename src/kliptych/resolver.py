@@ -45,6 +45,7 @@ from kliptych.contract import (
     AudioPolicy,
     AudioRule,
     CaptionRules,
+    CaptionStyleConfig,
     Confidence,
     Contract,
     ContractDraft,
@@ -1250,6 +1251,7 @@ def _build_contract(
         analytics_proof_required=AnalyticsProofRequired(
             value=bool(_value(draft.analytics_proof_required))
         ),
+        caption_style=_resolve_caption_style(draft),
     )
 
 
@@ -1551,6 +1553,42 @@ def _resolve_languages(
         voice=_value(languages.voice),
         language=_value(languages.language),
     )
+
+
+def _resolve_caption_style(draft: ContractDraft) -> CaptionStyleConfig:
+    draft_style = draft.caption_style
+    if draft_style is None:
+        return CaptionStyleConfig()
+    kw: dict[str, object] = {}
+    for field_name in (
+        "capitalization",
+        "subtitle_language",
+        "primary_color",
+        "highlight_color",
+        "outline_color",
+        "back_color",
+        "fontname",
+        "fontsize",
+        "outline",
+        "shadow",
+        "margin_v",
+        "alignment",
+    ):
+        raw: object = getattr(draft_style, field_name, None)
+        val = _raw_candidate_value(raw)
+        if val is not None:
+            kw[field_name] = val
+    return CaptionStyleConfig.model_validate(kw)
+
+
+def _raw_candidate_value(candidate: object) -> object:
+    if isinstance(candidate, FieldCandidate):
+        fc = cast("FieldCandidate[object]", candidate)
+        return fc.value
+    if isinstance(candidate, dict):
+        d = cast("dict[str, object]", candidate)
+        return d.get("value")
+    return candidate
 
 
 def _resolve_watermark(draft: ContractDraft) -> Watermark:

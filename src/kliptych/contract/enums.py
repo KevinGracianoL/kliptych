@@ -117,3 +117,24 @@ class Layout(StrEnum):
 
     SINGLE = "single"
     SPLIT_SCREEN = "split_screen"
+
+
+class CaptionCapitalization(StrEnum):
+    """Estilo de capitalización para los subtítulos karaoke."""
+
+    ORIGINAL = "original"
+    UPPERCASE = "uppercase"
+    LOWERCASE = "lowercase"
+
+
+class SubtitleLanguage(StrEnum):
+    """Idioma de los subtítulos soportado en el contrato."""
+
+    ORIGINAL = "original"
+    ENGLISH = "en"
+    SPANISH = "es"
+    PORTUGUESE = "pt"
+    FRENCH = "fr"
+    GERMAN = "de"
+    ITALIAN = "it"
+    JAPANESE = "ja"

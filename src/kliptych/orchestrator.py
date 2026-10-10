@@ -76,7 +76,7 @@ from kliptych.pipeline_state import PipelineStage, PipelineStateManager
 from kliptych.reframe import FFmpegReframer, MediaPipeFaceDetector, ReframeResult
 from kliptych.segment import LLMSegmentSelector, SegmentSelection, SegmentSelector
 from kliptych.segmenter import SpeechSegmentResult, segment_by_speech_rate
-from kliptych.subtitles import SubtitleRenderer
+from kliptych.subtitles import SubtitleRenderer, SubtitleStyle
 from kliptych.transcribe import (
     FasterWhisperTranscriber,
     Transcriber,
@@ -1274,7 +1274,7 @@ def _resolve_dependencies(
         selector=LLMSegmentSelector() if selector is None else selector,
         reframer=_resolve_reframer(config, injected=reframer),
         subtitle_renderer=(
-            SubtitleRenderer(render=config.render)
+            SubtitleRenderer.from_caption_style(config.contract.caption_style, render=config.render)
             if subtitle_renderer is None
             else subtitle_renderer
         ),
@@ -3074,7 +3074,8 @@ def _write_lyric_subtitles(
         raise PipelineError(str(err)) from err
 
     duration_s = segment.end_s - segment.start_s
-    ass_content = lyric_lines_to_ass(window_lines, duration_s=duration_s)
+    style = SubtitleStyle.from_caption_style(config.contract.caption_style)
+    ass_content = lyric_lines_to_ass(window_lines, duration_s=duration_s, style=style)
     destination = registry.register(_temporary_path(output_dir / subtitles_name))
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)

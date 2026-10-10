@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Protocol, Self, cast
 
+from kliptych.contract.enums import CaptionCapitalization
 from kliptych.subtitles import SubtitleLayout, SubtitleStyle
 
 if TYPE_CHECKING:
@@ -375,7 +376,7 @@ def lyric_lines_to_ass(
         ),
         (
             f"Style: Default,{resolved_style.fontname},{resolved_style.fontsize},"
-            f"{resolved_style.primary_colour},&H000000FF,"
+            f"{resolved_style.primary_colour},{resolved_style.secondary_colour},"
             f"{resolved_style.outline_colour},{resolved_style.back_colour},0,0,0,0,100,100,0,0,1,"
             f"{resolved_style.outline},{resolved_style.shadow},"
             f"{resolved_style.alignment},20,20,{resolved_style.margin_v},1"
@@ -392,7 +393,12 @@ def lyric_lines_to_ass(
         if duration_s is not None:
             end_val = min(duration_s, end_val)
         end_str = _format_ass_time(end_val)
-        escaped = _escape_ass_text(line.text)
+        text = line.text
+        if resolved_style.capitalization is CaptionCapitalization.UPPERCASE:
+            text = text.upper()
+        elif resolved_style.capitalization is CaptionCapitalization.LOWERCASE:
+            text = text.lower()
+        escaped = _escape_ass_text(text)
         header.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{escaped}")
     return "\n".join(header) + "\n"
 
