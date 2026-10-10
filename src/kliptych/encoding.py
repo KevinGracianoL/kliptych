@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from kliptych.degradations import registrar_caida
+
 logger = logging.getLogger("kliptych.encoding")
 _STDERR_TAIL = 500
 
@@ -235,6 +237,21 @@ def fallback_encoder_arguments(argv: Sequence[str]) -> list[str]:
     return result
 
 
+def _encoder_en(argv: Sequence[str]) -> str:
+    """Lee el codec de video que pide un argv de ffmpeg.
+
+    Args:
+        argv: Lista o secuencia de argumentos de ffmpeg.
+
+    Returns:
+        El valor de `-c:v`, o `"desconocido"` si el argv no lo declara.
+    """
+    for indice, argumento in enumerate(argv):
+        if argumento == "-c:v" and indice + 1 < len(argv):
+            return str(argv[indice + 1])
+    return "desconocido"
+
+
 def _remove_quietly(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
@@ -286,8 +303,25 @@ def _execute_fallback(
     error_cls: type[Exception],
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
-    logger.warning("NVENC falló, reintentando con libx264...")
+    """Reintenta con libx264 y REGISTRA la caida antes de producir el archivo.
+
+    El registro va antes del reintento. Si no se pudiera registrar, la corrida
+    revienta aqui y no se produce ningun archivo: un artefacto que dice que pidio
+    NVENC mientras es libx2464 es peor que una corrida fallida.
+
+    Args:
+        cmd: Argumentos con los que se intento el render.
+        render: Configuracion de render.
+        temporary: Archivo temporal que limpiar si el reintento falla.
+        error_cls: Clase de excepcion a lanzar si el reintento falla.
+        runner: Invocador de procesos; por defecto `subprocess.run`.
+
+    """
     fallback_argv = fallback_encoder_arguments(cmd)
+    pedido = _encoder_en(cmd)
+    usado = _encoder_en(fallback_argv)
+    registrar_caida(pedido, usado)
+    logger.warning("NVENC falló, reintentando con %s...", usado)
     try:
         completed = _execute_single(
             fallback_argv, render=render, temporary=temporary, error_cls=error_cls, runner=runner

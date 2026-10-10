@@ -320,6 +320,12 @@ ignore = [
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"tests/test_runtime_degradations.py" = [
+    # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
+    # argumentos y shell=False.
+    "subprocess-without-shell-equals-true",
+    "suspicious-subprocess-import",
+]
 "tests/test_audio_locked.py" = [
     # subprocess se usa solo para CompletedProcess con ffmpeg simulado; lista de
     # argumentos y shell=False.

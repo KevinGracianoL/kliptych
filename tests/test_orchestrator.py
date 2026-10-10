@@ -17,6 +17,7 @@ import pytest
 
 from kliptych import orchestrator
 from kliptych.contract import Contract, Segment
+from kliptych.degradations import recolectar
 from kliptych.download import DownloadError, MediaDownloader
 from kliptych.encoding import RenderConfig
 from kliptych.moments import (
@@ -599,7 +600,7 @@ def test_run_ffmpeg_nvenc_fallback_to_libx264(
         "out.mp4",
     ]
 
-    with caplog.at_level(logging.WARNING, logger="kliptych.orchestrator"):
+    with caplog.at_level(logging.WARNING, logger="kliptych.orchestrator"), recolectar():
         _run_ffmpeg(argv, render=render)
 
     assert len(calls) == 2
@@ -647,7 +648,7 @@ def test_run_ffmpeg_nvenc_fallback_propagates_when_libx264_fails(
         "out.mp4",
     ]
 
-    with pytest.raises(PipelineError, match="ffmpeg falló con código 1"):
+    with pytest.raises(PipelineError, match="ffmpeg falló con código 1"), recolectar():
         _run_ffmpeg(argv, render=render)
 
     assert len(calls) == 2
@@ -683,7 +684,8 @@ def test_run_ffmpeg_called_process_error_nvenc_fallback(
         "yuv420p",
         "out.mp4",
     ]
-    _run_ffmpeg(argv, render=render)
+    with recolectar():
+        _run_ffmpeg(argv, render=render)
     assert len(calls) == 2
     assert "libx264" in calls[1]
 
