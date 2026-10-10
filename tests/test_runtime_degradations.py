@@ -22,7 +22,7 @@ from kliptych.assembler import RenderSpec
 from kliptych.config import Settings
 from kliptych.contract import ContractDraft
 from kliptych.degradations import recolectar
-from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
+from kliptych.encoding import Invocation, RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import EnvironmentReport
 from kliptych.pipeline import PieceAssembler, RunRequest, run_given_clips
 from kliptych.pipeline_state import PipelineStage, PipelineStateManager
@@ -109,10 +109,7 @@ def _forzar_fallback() -> _FallaSoloNvenc:
     """
     runner = _FallaSoloNvenc()
     run_ffmpeg_with_fallback(
-        _ARGV_NVENC,
-        render=RenderConfig(),
-        error_cls=RuntimeError,
-        runner=runner,
+        _ARGV_NVENC, Invocation(render=RenderConfig(), error_cls=RuntimeError, runner=runner)
     )
     assert [("h264_nvenc" in llamada) for llamada in runner.llamadas] == [True, False]
     return runner
@@ -257,8 +254,5 @@ def test_una_caida_sin_colector_no_embarca_en_silencio() -> None:
 
     with pytest.raises(RuntimeError, match="no hay colector"):
         _ = run_ffmpeg_with_fallback(
-            _ARGV_NVENC,
-            render=RenderConfig(),
-            error_cls=RuntimeError,
-            runner=runner,
+            _ARGV_NVENC, Invocation(render=RenderConfig(), error_cls=RuntimeError, runner=runner)
         )

@@ -25,7 +25,12 @@ from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import AudioPolicy, Contract, Segment
 from kliptych.degradations import DegradacionNoRegistrableError, recolectar
-from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback, video_encoder_arguments
+from kliptych.encoding import (
+    Invocation,
+    RenderConfig,
+    run_ffmpeg_with_fallback,
+    video_encoder_arguments,
+)
 from kliptych.gate import Gate
 from kliptych.gc import clean_temporary_directories
 from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
@@ -1608,28 +1613,38 @@ def test_run_long_video_sin_caida_no_registra_degradacion(
     assert PipelineStateManager.load(config.output_dir).checkpoint.degradations == ()
 
 
-def test_un_render_sin_colector_sigue_fallando() -> None:
+def test_un_render_sin_colector_sigue_fallando(tmp_path: Path) -> None:
     """El fail-closed de #97 no se pierde al abrir el colector de la corrida.
 
     Si `run_long_video` abre el colector y algun camino de render queda fuera,
     este test lo dice: sin colector, la caida lanza.
     """
-    argv = ["ffmpeg", "-i", "in.mp4", *video_encoder_arguments(nvenc_available=True), "out.mp4"]
+    argv = [
+        "ffmpeg",
+        "-i",
+        "in.mp4",
+        *video_encoder_arguments(nvenc_available=True),
+        str(tmp_path / "out.mp4"),
+    ]
 
     with pytest.raises(DegradacionNoRegistrableError, match="no hay colector"):
         run_ffmpeg_with_fallback(
             argv,
-            render=RenderConfig(nvenc_available=True),
-            error_cls=RuntimeError,
-            runner=_NvencMuerto(),
+            Invocation(
+                render=RenderConfig(nvenc_available=True),
+                error_cls=RuntimeError,
+                runner=_NvencMuerto(),
+            ),
         )
 
     with recolectar() as degradaciones:
         run_ffmpeg_with_fallback(
             argv,
-            render=RenderConfig(nvenc_available=True),
-            error_cls=RuntimeError,
-            runner=_NvencMuerto(),
+            Invocation(
+                render=RenderConfig(nvenc_available=True),
+                error_cls=RuntimeError,
+                runner=_NvencMuerto(),
+            ),
         )
 
     assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)

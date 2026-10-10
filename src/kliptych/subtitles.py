@@ -12,7 +12,6 @@ Todo fallo externo se traduce a ``SubtitleError`` conservando la causa.
 """
 
 import contextlib
-import functools
 import os
 import subprocess
 import uuid
@@ -24,6 +23,7 @@ from typing import ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from kliptych.encoding import (
+    Invocation,
     RenderConfig,
     audio_and_container_arguments,
     muted_audio_arguments,
@@ -564,13 +564,15 @@ def _require_file(path: Path, *, what: str) -> None:
 def _run_ffmpeg(
     argv: Sequence[str], *, temporary: Path, render: RenderConfig, cwd: Path | None = None
 ) -> None:
-    runner = subprocess.run if cwd is None else functools.partial(subprocess.run, cwd=cwd)
     run_ffmpeg_with_fallback(
         argv,
-        render=render,
-        temporary=temporary,
-        error_cls=SubtitleError,
-        runner=runner,
+        Invocation(
+            render=render,
+            temporary=temporary,
+            error_cls=SubtitleError,
+            runner=subprocess.run,
+            cwd=cwd,
+        ),
     )
 
 

@@ -17,6 +17,24 @@ from kliptych.environment import (
 _FFMPEG_VERSION = ("ffmpeg", "-version")
 _FFPROBE_VERSION = ("ffprobe", "-version")
 _FFMPEG_ENCODERS = ("ffmpeg", "-hide_banner", "-encoders")
+_NVENC_PROBE = (
+    "ffmpeg",
+    "-hide_banner",
+    "-v",
+    "error",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=black:s=64x64:d=0.04",
+    "-frames:v",
+    "2",
+    "-c:v",
+    "h264_nvenc",
+    "-f",
+    "null",
+    "-",
+)
 _NVIDIA_SMI = (
     "nvidia-smi",
     "--query-gpu=name,memory.total,driver_version",
@@ -51,6 +69,7 @@ def _full_runner() -> FakeRunner:
             _FFMPEG_VERSION: CommandResult(ok=True, stdout=_FFMPEG_LINE),
             _FFPROBE_VERSION: CommandResult(ok=True, stdout=_FFPROBE_LINE),
             _FFMPEG_ENCODERS: CommandResult(ok=True, stdout=_ENCODERS_OUTPUT),
+            _NVENC_PROBE: CommandResult(ok=True, stdout=""),
             _NVIDIA_SMI: CommandResult(ok=True, stdout=_GPU_LINE),
         }
     )
@@ -81,12 +100,23 @@ def test_missing_tools_produce_degradations() -> None:
     assert "GPU" in joined
 
 
-def test_ffmpeg_without_nvenc_degrades_render() -> None:
+def test_encoder_listed_but_not_working_is_not_available() -> None:
+    """Un encoder en la lista no es prueba de que funcione.
+
+    ffmpeg lista `h264_nvenc` en máquinas sin driver CUDA. Ahí el listado dice
+    disponible, el render muere con 255 (`Cannot load libcuda.so.1`), y la
+    corrida entera falla en lugar de degradar a CPU.
+
+    La deteccion tiene que codificar de verdad y fiarse del código de salida.
+    """
     runner = _full_runner()
-    runner.set_result(_FFMPEG_ENCODERS, CommandResult(ok=True, stdout=" V..... libx264\n"))
+    runner.set_result(_NVENC_PROBE, CommandResult(ok=False, stderr="Cannot load libcuda.so.1"))
+
     report = detect_environment(runner)
-    assert report.nvenc_available is False
+
+    assert report.nvenc_available is False, "el listado no prueba que el encoder funcione"
     assert any("NVENC" in degradation for degradation in report.degradations)
+    assert _NVENC_PROBE in runner.calls, "la deteccion no codifico nada"
 
 
 def test_encoder_listing_failure_is_not_nvenc() -> None:

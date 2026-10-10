@@ -20,7 +20,7 @@ import pytest
 
 from kliptych.contract import Contract
 from kliptych.degradations import recolectar
-from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
+from kliptych.encoding import Invocation, RenderConfig, run_ffmpeg_with_fallback
 from kliptych.orchestrator import PipelineConfig, run_slideshow
 from kliptych.pipeline_state import PipelineStateManager
 
@@ -199,17 +199,21 @@ def test_un_render_sin_colector_sigue_fallando() -> None:
     with pytest.raises(Exception, match="no hay colector"):
         _ = run_ffmpeg_with_fallback(
             argv,
-            render=RenderConfig(nvenc_available=True),
-            error_cls=RuntimeError,
-            runner=_FalloEnNvenc(),
+            Invocation(
+                render=RenderConfig(nvenc_available=True),
+                error_cls=RuntimeError,
+                runner=_FalloEnNvenc(),
+            ),
         )
 
     with recolectar() as degradaciones:
         _ = run_ffmpeg_with_fallback(
             argv,
-            render=RenderConfig(nvenc_available=True),
-            error_cls=RuntimeError,
-            runner=_FalloEnNvenc(),
+            Invocation(
+                render=RenderConfig(nvenc_available=True),
+                error_cls=RuntimeError,
+                runner=_FalloEnNvenc(),
+            ),
         )
 
     assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)

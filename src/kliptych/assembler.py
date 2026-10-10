@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import assert_never
 
 from kliptych.contract import Layout, SplitScreenConfig, Watermark, WatermarkPosition
-from kliptych.encoding import RenderConfig, muted_audio_arguments, video_encoder_arguments
+from kliptych.encoding import (
+    Invocation,
+    RenderConfig,
+    muted_audio_arguments,
+    run_ffmpeg_with_fallback,
+    video_encoder_arguments,
+)
 
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
@@ -263,45 +269,27 @@ class FFmpegAssembler:
             La ruta del artefacto publicado.
 
         Raises:
-            AssembleError: Si ffmpeg no está disponible, expira, falla o el
-                artefacto no se puede publicar (el destino previo queda
-                intacto en todos los casos).
+            AssembleError: Si ffmpeg falla en ambos encoders o el artefacto no se
+                puede publicar (el destino previo queda intacto).
+
+        El reintento con libx264 va por `run_ffmpeg_with_fallback`, el mismo
+        camino que usa el resto del pipeline: sin él, un NVENC que falla en caliente
+        no deja artefacto ni degradación, y la corrida muere con 255 en máquinas
+        donde el encoder está listado pero no funciona.
         """
-        try:
-            completed = (
-                subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_s,
-                    check=False,
-                )
-                if cwd is None
-                else subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_s,
-                    check=False,
-                    cwd=cwd,
-                )
-            )
-        except FileNotFoundError as error:
-            _remove_quietly(temporary)
-            msg = f"ffmpeg no está disponible: {self._ffmpeg}"
-            raise AssembleError(msg) from error
-        except subprocess.TimeoutExpired as error:
-            _remove_quietly(temporary)
-            msg = f"ffmpeg excedió el timeout de {self._timeout_s} s"
-            raise AssembleError(msg) from error
-        except OSError as error:
-            _remove_quietly(temporary)
-            msg = f"no se pudo ejecutar ffmpeg ({self._ffmpeg}): {error}"
-            raise AssembleError(msg) from error
-        if completed.returncode != 0:
-            _remove_quietly(temporary)
-            msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-            raise AssembleError(msg)
+        # El runner se resuelve aquí, en el modulo del assembler, para que los
+        # dobles de los tests sigan viendo su propio `subprocess.run`.
+        run_ffmpeg_with_fallback(
+            argv,
+            Invocation(
+                render=self._render,
+                temporary=temporary,
+                error_cls=AssembleError,
+                runner=subprocess.run,
+                cwd=cwd,
+                timeout_s=self._timeout_s,
+            ),
+        )
         try:
             _ = temporary.replace(destination)
         except OSError as error:

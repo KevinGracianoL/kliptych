@@ -52,6 +52,7 @@ from kliptych.contract import (
 from kliptych.degradations import recolectar
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
+    Invocation,
     RenderConfig,
     aspect_matches,
     audio_and_container_arguments,
@@ -3156,9 +3157,7 @@ def _translated(stage: str) -> Generator[None]:
 def _run_ffmpeg(argv: Sequence[str], *, render: RenderConfig) -> None:
     run_ffmpeg_with_fallback(
         argv,
-        render=render,
-        error_cls=PipelineError,
-        runner=subprocess.run,
+        Invocation(render=render, error_cls=PipelineError, runner=subprocess.run),
     )
 
 

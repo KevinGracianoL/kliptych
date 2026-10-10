@@ -42,7 +42,7 @@ from kliptych.contract.draft import ContractDraft, DurationDraft, PlatformDraft
 from kliptych.contract.evidence import Confidence, SourceEvidence
 from kliptych.contract.schema import Segment
 from kliptych.degradations import recolectar
-from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
+from kliptych.encoding import Invocation, RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import SubprocessRunner, detect_environment
 from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
 from kliptych.gate import CheckStatus, Gate, GateStatus, Piece
@@ -626,7 +626,8 @@ def _ejecutar_casos_de_fallback(
         "out.mp4",
     ]
     run_ffmpeg_with_fallback(
-        reframe_cmd, temporary=temp_reframe, render=render, error_cls=ReframeError
+        reframe_cmd,
+        Invocation(render=render, temporary=temp_reframe, error_cls=ReframeError),
     )
     assert len(calls) == 2
     assert "h264_nvenc" in calls[0]
@@ -651,7 +652,8 @@ def _ejecutar_casos_de_fallback(
         "out.mp4",
     ]
     run_ffmpeg_with_fallback(
-        subtitles_cmd, temporary=temp_subtitles, render=render, error_cls=SubtitleError
+        subtitles_cmd,
+        Invocation(render=render, temporary=temp_subtitles, error_cls=SubtitleError),
     )
     assert len(calls) == 2
     assert "h264_nvenc" in calls[0]

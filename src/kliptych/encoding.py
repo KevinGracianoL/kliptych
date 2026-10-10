@@ -12,7 +12,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 from kliptych.degradations import registrar_caida
 
@@ -261,61 +261,95 @@ def _tail(text: str) -> str:
     return text.strip()[-_STDERR_TAIL:]
 
 
-def _execute_single(
-    cmd: Sequence[str],
-    *,
-    render: RenderConfig,
-    temporary: Path | None,
-    error_cls: type[Exception],
-    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    proc_runner = runner if runner is not None else subprocess.run
+@dataclass(frozen=True, slots=True)
+class Invocation:
+    """Contrato de la llamada a ffmpeg, decidido por el llamador.
+
+    Agrupa lo que NO es el comando: el temporal que hay que limpiar si falla, la
+    excepción con la que se reporta, la función que lanza el proceso, su
+    directorio de trabajo y su techo de tiempo. Va junto porque estas tres
+    funciones lo comparten entero y pasarlo suelto hacía inviable añadir una
+    cuarta opción sin romper cada llamada.
+
+    Attributes:
+        render: Configuración de render (binario ffmpeg, timeout, nvenc).
+        temporary: Archivo a limpiar si ffmpeg falla; ``None`` si no hay.
+        error_cls: Excepción que se lanza al fallar.
+        runner: Lanzador de procesos; ``None`` para usar ``subprocess.run``.
+        cwd: Directorio de trabajo; ``None`` para heredar el actual.
+        timeout_s: Techo de tiempo propio; ``None`` para usar el de ``render``.
+    """
+
+    render: RenderConfig
+    temporary: Path | None = None
+    error_cls: type[Exception] = RuntimeError
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
+    cwd: Path | None = None
+    timeout_s: float | None = None
+
+    @property
+    def timeout(self) -> float:
+        """Techo de tiempo: el del llamador si lo fijó, el de ``render`` si no."""
+        return self.timeout_s if self.timeout_s is not None else self.render.timeout_s
+
+    @property
+    def launcher(self) -> Callable[..., subprocess.CompletedProcess[str]]:
+        """Lanzador de procesos: el inyectado, o ``subprocess.run`` por defecto."""
+        return self.runner if self.runner is not None else subprocess.run
+
+    @property
+    def kwargs(self) -> dict[str, object]:
+        """Argumentos de la llamada; ``cwd`` solo si hay subtítulos que ubique."""
+        invocacion: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": self.timeout,
+            "check": False,
+        }
+        # Sin subtitulos el contrato de invocacion no lleva `cwd`; pasarlo en
+        # `None` cambiaria la firma que los dobles de los tests comprueban.
+        if self.cwd is not None:
+            invocacion["cwd"] = self.cwd
+        return invocacion
+
+    def fail(self, message: str, *, from_error: BaseException | None = None) -> NoReturn:
+        """Limpia el temporal y lanza la excepción del llamador.
+
+        Args:
+            message: Mensaje del fallo.
+            from_error: Causa original, si la hay, para no perder la cadena.
+        """
+        if self.temporary is not None:
+            _remove_quietly(self.temporary)
+        if from_error is not None:
+            raise self.error_cls(message) from from_error
+        raise self.error_cls(message)
+
+
+def _execute_single(cmd: Sequence[str], inv: Invocation) -> subprocess.CompletedProcess[str]:
     try:
-        return proc_runner(
-            list(cmd),
-            capture_output=True,
-            text=True,
-            timeout=render.timeout_s,
-            check=False,
-        )
+        return inv.launcher(list(cmd), **inv.kwargs)
     except FileNotFoundError as error:
-        if temporary is not None:
-            _remove_quietly(temporary)
-        msg = f"ffmpeg no está disponible: {render.ffmpeg}"
-        raise error_cls(msg) from error
+        msg = f"ffmpeg no está disponible: {inv.render.ffmpeg}"
+        inv.fail(msg, from_error=error)
     except subprocess.TimeoutExpired as error:
-        if temporary is not None:
-            _remove_quietly(temporary)
-        msg = f"ffmpeg excedió el timeout de {render.timeout_s} s"
-        raise error_cls(msg) from error
+        msg = f"ffmpeg excedió el timeout de {inv.timeout} s"
+        inv.fail(msg, from_error=error)
     except OSError as error:
-        if temporary is not None:
-            _remove_quietly(temporary)
-        msg = f"no se pudo ejecutar ffmpeg ({render.ffmpeg}): {error}"
-        raise error_cls(msg) from error
+        msg = f"no se pudo ejecutar ffmpeg ({inv.render.ffmpeg}): {error}"
+        inv.fail(msg, from_error=error)
 
 
-def _execute_fallback(
-    cmd: Sequence[str],
-    *,
-    render: RenderConfig,
-    temporary: Path | None,
-    error_cls: type[Exception],
-    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> None:
+def _execute_fallback(cmd: Sequence[str], inv: Invocation) -> None:
     """Reintenta con libx264 y REGISTRA la caida antes de producir el archivo.
 
     El registro va antes del reintento. Si no se pudiera registrar, la corrida
     revienta aqui y no se produce ningun archivo: un artefacto que dice que pidio
-    NVENC mientras es libx2464 es peor que una corrida fallida.
+    NVENC mientras es libx264 es peor que una corrida fallida.
 
     Args:
         cmd: Argumentos con los que se intento el render.
-        render: Configuracion de render.
-        temporary: Archivo temporal que limpiar si el reintento falla.
-        error_cls: Clase de excepcion a lanzar si el reintento falla.
-        runner: Invocador de procesos; por defecto `subprocess.run`.
-
+        inv: Contrato de la invocacion (render, temporal, excepcion, runner).
     """
     fallback_argv = fallback_encoder_arguments(cmd)
     pedido = _encoder_en(cmd)
@@ -323,65 +357,40 @@ def _execute_fallback(
     registrar_caida(pedido, usado)
     logger.warning("NVENC falló, reintentando con %s...", usado)
     try:
-        completed = _execute_single(
-            fallback_argv, render=render, temporary=temporary, error_cls=error_cls, runner=runner
-        )
+        completed = _execute_single(fallback_argv, inv)
     except subprocess.CalledProcessError as error:
-        if temporary is not None:
-            _remove_quietly(temporary)
         msg = f"ffmpeg falló: {error}"
-        raise error_cls(msg) from error
+        inv.fail(msg, from_error=error)
     if completed.returncode != 0:
-        if temporary is not None:
-            _remove_quietly(temporary)
         msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-        raise error_cls(msg)
+        inv.fail(msg)
 
 
-def run_ffmpeg_with_fallback(
-    argv: Sequence[str],
-    *,
-    render: RenderConfig,
-    temporary: Path | None = None,
-    error_cls: type[Exception] = RuntimeError,
-    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-) -> None:
+def run_ffmpeg_with_fallback(argv: Sequence[str], inv: Invocation) -> None:
     """Ejecuta ffmpeg con reintento automático libx264 si h264_nvenc falla.
 
     Args:
         argv: Secuencia de argumentos de línea de comandos de ffmpeg.
-        render: Configuración de render (binario ffmpeg, timeout, nvenc).
-        temporary: Archivo temporal opcional que limpiar en caso de error fatal.
-        error_cls: Clase de excepción a lanzar en caso de fallo.
-        runner: Invocador de procesos ejecutables (por defecto subprocess.run).
+        inv: Contrato de la invocacion (render, temporal, excepcion, runner,
+            ``cwd`` y timeout con los que se lanza y se reintenta).
     """
     cmd_list = list(argv)
     try:
-        completed = _execute_single(
-            cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
-        )
+        completed = _execute_single(cmd_list, inv)
     except subprocess.CalledProcessError as error:
         if "h264_nvenc" in cmd_list:
-            _execute_fallback(
-                cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
-            )
+            _execute_fallback(cmd_list, inv)
             return
-        if temporary is not None:
-            _remove_quietly(temporary)
         msg = f"ffmpeg falló: {error}"
-        raise error_cls(msg) from error
+        inv.fail(msg, from_error=error)
 
     if completed.returncode == 0:
         return
     if "h264_nvenc" in cmd_list:
-        _execute_fallback(
-            cmd_list, render=render, temporary=temporary, error_cls=error_cls, runner=runner
-        )
+        _execute_fallback(cmd_list, inv)
         return
-    if temporary is not None:
-        _remove_quietly(temporary)
     msg = f"ffmpeg falló con código {completed.returncode}: {_tail(completed.stderr)}"
-    raise error_cls(msg)
+    inv.fail(msg)
 
 
 def _volume(value: float) -> str:

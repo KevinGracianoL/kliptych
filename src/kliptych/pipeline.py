@@ -32,7 +32,7 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
-from kliptych.degradations import activas
+from kliptych.degradations import activas, recolectar
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
@@ -286,7 +286,11 @@ def run_given_clips(
                 ),
             ),
         )
-    return _resolved(context, contract)
+    # El colector se abre aqui, antes del render, por el mismo motivo que en
+    # `run_long_video`: sin el, una caida de NVENC en caliente no queda
+    # registrada y el manifiesto nombra un encoder que no codificó nada.
+    with recolectar():
+        return _resolved(context, contract)
 
 
 def _halted(

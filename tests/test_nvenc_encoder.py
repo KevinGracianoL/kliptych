@@ -21,7 +21,7 @@ from kliptych.assembler import FFmpegAssembler, RenderSpec
 from kliptych.config import Settings
 from kliptych.contract import ContractDraft, Layout
 from kliptych.degradations import recolectar
-from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback
+from kliptych.encoding import Invocation, RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import EnvironmentReport
 from kliptych.pipeline import PieceAssembler, RunRequest, run_given_clips
 from kliptych.runtime import CampaignModel, Caption
@@ -299,9 +299,9 @@ def test_el_canal_de_caida_sigue_funcionando_con_nvenc_encendido() -> None:
     with recolectar() as degradaciones:
         _ = run_ffmpeg_with_fallback(
             argv,
-            render=RenderConfig(nvenc_available=True),
-            error_cls=RuntimeError,
-            runner=_Falla(),
+            Invocation(
+                render=RenderConfig(nvenc_available=True), error_cls=RuntimeError, runner=_Falla()
+            ),
         )
 
     assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)
