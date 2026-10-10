@@ -68,6 +68,7 @@ from kliptych.subtitle_text import (
     hydrate_piece_subtitle_segments,
     hydrate_piece_subtitle_text,
 )
+from kliptych.subtitles import SubtitleStyle
 
 _VIDEO_KIND = "video"
 # Lado largo del lienzo de `given_clips`. El lado corto sale de
@@ -466,7 +467,11 @@ def _cut_lyric_window_lines(
 
 
 def _write_lyric_sidecar(
-    artifact: Path, lines: tuple[LyricLine, ...] | None, *, duration_s: float | None
+    artifact: Path,
+    lines: tuple[LyricLine, ...] | None,
+    *,
+    duration_s: float | None,
+    style: SubtitleStyle | None = None,
 ) -> Path | None:
     """Escribe el .ass de la pieza junto al artefacto para el gate y el quemado.
 
@@ -477,6 +482,7 @@ def _write_lyric_sidecar(
         artifact: Ruta del MP4 final de la pieza.
         lines: Líneas de la ventana del clip, o ``None`` sin letras.
         duration_s: Duración del clip para acotar los eventos, o ``None``.
+        style: Estilo opcional de los subtítulos.
 
     Returns:
         La ruta del .ass escrito, o ``None`` sin líneas o si no se pudo
@@ -487,7 +493,9 @@ def _write_lyric_sidecar(
     sidecar = artifact.with_suffix(".ass")
     try:
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        _ = sidecar.write_text(lyric_lines_to_ass(lines, duration_s=duration_s), encoding="utf-8")
+        _ = sidecar.write_text(
+            lyric_lines_to_ass(lines, duration_s=duration_s, style=style), encoding="utf-8"
+        )
     except OSError:
         return None
     return sidecar
@@ -639,7 +647,8 @@ def _resolve_assemble_subtitles(
             "(su firma de assemble no declara el parámetro 'subtitles')"
         )
         raise NotImplementedError(msg)
-    ass_path = _write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s)
+    style = SubtitleStyle.from_caption_style(contract.caption_style)
+    ass_path = _write_lyric_sidecar(artifact, lyric.lines, duration_s=lyric.duration_s, style=style)
     if ass_path is None:
         msg = f"no se pudo escribir el sidecar de letras para {artifact}"
         raise PipelineError(msg)

@@ -11,6 +11,7 @@ import pytest
 from kliptych.contract import (
     AssetRef,
     AudioPolicy,
+    CaptionStyleConfig,
     Contract,
     ContractDraft,
     Format,
@@ -265,6 +266,7 @@ def make_contract(
     timestamp_ranges: Sequence[TimestampRange | tuple[float, float] | list[float]] = (),
     split_screen: dict[str, object] | SplitScreenConfig | None = None,
     outputs: Sequence[dict[str, object]] | None = None,
+    caption_style: CaptionStyleConfig | None = None,
     schema_version: str = "1.1",
 ) -> Contract:
     plan = _resolve_hard_rules(hard, audio_rule)
@@ -380,6 +382,11 @@ def make_contract(
             "geo_target": None,
             "min_views_for_payout": {"value": None, "enforcement": "post_publication_manual"},
             "analytics_proof_required": {"value": False, "enforcement": "post_publication_manual"},
+            **(
+                {"caption_style": caption_style.model_dump(mode="json")}
+                if caption_style is not None
+                else {}
+            ),
         }
     )
 

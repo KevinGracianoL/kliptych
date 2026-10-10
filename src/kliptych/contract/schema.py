@@ -11,8 +11,9 @@ para renderizar mas de un formato.
 """
 
 import math
+import re
 from collections.abc import Sequence
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Final, Literal, Self, cast
 
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
@@ -22,9 +23,11 @@ from kliptych.contract.enums import (
     AttributionType,
     AudioPolicy,
     AudioRule,
+    CaptionCapitalization,
     Format,
     Mode,
     Platform,
+    SubtitleLanguage,
     WatermarkPosition,
 )
 from kliptych.hashing import sha256_canonical_json
@@ -58,6 +61,79 @@ class CaptionRules(ContractBase):
     must_mention: list[_MENTION] = Field(default_factory=list)
     first_line: str | None = None
     forbidden: list[str] = Field(default_factory=list)
+
+
+_ASS_COLOR_REGEX: Final[re.Pattern[str]] = re.compile(r"^&[hH][0-9A-Fa-f]{8}$")
+_HEX6_REGEX: Final[re.Pattern[str]] = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_HEX8_REGEX: Final[re.Pattern[str]] = re.compile(r"^#[0-9A-Fa-f]{8}$")
+
+
+def normalize_ass_color(value: object) -> str:
+    """Normaliza un color CSS hex (#RRGGBB o #RRGGBBAA) o SubStation a formato ASS &HAABBGGRR.
+
+    En SubStation Alpha (ASS), el orden de componentes es ABGR:
+    - AA: Canal alpha (00 = totalmente opaco, FF = totalmente transparente)
+    - BB: Azul
+    - GG: Verde
+    - RR: Rojo
+
+    En CSS hex (#RRGGBB):
+    - Omitir alpha equivale a 100% opacidad en CSS -> 00 en ASS.
+    - Orden RGB se convierte a BGR: #RRGGBB -> &H00BBGGRR.
+
+    En CSS hex con alpha (#RRGGBBAA):
+    - Alpha en CSS va de 00 (transparente) a FF (opaco).
+    - En ASS se invierte: ass_alpha = 255 - css_alpha.
+
+    Args:
+        value: Color como cadena en formato CSS hex o SubStation.
+
+    Returns:
+        Color normalizado en formato '&HAABBGGRR'.
+
+    Raises:
+        TypeError: Si el valor no es una cadena.
+        ValueError: Si el formato del color no es reconocido.
+    """
+    if not isinstance(value, str):
+        msg = f"el color debe ser una cadena, no {type(value).__name__}"
+        raise TypeError(msg)
+    raw = value.strip()
+    if _ASS_COLOR_REGEX.match(raw):
+        return f"&H{raw[2:].upper()}"
+    if _HEX6_REGEX.match(raw):
+        r, g, b = raw[1:3], raw[3:5], raw[5:7]
+        return f"&H00{b.upper()}{g.upper()}{r.upper()}"
+    if _HEX8_REGEX.match(raw):
+        r, g, b, a = raw[1:3], raw[3:5], raw[5:7], raw[7:9]
+        ass_a = 255 - int(a, 16)
+        return f"&H{ass_a:02X}{b.upper()}{g.upper()}{r.upper()}"
+    msg = f"formato de color no reconocido: {value!r}; use '&HAABBGGRR' o '#RRGGBB' / '#RRGGBBAA'"
+    raise ValueError(msg)
+
+
+class CaptionStyleConfig(ContractBase):
+    """Configuración estética de los subtítulos karaoke y capitalización."""
+
+    capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
+    subtitle_language: SubtitleLanguage = SubtitleLanguage.ORIGINAL
+    primary_color: str = Field(default="&H00FFFFFF")
+    highlight_color: str = Field(default="&H000000FF")
+    outline_color: str = Field(default="&H00000000")
+    back_color: str = Field(default="&H00000000")
+    fontname: str = Field(default="Arial", min_length=1)
+    fontsize: int = Field(default=48, gt=0)
+    outline: int = Field(default=2, ge=0)
+    shadow: int = Field(default=0, ge=0)
+    margin_v: int = Field(default=40, ge=0)
+    alignment: int = Field(default=2, ge=1, le=9)
+
+    @field_validator(
+        "primary_color", "highlight_color", "outline_color", "back_color", mode="before"
+    )
+    @classmethod
+    def _validate_colors(cls, value: object) -> str:
+        return normalize_ass_color(value)
 
 
 class Attribution(ContractBase):
@@ -514,6 +590,7 @@ class Contract(ContractBase):
     geo_target: GeoTarget | None = None
     min_views_for_payout: MinViewsForPayout = Field(default_factory=MinViewsForPayout)
     analytics_proof_required: AnalyticsProofRequired = Field(default_factory=AnalyticsProofRequired)
+    caption_style: CaptionStyleConfig = Field(default_factory=CaptionStyleConfig)
 
     @model_validator(mode="after")
     def _mode_matches_format(self) -> Self:
@@ -783,6 +860,7 @@ def vanilla_contract(
     campaign_id: str,
     platform: Platform = Platform.TIKTOK,
     language: str = _ZERO_CONTRACT_LANGUAGE,
+    caption_style: CaptionStyleConfig | None = None,
 ) -> Contract:
     """Construye el contrato "vainilla" del modo zero-contract, sin brief ni LLM.
 
@@ -812,6 +890,7 @@ def vanilla_contract(
             seguro porque se usa como nombre de directorio en la entrega.
         platform: Plataforma única que declara el contrato.
         language: Locale de fuente y caption.
+        caption_style: Estilo opcional para subtítulos; por defecto el estándar.
 
     Returns:
         Un ``Contract`` válido, sin reglas de campaña.
@@ -836,7 +915,11 @@ def vanilla_contract(
         assets=AssetBundle(),
         audio_policy=AudioPolicy.ORIGINAL_AUDIO,
         brand_safety_required=False,
+        caption_style=CaptionStyleConfig() if caption_style is None else caption_style,
     )
+
+
+make_zero_contract = vanilla_contract
 
 
 def prompt_languages(contract: Contract) -> dict[str, object]:
@@ -956,6 +1039,8 @@ def _prune_unset_media_options(contract: Contract, dump: dict[str, object]) -> N
         _ = dump.pop("lyric_video", None)
     if contract.split_screen is None:
         _ = dump.pop("split_screen", None)
+    if contract.caption_style == CaptionStyleConfig():
+        _ = dump.pop("caption_style", None)
 
 
 def _prune_default_watermark_options(dump: dict[str, object]) -> None:

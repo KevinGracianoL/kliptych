@@ -13,9 +13,11 @@ from kliptych.contract.enums import (
     AttributionType,
     AudioPolicy,
     AudioRule,
+    CaptionCapitalization,
     Format,
     Mode,
     Platform,
+    SubtitleLanguage,
     WatermarkPosition,
 )
 from kliptych.contract.evidence import FieldCandidate
@@ -169,6 +171,31 @@ class UnmappedRuleDraft(ContractBase):
     quote: FieldCandidate[str] | None = None
 
 
+class CaptionStyleDraft(ContractBase):
+    """Estilo propuesto para subtítulos karaoke con evidencia opcional."""
+
+    capitalization: (
+        FieldCandidate[CaptionCapitalization]
+        | dict[str, object]
+        | CaptionCapitalization
+        | str
+        | None
+    ) = None
+    subtitle_language: (
+        FieldCandidate[SubtitleLanguage] | dict[str, object] | SubtitleLanguage | str | None
+    ) = None
+    primary_color: FieldCandidate[str] | dict[str, object] | str | None = None
+    highlight_color: FieldCandidate[str] | dict[str, object] | str | None = None
+    outline_color: FieldCandidate[str] | dict[str, object] | str | None = None
+    back_color: FieldCandidate[str] | dict[str, object] | str | None = None
+    fontname: FieldCandidate[str] | dict[str, object] | str | None = None
+    fontsize: FieldCandidate[int] | dict[str, object] | int | None = None
+    outline: FieldCandidate[int] | dict[str, object] | int | None = None
+    shadow: FieldCandidate[int] | dict[str, object] | int | None = None
+    margin_v: FieldCandidate[int] | dict[str, object] | int | None = None
+    alignment: FieldCandidate[int] | dict[str, object] | int | None = None
+
+
 class ContractDraft(ContractBase):
     """Salida cruda del LLM: todo campo es opcional y lleva su evidencia."""
 
@@ -192,6 +219,7 @@ class ContractDraft(ContractBase):
     timestamp_ranges: list[TimestampRangeDraft] = Field(default_factory=list)
     lyric_video: LyricConfigDraft | None = None
     split_screen: SplitScreenDraft | None = None
+    caption_style: CaptionStyleDraft | None = None
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

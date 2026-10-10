@@ -18,10 +18,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kliptych.contract import CaptionCapitalization, CaptionStyleConfig
 from kliptych.encoding import (
     Invocation,
     RenderConfig,
@@ -33,7 +34,6 @@ from kliptych.encoding import (
 from kliptych.transcribe import Word
 
 _STYLE_NAME = "Default"
-_SECONDARY_COLOUR = "&H000000FF"
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
 _MARGIN_H = 20
@@ -85,12 +85,38 @@ class SubtitleStyle(BaseModel):
     fontname: str = Field(default="Arial", min_length=1)
     fontsize: int = Field(default=48, gt=0)
     primary_colour: str = Field(default="&H00FFFFFF", pattern=r"^&H[0-9A-Fa-f]{8}$")
+    secondary_colour: str = Field(default="&H000000FF", pattern=r"^&H[0-9A-Fa-f]{8}$")
     outline_colour: str = Field(default="&H00000000", pattern=r"^&H[0-9A-Fa-f]{8}$")
     back_colour: str = Field(default="&H00000000", pattern=r"^&H[0-9A-Fa-f]{8}$")
     outline: int = Field(default=2, ge=0)
     shadow: int = Field(default=0, ge=0)
     margin_v: int = Field(default=40, ge=0)
     alignment: int = Field(default=2, ge=1, le=9)
+    capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
+
+    @classmethod
+    def from_caption_style(cls, config: CaptionStyleConfig) -> Self:
+        """Construye un SubtitleStyle a partir de CaptionStyleConfig del contrato.
+
+        Args:
+            config: Configuración estética de los subtítulos en el contrato.
+
+        Returns:
+            La instancia de SubtitleStyle configurada.
+        """
+        return cls(
+            fontname=config.fontname,
+            fontsize=config.fontsize,
+            primary_colour=config.primary_color,
+            secondary_colour=config.highlight_color,
+            outline_colour=config.outline_color,
+            back_colour=config.back_color,
+            outline=config.outline,
+            shadow=config.shadow,
+            margin_v=config.margin_v,
+            alignment=config.alignment,
+            capitalization=config.capitalization,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +158,30 @@ class SubtitleRenderer:
         self._layout: SubtitleLayout = SubtitleLayout() if layout is None else layout
         self._render: RenderConfig = RenderConfig() if render is None else render
 
+    @classmethod
+    def from_caption_style(
+        cls,
+        caption_style: CaptionStyleConfig,
+        *,
+        layout: SubtitleLayout | None = None,
+        render: RenderConfig | None = None,
+    ) -> Self:
+        """Construye un SubtitleRenderer a partir del CaptionStyleConfig del contrato.
+
+        Args:
+            caption_style: Configuración estética de subtítulos del contrato.
+            layout: Resolución lógica del lienzo ASS.
+            render: Configuración de render ffmpeg.
+
+        Returns:
+            La instancia de SubtitleRenderer configurada.
+        """
+        return cls(
+            style=SubtitleStyle.from_caption_style(caption_style),
+            layout=layout,
+            render=render,
+        )
+
     def build(self, words: Sequence[Word]) -> str:
         """Genera el contenido ASS a partir de las palabras transcritas.
 
@@ -163,7 +213,7 @@ class SubtitleRenderer:
             "[Events]",
             _EVENT_FORMAT,
         ]
-        lines.extend(_line_event(line) for line in _group_words(words))
+        lines.extend(_line_event(line, style=self._style) for line in _group_words(words))
         return "\n".join(lines) + "\n"
 
     def write(self, words: Sequence[Word], destination: Path) -> Path:
@@ -322,7 +372,7 @@ def _escape_text(text: str) -> str:
 def _style_line(style: SubtitleStyle) -> str:
     return (
         f"Style: {_STYLE_NAME},{style.fontname},{style.fontsize},"
-        f"{style.primary_colour},{_SECONDARY_COLOUR},{style.outline_colour},{style.back_colour},"
+        f"{style.primary_colour},{style.secondary_colour},{style.outline_colour},{style.back_colour},"
         f"0,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},"
         f"{style.alignment},{_MARGIN_H},{_MARGIN_H},{style.margin_v},{_ENCODING}"
     )
@@ -491,7 +541,15 @@ def _allocate_centiseconds(words: Sequence[Word]) -> list[int]:
     return allocated
 
 
-def _line_event(words: Sequence[Word]) -> str:
+def _apply_capitalization(text: str, cap: CaptionCapitalization) -> str:
+    if cap is CaptionCapitalization.UPPERCASE:
+        return text.upper()
+    if cap is CaptionCapitalization.LOWERCASE:
+        return text.lower()
+    return text
+
+
+def _line_event(words: Sequence[Word], style: SubtitleStyle | None = None) -> str:
     r"""Construye un evento ``Dialogue`` con un ``{\k}`` por palabra.
 
     Las marcas del evento y los valores ``{\\k}`` salen de la MISMA rejilla de
@@ -509,6 +567,7 @@ def _line_event(words: Sequence[Word]) -> str:
 
     Args:
         words: Palabras de una sola linea.
+        style: Estilo opcional para aplicar capitalización al texto.
 
     Returns:
         La linea de dialogo ASS.
@@ -516,8 +575,9 @@ def _line_event(words: Sequence[Word]) -> str:
     allocated = _allocate_centiseconds(words)
     start_cs = round(words[0].start_s * 100)
     end_cs = start_cs + sum(allocated)
+    cap = style.capitalization if style is not None else CaptionCapitalization.ORIGINAL
     text = "".join(
-        f"{{\\k{value}}}{_escape_text(word.text)}"
+        f"{{\\k{value}}}{_escape_text(_apply_capitalization(word.text, cap))}"
         for word, value in zip(words, allocated, strict=True)
     )
     start = _format_time(start_cs / 100)

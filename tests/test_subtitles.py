@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from kliptych import subtitles
+from kliptych.contract.enums import CaptionCapitalization
 from kliptych.encoding import RenderConfig
 from kliptych.subtitles import (
     SubtitleError,
@@ -347,3 +348,17 @@ def test_subtitle_layout_rejects_invalid_dimensions() -> None:
 def test_style_sequence_is_immutable_input() -> None:
     words: Sequence[Word] = (_word(0.0, 0.5, "hola"),)
     assert "hola" in SubtitleRenderer().build(words)
+
+
+def test_subtitle_style_secondary_colour_and_capitalization() -> None:
+    """SubtitleStyle tiene secondary_colour configurable y capitalization."""
+    style = SubtitleStyle(
+        secondary_colour="&H0000FF00",
+        capitalization=CaptionCapitalization.UPPERCASE,
+    )
+    assert style.secondary_colour == "&H0000FF00"
+    assert style.capitalization is CaptionCapitalization.UPPERCASE
+
+    # _style_line usa style.secondary_colour en vez de constante fija
+    line = _style_line(style)
+    assert "&H0000FF00" in line
