@@ -31,6 +31,7 @@ from typing import BinaryIO, ClassVar, Protocol, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kliptych.encoding import (
+    Invocation,
     RenderConfig,
     audio_and_container_arguments,
     run_ffmpeg_with_fallback,
@@ -1129,10 +1130,12 @@ def _run_ffmpeg(
 ) -> None:
     run_ffmpeg_with_fallback(
         argv,
-        render=render,
-        temporary=temporary,
-        error_cls=ReframeError,
-        runner=subprocess.run,
+        Invocation(
+            render=render,
+            temporary=temporary,
+            error_cls=ReframeError,
+            runner=subprocess.run,
+        ),
     )
 
 

@@ -49,8 +49,10 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
+from kliptych.degradations import recolectar
 from kliptych.download import MediaDownloader
 from kliptych.encoding import (
+    Invocation,
     RenderConfig,
     aspect_matches,
     audio_and_container_arguments,
@@ -688,6 +690,37 @@ def run_long_video(
     """
     _reject_split_screen(config)
     _validate_audio_combination(config)
+    # El colector se abre aqui, antes de cualquier render, para que la degradacion
+    # en caliente quede registrada en el checkpoint de esta corrida. Sin el, una
+    # caida de encoder revienta sin dejar rastro.
+    with recolectar():
+        return _run_long_video_con_colector(
+            url,
+            model=model,
+            config=config,
+            detector=detector,
+            transcriber=transcriber,
+            selector=selector,
+            reframer=reframer,
+            subtitle_renderer=subtitle_renderer,
+            resume=resume,
+        )
+
+
+def _run_long_video_con_colector(
+    url: str,
+    *,
+    model: LongVideoModel | None,
+    config: PipelineConfig,
+    detector: MomentDetector | None,
+    transcriber: Transcriber | None,
+    selector: SegmentSelector | None,
+    reframer: Reframer | None,
+    subtitle_renderer: SubtitleBurner | None,
+    resume: bool,
+) -> PipelineResult:
+    _reject_split_screen(config)
+    _validate_audio_combination(config)
     try:
         config.output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -865,6 +898,28 @@ def run_slideshow(
         PipelineError: Si la duración no es positiva, falta ``audio_locked``,
             no hay imágenes, una imagen no existe o una etapa falla.
     """
+    _reject_split_screen(config)
+    _validate_audio_combination(config)
+    _validate_slideshow(images, config=config, slide_duration_s=slide_duration_s)
+    # El colector se abre aqui: `run_slideshow` alcanza `run_ffmpeg_with_fallback`
+    # por `_assemble_slideshow` sin pasar por `run_long_video`, asi que necesita
+    # el suyo.
+    with recolectar():
+        return _run_slideshow_con_colector(
+            images,
+            config=config,
+            slide_duration_s=slide_duration_s,
+            resume=resume,
+        )
+
+
+def _run_slideshow_con_colector(
+    images: Sequence[Path | str],
+    *,
+    config: PipelineConfig,
+    slide_duration_s: float,
+    resume: bool,
+) -> SlideshowResult:
     _reject_split_screen(config)
     _validate_audio_combination(config)
     _validate_slideshow(images, config=config, slide_duration_s=slide_duration_s)
@@ -3102,9 +3157,7 @@ def _translated(stage: str) -> Generator[None]:
 def _run_ffmpeg(argv: Sequence[str], *, render: RenderConfig) -> None:
     run_ffmpeg_with_fallback(
         argv,
-        render=render,
-        error_cls=PipelineError,
-        runner=subprocess.run,
+        Invocation(render=render, error_cls=PipelineError, runner=subprocess.run),
     )
 
 

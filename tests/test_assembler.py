@@ -10,6 +10,9 @@ from typing import cast
 import pytest
 
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
+from kliptych.contract.enums import Layout
+from kliptych.degradations import recolectar
+from kliptych.encoding import RenderConfig
 from kliptych.gate.probe import FFprobeProbe
 
 _FFMPEG = shutil.which("ffmpeg")
@@ -605,3 +608,48 @@ def test_exact_cut_real_ffmpeg_integration(tmp_path: Path) -> None:
     for stream in streams:
         start_time = float(cast("str", stream.get("start_time", "0.0")))
         assert start_time == pytest.approx(0.0, abs=0.05)
+
+
+def test_nvenc_available_but_failing_degrades_and_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """NVENC disponible en deteccion y roto en render no debe matar la corrida.
+
+    En CI ffmpeg lista `h264_nvenc` pero `libcuda.so.1` no existe: la deteccion
+    decia disponible y el render moría con 255. `FFmpegAssembler` corría ffmpeg
+    a pelo, sin el reintento, así que no había artefacto ni degradación: solo
+    `AssembleError` y código de salida 1.
+
+    El assembler tiene que pasar por el mismo camino de reintento que el resto,
+    para que la degradación quede registrada con ambos codecs y el render
+    complete.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(list(argv))
+        if "h264_nvenc" in argv:
+            return _completed(255, "Cannot load libcuda.so.1")
+        _ = Path(argv[-1]).write_bytes(b"artefacto")
+        return _completed()
+
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", run)
+    clip = _file(tmp_path, "clip.mp4")
+    destination = tmp_path / "run" / "piece.mp4"
+    spec = RenderSpec(
+        clip=clip,
+        destination=destination,
+        width=1080,
+        height=1920,
+        layout=Layout.SINGLE,
+    )
+
+    with recolectar() as degradaciones:
+        resultado = FFmpegAssembler(render=RenderConfig(nvenc_available=True)).assemble(spec)
+
+    assert resultado == destination
+    assert destination.is_file()
+    assert "h264_nvenc" in calls[0]
+    assert "h264_nvenc" not in calls[-1]
+    assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)

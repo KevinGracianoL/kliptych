@@ -1493,3 +1493,58 @@ def test_cli_run_unknown_recording_maps_model_error_to_json(
     )
     assert code == 1
     assert "no reconocidas" in str(_parse(capsys.readouterr().err)["error"])
+
+
+def test_una_caida_de_nvenc_en_render_queda_en_el_manifiesto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El registro tiene que nombrar el encoder que realmente codificó.
+
+    Antes de que `given_clips` abriera el colector, `activas()` devolvía `None` y
+    el manifiesto solo llevaba las degradaciones de PRE-VUELO: una caída en
+    caliente no quedaba en ninguna parte, y el `render_arguments` seguía
+    nombrando `h264_nvenc` sobre un archivo `libx264`.
+
+    La degradación debe estar junto al argv, no en su lugar.
+    """
+    _ = (tmp_path / "clip.mp4").write_bytes(b"clip")
+    draft = make_draft(
+        platforms={"tiktok": _platform_draft()},
+        assets={"required": [make_asset_draft()], "optional": []},
+    )
+    _ = monkeypatch.setattr(
+        "kliptych.pipeline.FFprobeProbe",
+        _SinteticoProbe(FakeProbe(info=make_media(width=608, height=1080))),
+    )
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if "h264_nvenc" in argv:
+            return subprocess.CompletedProcess(argv, 255, "", "Cannot load libcuda.so.1")
+        _ = Path(argv[-1]).write_bytes(b"artefacto")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    _ = monkeypatch.setattr("kliptych.assembler.subprocess.run", run)
+
+    result = run_given_clips(
+        model=_StaticModel(draft, _caption()),
+        settings=Settings.from_root(tmp_path),
+        request=_unit_request(
+            tmp_path,
+            brief="brief de caida de nvenc",
+            render=RenderConfig(nvenc_available=True),
+        ),
+    )
+    assert result.outcome is RunOutcome.EXPORTED
+
+    manifest = _json(Path(result.manifest_path))
+    degradaciones = cast("tuple[str, ...]", manifest["degradations"])
+    assert degradaciones, "la caida en caliente no quedo registrada"
+    assert any("h264_nvenc" in item and "libx264" in item for item in degradaciones), degradaciones
+    # El argv registrado sigue siendo el que se pidio; eso es intencion, no
+    # resultado, y por eso la degradacion tiene que acompaniarlo.
+    argumentos = cast(
+        "tuple[str, ...]",
+        cast("dict[str, object]", cast("list[object]", manifest["outputs"])[0])["render_arguments"],
+    )
+    assert "h264_nvenc" in argumentos, argumentos

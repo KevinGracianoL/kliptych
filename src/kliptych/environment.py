@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 DEFAULT_TIMEOUT_S = 15.0
 _GPU_FIELD_COUNT = 3
+_NVENC_PROBE_TIMEOUT_S = 30.0
 
 
 class _EnvBase(BaseModel):
@@ -130,10 +131,48 @@ def _tool_version(runner: CommandRunner, tool: str) -> str | None:
 
 
 def _detect_nvenc(runner: CommandRunner, ffmpeg_version: str | None) -> bool:
+    """Decide si NVENC sirve CODIFICANDO, no listando el encoder.
+
+    ffmpeg lista `h264_nvenc` en maquinas sin driver CUDA. Ahi el listado dice
+    disponible, el render muere con 255 y la corrida entera falla en lugar de
+    degradar a CPU. La unica prueba que vale es el código de salida de un encode
+    real: dos frames de 64x64, que es lo bastante pequeño para correr en el
+    arranque de cada invocacion.
+
+    Args:
+        runner: Ejecutor de comandos (real o falso en tests).
+        ffmpeg_version: Version de ffmpeg ya detectada, o ``None`` si no existe.
+
+    Returns:
+        ``True`` solo si el encoder esta listado Y el encode de prueba sale 0.
+    """
     if ffmpeg_version is None:
         return False
-    result = runner.run(["ffmpeg", "-hide_banner", "-encoders"])
-    return result.ok and "h264_nvenc" in result.stdout
+    listed = runner.run(["ffmpeg", "-hide_banner", "-encoders"])
+    if not listed.ok or "h264_nvenc" not in listed.stdout:
+        return False
+    probe = runner.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.04",
+            "-frames:v",
+            "2",
+            "-c:v",
+            "h264_nvenc",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout_s=_NVENC_PROBE_TIMEOUT_S,
+    )
+    return probe.ok
 
 
 def _detect_gpu(runner: CommandRunner) -> GpuInfo | None:

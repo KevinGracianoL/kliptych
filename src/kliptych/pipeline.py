@@ -32,7 +32,7 @@ from kliptych.contract import (
     contract_digest,
     contract_mutes_audio,
 )
-from kliptych.degradations import activas
+from kliptych.degradations import activas, recolectar
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport
 from kliptych.exporter import DeliveryReport, export_delivery
@@ -237,11 +237,8 @@ def run_given_clips(
     # este sitio fabricaba `RenderConfig()`, que es el default de la clase: la
     # CLI pasaba su config por otro camino y la biblioteca no, de modo que dos
     # entradas al mismo pipeline garantizaban tolerancias distintas.
-    gate = (
-        Gate(FFprobeProbe(), render=RenderConfig() if request.render is None else request.render)
-        if request.gate is None
-        else request.gate
-    )
+    render_efectivo = RenderConfig() if request.render is None else request.render
+    gate = Gate(FFprobeProbe(), render=render_efectivo) if request.gate is None else request.gate
     if isinstance(model, ChatJsonModel) and hasattr(gate, "register_validator"):
         gate.register_validator(
             "brand.safety",
@@ -256,7 +253,9 @@ def run_given_clips(
         registry=registry,
         model=model,
         engine=gate,
-        builder=FFmpegAssembler() if request.assembler is None else request.assembler,
+        builder=FFmpegAssembler(render=render_efectivo)
+        if request.assembler is None
+        else request.assembler,
     )
     if resolution.status is not ResolutionStatus.RESOLVED or resolution.contract is None:
         return _unresolved(context, resolution)
@@ -287,7 +286,11 @@ def run_given_clips(
                 ),
             ),
         )
-    return _resolved(context, contract)
+    # El colector se abre aqui, antes del render, por el mismo motivo que en
+    # `run_long_video`: sin el, una caida de NVENC en caliente no queda
+    # registrada y el manifiesto nombra un encoder que no codificó nada.
+    with recolectar():
+        return _resolved(context, contract)
 
 
 def _halted(
