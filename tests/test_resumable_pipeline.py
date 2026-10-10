@@ -7,10 +7,12 @@ puros se eliminen deterministamente.
 """
 
 import os
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from subprocess import CompletedProcess
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast, override
 
@@ -22,7 +24,8 @@ from kliptych.assets import AssetRegistry
 from kliptych.campaign_manager import CampaignManager, CampaignOutcome
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.contract import AudioPolicy, Contract, Segment
-from kliptych.encoding import RenderConfig
+from kliptych.degradations import DegradacionNoRegistrableError, recolectar
+from kliptych.encoding import RenderConfig, run_ffmpeg_with_fallback, video_encoder_arguments
 from kliptych.gate import Gate
 from kliptych.gc import clean_temporary_directories
 from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
@@ -313,7 +316,7 @@ def _mock_ffmpeg() -> object:
 
     def run(argv: list[str], **kwargs: object) -> object:
         _ = kwargs
-        if argv and argv[0] == "ffprobe":
+        if len(argv) > 0 and argv[0] == "ffprobe":
             return SimpleNamespace(
                 args=argv,
                 returncode=0,
@@ -1419,3 +1422,214 @@ def test_la_duracion_usa_el_reloj_monotonico_y_no_el_de_pared(
     _ = manager.mark_done(PipelineStage.DOWNLOAD, artefacto)
 
     assert manager.checkpoint.durations_ms["download"] == 250
+
+
+# --------------------------------------------------------------------------
+# El colector de degradaciones en `run_long_video`
+#
+# Los dobles de este archivo escriben el destino de memoria y nunca llaman a
+# ffmpeg, asi que con ellos no se puede forzar una caida. `_ReframerConCaida` si
+# pasa por `_run_ffmpeg` del modulo, que es el camino que hay que cubrir.
+# --------------------------------------------------------------------------
+
+
+def _downloader_de_prueba(counter: _CallCounter) -> object:
+    """Fabrica un downloader doble que escribe el destino sin red.
+
+    Args:
+        counter: Contador de llamadas compartido por los dobles.
+
+    Returns:
+        La fabrica que `orchestrator.MediaDownloader` espera.
+    """
+
+    def fabrica(*, timeout_s: float, max_size_bytes: int) -> _TrackedDownloader:
+        del timeout_s, max_size_bytes
+        return _TrackedDownloader(counter)
+
+    return fabrica
+
+
+class _ReframerConCaida:
+    """Reframer doble que pasa por el ffmpeg real del modulo."""
+
+    _render: RenderConfig
+
+    def __init__(self, render: RenderConfig) -> None:
+        self._render = render
+
+    @staticmethod
+    def analyze(video: Path) -> ReframeResult:
+        """Devuelve un reframe valido sin tocar el video.
+
+        Args:
+            video: Video de entrada; no se usa.
+
+        Returns:
+            El resultado de reframe fijo.
+        """
+        del video
+        return _reframe_result()
+
+    def render(self, *, video: Path, destination: Path, result: object) -> Path:
+        """Ejecuta el render real y devuelve el destino.
+
+        Args:
+            video: Video de entrada.
+            destination: Ruta de salida que pide el pipeline.
+            result: Resultado del analisis; no se usa.
+
+        Returns:
+            La ruta de destino.
+        """
+        del video, result
+        ejecutar = cast("Callable[..., None]", _private("_run_ffmpeg"))
+        argv = ["ffmpeg", "-hide_banner", "-v", "error", "-y"]
+        argv += list(_encoder_de(nvenc=self._render.nvenc_available))
+        argv += ["-t", "1.0", "-c:a", "aac", str(destination)]
+        ejecutar(argv, render=self._render)
+        destino = Path(str(argv[-1]))
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        _ = destino.write_bytes(b"artefacto")
+        return destination
+
+
+class _NvencMuerto:
+    """Doble de `subprocess.run` que falla solo cuando se pide h264_nvenc.
+
+    Responde con la forma real de `subprocess.run(capture_output=True, text=True)`,
+    es decir un `CompletedProcess` con `stdout` de tipo cadena, que es lo que
+    consume `_probe_fields`.
+    """
+
+    fallar: bool
+    ultimo_t: str
+
+    def __init__(self, *, fallar: bool = True) -> None:
+        self.fallar = fallar
+        # Ultimo `-t` que pidio un ffmpeg: el ffprobe posterior corre sobre el
+        # destino y no lleva `-t`, asi que la duracion se recuerda aqui para que
+        # el doble refleje lo que el pipeline ejecuto de verdad.
+        self.ultimo_t = "2.0"
+
+    def __call__(self, argv: Sequence[str], **kwargs: object) -> "CompletedProcess[str]":
+        del kwargs
+        if len(argv) > 0 and argv[0] == "ffmpeg" and "-t" in argv:
+            self.ultimo_t = argv[argv.index("-t") + 1]
+        if len(argv) > 0 and argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"width=320\nheight=240\nduration={self.ultimo_t}\n",
+                stderr="",
+            )
+        if self.fallar and "h264_nvenc" in argv:
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="No NVENC capable devices found"
+            )
+        destino = Path(str(argv[-1]))
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        _ = destino.write_bytes(b"artefacto")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="width=320\nheight=240\nduration=2.0\n", stderr=""
+        )
+
+
+def _encoder_de(*, nvenc: bool) -> tuple[str, ...]:
+    """Argumentos del codificador pedido.
+
+    Args:
+        nvenc: Si NVENC esta declarado disponible.
+
+    Returns:
+        El `argv` del codificador.
+    """
+    return video_encoder_arguments(nvenc_available=nvenc)
+
+
+def test_run_long_video_con_caida_registra_degradacion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La caida de NVENC en la ruta larga queda registrada con ambos codecs.
+
+    Sin el colector abierto, `run_ffmpeg_with_fallback` lanza
+    `DegradacionNoRegistrableError` y la corrida entera muere: ese es el RED.
+    """
+    counter = _CallCounter()
+
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(nvenc_available=True),
+    )
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", _NvencMuerto())
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _downloader_de_prueba(counter))
+    _ = run_long_video(
+        "https://kick.com/video-de-prueba",
+        model=_TrackedModel(),
+        config=config,
+        detector=_TrackedDetector(counter),
+        transcriber=_TrackedTranscriber(counter),
+        selector=_TrackedSelector(counter),
+        reframer=_ReframerConCaida(config.render),
+        subtitle_renderer=_TrackedSubtitleRenderer(counter),
+    )
+
+    degradaciones = PipelineStateManager.load(config.output_dir).checkpoint.degradations
+    assert degradaciones, degradaciones
+    assert "h264_nvenc" in degradaciones[0]
+    assert "libx264" in degradaciones[0]
+
+
+def test_run_long_video_sin_caida_no_registra_degradacion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La ausencia de un evento no se escribe como evento."""
+    counter = _CallCounter()
+
+    config = PipelineConfig(
+        output_dir=tmp_path / "out",
+        contract=_contract(),
+        render=RenderConfig(nvenc_available=True),
+    )
+    monkeypatch.setattr("kliptych.orchestrator.subprocess.run", _NvencMuerto(fallar=False))
+    monkeypatch.setattr("kliptych.orchestrator.MediaDownloader", _downloader_de_prueba(counter))
+    _ = run_long_video(
+        "https://kick.com/video-de-prueba",
+        model=_TrackedModel(),
+        config=config,
+        detector=_TrackedDetector(counter),
+        transcriber=_TrackedTranscriber(counter),
+        selector=_TrackedSelector(counter),
+        reframer=_ReframerConCaida(config.render),
+        subtitle_renderer=_TrackedSubtitleRenderer(counter),
+    )
+
+    assert PipelineStateManager.load(config.output_dir).checkpoint.degradations == ()
+
+
+def test_un_render_sin_colector_sigue_fallando() -> None:
+    """El fail-closed de #97 no se pierde al abrir el colector de la corrida.
+
+    Si `run_long_video` abre el colector y algun camino de render queda fuera,
+    este test lo dice: sin colector, la caida lanza.
+    """
+    argv = ["ffmpeg", "-i", "in.mp4", *video_encoder_arguments(nvenc_available=True), "out.mp4"]
+
+    with pytest.raises(DegradacionNoRegistrableError, match="no hay colector"):
+        run_ffmpeg_with_fallback(
+            argv,
+            render=RenderConfig(nvenc_available=True),
+            error_cls=RuntimeError,
+            runner=_NvencMuerto(),
+        )
+
+    with recolectar() as degradaciones:
+        run_ffmpeg_with_fallback(
+            argv,
+            render=RenderConfig(nvenc_available=True),
+            error_cls=RuntimeError,
+            runner=_NvencMuerto(),
+        )
+
+    assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)
