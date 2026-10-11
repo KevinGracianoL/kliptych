@@ -67,6 +67,9 @@ A silent no-op is worse than a failure, because it removes the signal.
 - A count quoted in a PR body must be recomputable from a command in the repo.
 - A kill count measured before a code change is not a measurement of the current
   code.
+- The blast radius of a scripted edit is measured with `git diff`, never assumed.
+  A blanket replace across a file is a find-and-replace with unknown reach; revert
+  from the diff, not from a pattern. A guard you have not seen fail is not a guard.
 
 ## Data rules
 
