@@ -173,6 +173,23 @@ def _review(**evidence: object) -> CheckOutcome:
     return CheckOutcome(status=CheckStatus.MANUAL_REVIEW, evidence=dict(evidence))
 
 
+def _unsupported(**evidence: object) -> CheckOutcome:
+    """`UNSUPPORTED` para lo que la sonda NO pudo responder (#83).
+
+    `FAIL` afirma que se midio y el contenido no cumple. Eso no se puede decir
+    si no se pudo medir: sin duracion no hay muestras que repartir, y sin
+    artefacto no hay nada que correlacionar. Devolver `FAIL` ahi le dice al
+    operador que su video esta mal cuando lo unico roto es la medicion.
+
+    Args:
+        **evidence: El motivo (`reason`) y lo que la rama sepa del contexto.
+
+    Returns:
+        El veredicto en UNSUPPORTED con su evidencia.
+    """
+    return CheckOutcome(status=CheckStatus.UNSUPPORTED, evidence=dict(evidence))
+
+
 def check_watermark_present(context: GateContext) -> CheckOutcome:
     """Verifica que el watermark aparezca al menos en una muestra del video.
 
@@ -180,8 +197,9 @@ def check_watermark_present(context: GateContext) -> CheckOutcome:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si alguna muestra correlaciona en la zona y tamaño exigidos;
-        FAIL en caso contrario o ante cualquier fallo de evaluación.
+        PASS si alguna muestra correlaciona en la zona y tamaño exigidos; FAIL
+        si se evaluaron las muestras y ninguna cumplio; UNSUPPORTED si no se
+        pudo evaluar (sin duración o sin artefacto, #83).
     """
     return _check_watermark(context, full_video=False)
 
@@ -189,16 +207,16 @@ def check_watermark_present(context: GateContext) -> CheckOutcome:
 def check_watermark_full_video(context: GateContext) -> CheckOutcome:
     """Verifica que el watermark esté presente durante todo el video.
 
-    Todas las muestras distribuidas por la duración deben correlacionar en
-    la zona y tamaño exigidos; si el logo desaparece a mitad o al final del
+    Todas las muestras distribuidas por la duración deben correlacionar en la
+    zona y tamaño exigidos; si el logo desaparece a mitad o al final del
     clip, el resultado es FAIL.
 
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
-        PASS si todas las muestras cumplen; FAIL en caso contrario o ante
-        cualquier fallo de evaluación.
+        PASS si todas las muestras cumplen; FAIL si se evaluaron y alguna no;
+        UNSUPPORTED si no se pudo evaluar (sin duración o sin artefacto, #83).
     """
     return _check_watermark(context, full_video=True)
 
@@ -224,12 +242,17 @@ def _check_watermark(context: GateContext, *, full_video: bool) -> CheckOutcome:
 def _prepare_evaluation(context: GateContext, rule: str) -> _Ready | CheckOutcome:
     """Verifica las precondiciones del chequeo sin evaluar muestras.
 
+    Lo que separa `FAIL` de `UNSUPPORTED` (#83): la plantilla ausente es
+    `FAIL`, porque la sonda entro y encontro que el recurso que exige el
+    contrato no esta. Sin duracion o sin artefacto es `UNSUPPORTED`, porque no
+    llego a haber nada que evaluar.
+
     Args:
         context: Contexto resuelto del gate.
         rule: Id de la regla en evaluación, para la evidencia.
 
     Returns:
-        Las entradas verificadas, o el FAIL fail-closed correspondiente.
+        Las entradas verificadas, o el veredicto fail-closed correspondiente.
     """
     try:
         template = _load_template(context)
@@ -237,10 +260,12 @@ def _prepare_evaluation(context: GateContext, rule: str) -> _Ready | CheckOutcom
         return _fail(rule=rule, reason=str(error))
     duration = context.media.duration_s if context.media is not None else None
     if duration is None or duration <= 0:
-        return _fail(rule=rule, reason="no se pudo medir la duración del artefacto")
+        return _unsupported(rule=rule, reason="no se pudo medir la duración del artefacto")
     video = context.piece.artifact_path
     if not video.is_file():
-        return _fail(rule=rule, reason="el artefacto no existe; no se pudo verificar el watermark")
+        return _unsupported(
+            rule=rule, reason="el artefacto no existe; no se pudo verificar el watermark"
+        )
     return _Ready(
         template=template,
         duration=duration,

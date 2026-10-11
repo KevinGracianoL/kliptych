@@ -10,6 +10,7 @@ from kliptych.contract.schema import PlatformRules, canonical_rule_id
 from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
 from kliptych.gate.models import (
+    UNVALIDATED_RULE_REASON,
     CheckResult,
     CheckStatus,
     GateResult,
@@ -55,11 +56,11 @@ def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
       por regla dura deja la pieza inexportable sin salida humana.
 
     Las reglas ``audio.own_clip``, ``audio.no_trending`` y
-    ``audio.official_track`` son ``manual_review`` y no tienen validador
-    mecanico a proposito: ``manual_review`` significa que decide una persona, y
-    eso no se automatiza. No tienen que emitir evidencia mecanica; lo que no
-    pueden es exigir la revision manual de una plataforma que no declaro esa
-    regla de audio.
+    ``audio.official_track`` son ``manual_review`` y su validador se limita a
+    dejar constancia de que la revision es humana: ``manual_review`` significa
+    que decide una persona, y eso no se automatiza. No tienen que emitir
+    evidencia mecanica de audio; lo que no pueden es exigir la revision
+    manual de una plataforma que no declaro esa regla de audio.
 
     Generalizar esto a "omitir todo check sin requisitos" seria incorrecto y
     borraria la evidencia de los checks que si deben constancia. Solo se omite
@@ -190,12 +191,15 @@ class Gate:
                     # `unsupported`, que es lo que corresponde.
                     #
                     # OJO: no hay un unico "igual que base", depende de la FORMA
-                    # de la regla. Sin validador (audio.no_trending,
-                    # audio.own_clip, audio.official_track) base ya la
-                    # despachaba y el resultado es identico. Con validador
-                    # (audio.present) base la omitia en silencio, o sea base
-                    # fallaba abierta, y aqui es MAS estricto. En ninguno de los
-                    # dos casos es menos estricto que base.
+                    # de la regla. Sin validador, base resolvia el huerfano
+                    # con la FUERZA de la regla (manual_review ->
+                    # manual_review, cualquier otra -> unsupported). Con
+                    # validador registrado, base lo omitia en silencio, o sea
+                    # base fallaba abierta, y aqui se despacha y ademas se le
+                    # devuelve la fuerza por encima del MANUAL_REVIEW del
+                    # validador, para no quedar menos estricto que base. Con
+                    # validador (audio.present) base la omitia igual. En
+                    # ninguno de los dos casos es menos estricto que base.
                     # Se registra siempre; anadir el motivo es ademas informativo.
                     dispatched = self._run_rule(rule_id, strength, context)
                     outcomes.append(
@@ -203,7 +207,9 @@ class Gate:
                             strength,
                             CheckResult(
                                 id=dispatched.id,
-                                status=dispatched.status,
+                                status=_unclaimed_status(
+                                    dispatched.status, strength, rule_id, context.contract
+                                ),
                                 evidence={
                                     **dispatched.evidence,
                                     "unclaimed": (
@@ -258,9 +264,7 @@ class Gate:
                 if strength is RuleStrength.MANUAL_REVIEW or bool(citations)
                 else CheckStatus.UNSUPPORTED
             )
-            evidence: dict[str, object] = {
-                "reason": "no hay validador mecánico registrado para esta regla"
-            }
+            evidence: dict[str, object] = {"reason": UNVALIDATED_RULE_REASON}
             if citations:
                 evidence["citations"] = citations
             return CheckResult(id=rule_id, status=status, evidence=evidence)
@@ -274,6 +278,44 @@ class Gate:
             return self._probe.probe(path)
         except ProbeError:
             return None
+
+
+def _unclaimed_status(
+    status: CheckStatus,
+    strength: RuleStrength,
+    rule_id: str,
+    contract: Contract,
+) -> CheckStatus:
+    """Resuelve el veredicto de una regla que ninguna plataforma reclama.
+
+    Una regla por plataforma que nadie reclama no se puede resolver mirando el
+    artefacto: no hay plataforma sobre la que aplicar su condicion, asi que un
+    ``MANUAL_REVIEW`` del validador (y estos validadores solo saben decir "esto
+    lo decide una persona") no resolveria nada. Decide la FUERZA con la que el
+    contrato la declaro, que es exactamente lo que hacia el motor antes de que
+    existiera el validador: ``manual_review`` se queda en revision humana y
+    cualquier otra fuerza queda ``unsupported``, porque un contrato duro que
+    nadie puede satisfacer es un contrato incoherente y tiene que frenar.
+
+    Sin esta correccion, registrar un validador para una regla por plataforma
+    seria un fail-open: la misma regla dura que antes tumbaba la pieza pasaria a
+    ser firmable.
+
+    Args:
+        status: Veredicto que devolvio el validador.
+        strength: Fuerza con la que el contrato declara la regla.
+        rule_id: Identificador de la regla, tal como la escribio el contrato,
+            para buscar sus citas en `unmapped`.
+        contract: Contrato resuelto de la pieza.
+
+    Returns:
+        El veredicto del validador, o ``UNSUPPORTED`` si era una revision
+        manual sobre una regla dura que nadie reclama y que nadie cito.
+    """
+    if status is not CheckStatus.MANUAL_REVIEW or strength is RuleStrength.MANUAL_REVIEW:
+        return status
+    cited = any(unmapped.rule == rule_id for unmapped in contract.unmapped)
+    return status if cited else CheckStatus.UNSUPPORTED
 
 
 def _hash_artifact(path: Path) -> str | None:

@@ -39,6 +39,13 @@ from kliptych.encoding import (
 )
 
 _TARGET_ASPECT = 9.0 / 16.0
+# El lado menor mas pequeno que el productor emite. Medido contra la predicada
+# del gate (`matches_declared_aspect` con la tolerancia del render): el lado
+# menor mas grande entre los recortes que el gate RECHAZA es 20 px (`20x38`),
+# y por encima de 24 px no hay ni un rechazo en la rejilla 2..1200 x 2..1200.
+# El piso se pone en 24 y no en 20 a proposito: cubre la franja que el gate
+# toleraria por proporcion (`22x40`, 2,2 %) y que aun asi no es entregable.
+_MIN_CROP_SIDE_PX = 24
 _DEFAULT_ASPECT = "9:16"
 _DEFAULT_SAMPLE_FPS = 2.0
 _DEFAULT_SMOOTHING = 0.35
@@ -896,17 +903,29 @@ def crop_size(source_width: int, source_height: int) -> tuple[int, int]:
     lado menor mas grande entre recortes rechazados es 20 px (`20x38`), y sobre
     origenes 2..1200 x 2..1200 no hay ninguno con ambos lados >= 24. Con >= 40
     tampoco, y a 22x40 el error es 2,2 %: la tolerancia no hay que tocarla.
-    En #84. No se cambia aqui.
+
+    Por eso (#84) esta funcion se NIEGA a emitir por debajo de
+    `_MIN_CROP_SIDE_PX` en vez de dejar que el gate lo rechace despues: el
+    productor no entrega un recorte que su propio gate va a tumbar, y el error
+    sale nombrando el origen y el par imposible, no tres pasos mas tarde.
+
+    Y ojo con lo que ese piso implica, porque no es solo de ASPECTO: el gate
+    acepta `22x40` (2,2 % de desviacion, dentro del 5 %) y con el piso ese
+    recorte tampoco se produce. Es deliberado. El gate mide proporcion, y un
+    recorte de 22 px de ancho no es entregable para ningun canal aunque su
+    proporcion sea correcta; negarse es fail-closed y medible, no arbitrario.
 
     Args:
         source_width: Ancho del origen, positivo.
         source_height: Alto del origen, positivo.
 
     Returns:
-        El par ``(ancho, alto)`` del recorte, ambos pares y dentro del origen.
+        El par ``(ancho, alto)`` del recorte, ambos pares, dentro del origen y
+        con ambos lados de al menos ``_MIN_CROP_SIDE_PX``.
 
     Raises:
-        ValueError: Si alguna dimension no es positiva.
+        ValueError: Si alguna dimension no es positiva, o si el recorte caeria
+            por debajo de ``_MIN_CROP_SIDE_PX`` por el lado menor.
     """
     if source_width <= 0 or source_height <= 0:
         msg = f"dimensiones de origen inválidas: {source_width}x{source_height}"
@@ -919,6 +938,12 @@ def crop_size(source_width: int, source_height: int) -> tuple[int, int]:
         height = _even(round(width / _TARGET_ASPECT))
     width = max(2, min(width, _even(source_width)))
     height = max(2, min(height, _even(source_height)))
+    if min(width, height) < _MIN_CROP_SIDE_PX:
+        msg = (
+            f"origen inviable para recorte 9:16: {source_width}x{source_height} "
+            f"produce {width}x{height} (< {_MIN_CROP_SIDE_PX} px)"
+        )
+        raise ValueError(msg)
     return width, height
 
 

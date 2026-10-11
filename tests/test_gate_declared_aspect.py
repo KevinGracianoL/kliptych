@@ -681,9 +681,11 @@ def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
         menor de 24 px: por encima no hay ni un rechazo en toda la rejilla.
 
         OJO con lo que este test NO dice: que el gate RECHAZA los recortes por debajo
-        de ese minimo es correcto, no un defecto. El defecto es del PRODUCTOR, que
-        deberia negarse a construir un recorte que su propio gate va a rechazar. Va
-        al issue #84, con su recorrido end-to-end; aqui se acota la frontera.
+        de ese minimo es correcto, no un defecto. El defecto era del PRODUCTOR, que
+        emiteba un recorte que su propio gate iba a rechazar; desde #84 `crop_size`
+        se niega con `ValueError` antes de emitirlo. Aqui se acota la frontera: por
+        debajo del minimo ya no hay nada que pasarle al gate, y la fraccion que
+        `crop_size` RECHAZA se mide por separado, sobre el par teorico.
     """
     tolerancia = RenderConfig().aspect_tolerance
 
@@ -691,7 +693,13 @@ def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
     por_debajo: list[str] = []
     for ancho_origen in range(2, 400, 2):
         for alto_origen in range(2, 400, 2):
-            ancho, alto = crop_size(ancho_origen, alto_origen)
+            try:
+                ancho, alto = crop_size(ancho_origen, alto_origen)
+            except ValueError:
+                # #84: el productor ya no emite esto. La fraccion se comprueba
+                # abajo, sobre el par teorico, para que la frontera del GATE no
+                # dependa de que el productor se negue.
+                ancho, alto = _par_teorico(ancho_origen, alto_origen)
             if matches_declared_aspect(ancho, alto, Aspect.VERTICAL, tolerancia=tolerancia):
                 continue
             caso = f"origen {ancho_origen}x{alto_origen} -> {ancho}x{alto}"
@@ -707,6 +715,61 @@ def test_g7_la_tolerancia_del_render_alcanza_lo_que_reframe_emite() -> None:
     # El lado contrario: la region por debajo del limite TIENE que rechazar, o
     # este test solo estaria comprobando que el gate es permisivo.
     assert por_debajo, "esperaba recortes rechazados por debajo del lado menor de 24"
+
+
+def _par_teorico(ancho_origen: int, alto_origen: int) -> tuple[int, int]:
+    """El par que `crop_size` calcularia si el piso de 24 px no existiera.
+
+    Se recalcula aqui a proposito, con la misma aritmetica que el productor
+    (cuantizar al par y `round` half-to-even), en vez de leerlo de la
+    constante: si el piso se moviera, este recorrido tiene que seguir
+    describiendo la geometria que el PRODUCTOR tendria que emitir, no la que
+    emite hoy.
+
+    Args:
+        ancho_origen: Ancho del origen, en pixeles pares.
+        alto_origen: Alto del origen, en pixeles pares.
+
+    Returns:
+        El par `(ancho, alto)` sin aplicar el minimo de lado menor.
+    """
+
+    def par(valor: int) -> int:
+        return valor if valor % 2 == 0 else valor - 1
+
+    if alto_origen * 9 <= ancho_origen * 16:
+        alto = par(alto_origen)
+        ancho = par(round(alto * 9 / 16))
+    else:
+        ancho = par(ancho_origen)
+        alto = par(round(ancho / (9 / 16)))
+    return max(2, min(ancho, ancho_origen)), max(2, min(alto, alto_origen))
+
+
+def test_el_productor_nunca_emite_un_recorte_que_este_mismo_test_rechaza() -> None:
+    """El cruce de las dos mitades: si `crop_size` emite, el gate no lo rechaza.
+
+    Los dos tests anteriores miden por separado donde esta la frontera del gate
+    y donde esta la negativa del productor. Este los une: recorre la misma
+    rejilla y falla si aparece un par que el PRODUCTOR emita y el GATE
+    rechace. Sin el, ambos podrian ser certainos por separado y aun asi quedar
+    un agujero entre los dos, que es justo el defecto que #85/#84 describen.
+    """
+    tolerancia = RenderConfig().aspect_tolerance
+    emitidos_y_rechazados: list[str] = []
+
+    for ancho_origen in range(2, 400, 2):
+        for alto_origen in range(2, 400, 2):
+            try:
+                ancho, alto = crop_size(ancho_origen, alto_origen)
+            except ValueError:
+                continue
+            if not matches_declared_aspect(ancho, alto, Aspect.VERTICAL, tolerancia=tolerancia):
+                emitidos_y_rechazados.append(f"{ancho_origen}x{alto_origen} -> {ancho}x{alto}")
+
+    assert emitidos_y_rechazados == [], (
+        f"el reframe emite recortes que su propio gate rechaza: {emitidos_y_rechazados[:8]}"
+    )
 
 
 # ------------------------------------------------- la clase, cerrada

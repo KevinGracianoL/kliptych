@@ -96,6 +96,9 @@ __all__ = [
     "GateContext",
     "Validator",
     "check_artifact_integrity",
+    "check_audio_no_trending",
+    "check_audio_official_track",
+    "check_audio_own_clip",
     "check_audio_policy",
     "check_audio_present",
     "check_audio_silence",
@@ -312,6 +315,71 @@ def check_audio_present(context: GateContext) -> CheckOutcome:
     return _fail(has_audio=False)
 
 
+def _audio_rule_review(expected: AudioRule, reason: str) -> Validator:
+    """Construye el validador de una regla de audio que decide una persona.
+
+    Estas reglas son ``manual_review`` por diseno: nadie puede mirar un clip y
+    decidir por comandos si el audio es el suyo, si es trending, o si coincide
+    con la pista oficial. Lo que el validador PUEDE afirmar es que la regla
+    corresponde a la plataforma y que, por tanto, hay revision humana que
+    hacer; lo que no puede es emitir ``PASS`` sobre algo que no midio.
+
+    Registrarlas tiene un efecto que no es cosmético (#85): mientras no
+    issuieran nada, el motor las despachaba con el motivo "no hay validador
+    mecánico registrado para esta regla", y el exportador usa EXACTAMENTE ese
+    motivo para negarse a firmarlas. Es decir: sin validador, una regla de
+    audio conocida queda bloqueada para siempre, con firma o sin ella. Con
+    validador, la evidencia dice que la regla existe y que hay que revisarla a
+    mano, que es exactamente lo que una firma humana sabe cubrir.
+
+    Y el validador NO se niega a la regla que la plataforma no declara. Podria
+    parecer lo suyo, pero el motor ya resuelve eso: `_RULE_APPLICABILITY` hace
+    que estas reglas solo se despachen si la plataforma las pide, y su docstring
+    prohibe expresamente que una regla no aplicable produzca `UNSUPPORTED`
+    ("dejaría la pieza inexportable sin salida humana"). Devolverlo aqui
+    ademas rompia un invariante del repo: una regla declarada en revision
+    manual no debe tumbar el veredicto global. Asi que el validador afirma lo
+    unico que puede afirmar — que esta regla se resuelve con una persona — y
+    deja constancia de la regla de audio que la plataforma declaro, que es lo
+    que permite ver el desajuste sin convertirlo en un bloqueo.
+
+    Args:
+        expected: Regla de audio que la revision cubre.
+        reason: Por que esta regla se resuelve con una persona, en castellano.
+
+    Returns:
+        El validador, que devuelve MANUAL_REVIEW con la regla que espera y la
+        que la plataforma declaro.
+    """
+
+    def check(context: GateContext) -> CheckOutcome:
+        declared = context.rules.audio_rule
+        return CheckOutcome(
+            status=CheckStatus.MANUAL_REVIEW,
+            evidence={
+                "audio_rule": expected.value,
+                "platform_audio_rule": declared.value,
+                "reason": reason,
+            },
+        )
+
+    return check
+
+
+check_audio_own_clip = _audio_rule_review(
+    AudioRule.OWN_CLIP,
+    "revisión manual de audio propio requerida por la plataforma",
+)
+check_audio_no_trending = _audio_rule_review(
+    AudioRule.NO_TRENDING,
+    "revisión manual de sonido no-trending requerida por la plataforma",
+)
+check_audio_official_track = _audio_rule_review(
+    AudioRule.OFFICIAL_REQUIRED,
+    "revisión manual de pista oficial requerida por la plataforma",
+)
+
+
 def check_audio_policy(context: GateContext) -> CheckOutcome:
     """Verifica la política de audio declarada por la campaña.
 
@@ -355,34 +423,41 @@ def check_audio_silence(context: GateContext) -> CheckOutcome:
     Solo aplica con ``audio_policy=internal_official_sound``: el gate no
     confía en que el render pasara ``-af volume=0`` a ffmpeg, mide el
     ``max_volume`` real del MP4 final con ``ffmpeg -af volumedetect -f null -``
-    (lista de argumentos, sin shell). Fail-closed: sin ffmpeg, sin archivo o
-    sin medición, el resultado es ``fail``.
+    (lista de argumentos, sin shell).
 
     Antes de medir cuenta las pistas de audio con ffprobe: ``volumedetect``
     solo mide la pista por defecto, así que una pista extra audible pasaría
     inadvertida. Con 0 o más de 1 pista el resultado es ``fail`` sin medir;
     con exactamente 1 pista se mide con ``-map 0:a:0``.
 
+    El estado distingue SI se midio de SI se pudo medir (#83): ``fail`` solo
+    cuando la medición corrió y el audio incumple (o el conteo de pistas dio
+    un numero invalido), y ``unsupported`` cuando no hubo medición — sin
+    ffmpeg, sin ffprobe, sin artefacto, o porque ffmpeg fallo, expiro o no
+    publico un ``max_volume`` legible. Antes todo eso era ``fail``, que le
+    decía al operador que su contenido estaba mal cuando lo roto era el
+    instrumental de medición.
+
     Args:
         context: Contexto resuelto del gate.
 
     Returns:
         PASS si la política no exige silencio o el ``max_volume`` medido no
-        supera los -80.0 dB; FAIL si hay audio audible, el conteo de pistas
-        no es exactamente 1 o no se pudo medir.
+        supera los -80.0 dB; FAIL si se midió y hay audio audible o el conteo
+        de pistas no es exactamente 1; UNSUPPORTED si no se pudo medir.
     """
     policy = context.contract.audio_policy
     if policy is not AudioPolicy.INTERNAL_OFFICIAL_SOUND:
         return _pass(audio_policy=None if policy is None else policy.value)
     artifact = context.piece.artifact_path
     if not artifact.is_file():
-        return _fail(reason="el artefacto no existe; no se pudo verificar el silencio")
+        return _unsupported("el artefacto no existe; no se pudo verificar el silencio")
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        return _fail(reason="ffmpeg no está disponible; no se pudo verificar el silencio")
+        return _unsupported("ffmpeg no está disponible; no se pudo verificar el silencio")
     ffprobe = shutil.which("ffprobe")
     if ffprobe is None:
-        return _fail(reason="ffprobe no está disponible; no se pudo contar las pistas de audio")
+        return _unsupported("ffprobe no está disponible; no se pudo contar las pistas de audio")
     single_track = _require_single_audio_track(ffprobe, artifact)
     if single_track is not None:
         return single_track
@@ -390,19 +465,20 @@ def check_audio_silence(context: GateContext) -> CheckOutcome:
 
 
 def _require_single_audio_track(ffprobe: str, artifact: Path) -> CheckOutcome | None:
-    """Exige exactamente 1 pista de audio antes de medir el silencio (fail-closed).
+    """Exige exactamente 1 pista de audio antes de medir el silencio.
 
     Args:
         ffprobe: Binario ffprobe resuelto en el PATH.
         artifact: Ruta del MP4 final a inspeccionar.
 
     Returns:
-        None si el artefacto tiene exactamente 1 pista de audio; el FAIL
-        correspondiente si no se pudo contar o el conteo difiere de 1.
+        None si el artefacto tiene exactamente 1 pista de audio; ``UNSUPPORTED``
+        si no se pudo contar la pista (no hay veredicto sobre el contenido), o
+        ``FAIL`` si se contó y el numero no es 1.
     """
     tracks = _count_audio_tracks(ffprobe, artifact)
     if tracks is None:
-        return _fail(reason="no se pudo contar las pistas de audio del artefacto")
+        return _unsupported("no se pudo contar las pistas de audio del artefacto")
     if tracks != 1:
         return _fail(
             audio_tracks=tracks,
@@ -455,15 +531,16 @@ def _count_audio_tracks(ffprobe: str, artifact: Path) -> int | None:
 
 
 def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
-    """Mide el ``max_volume`` del artefacto con ``volumedetect`` (fail-closed).
+    """Mide el ``max_volume`` del artefacto con ``volumedetect``.
 
     Args:
         ffmpeg: Binario ffmpeg resuelto en el PATH.
         artifact: Ruta del MP4 final a medir.
 
     Returns:
-        PASS si el ``max_volume`` no supera los -80.0 dB; FAIL si hay audio
-        audible, ffmpeg falla o no se pudo medir.
+        PASS si el ``max_volume`` no supera los -80.0 dB; FAIL si se midió y
+        hay audio audible; UNSUPPORTED si ffmpeg no se pudo ejecutar, expiró o
+        no devolvió una medición utilizable (#83).
     """
     # `volumedetect` reporta en nivel info: `-v info` es obligatorio para que
     # el `max_volume` aparezca en stderr (`-v error` lo silenciaría).
@@ -494,11 +571,11 @@ def _measure_silence(ffmpeg: str, artifact: Path) -> CheckOutcome:
             check=False,
         )
     except FileNotFoundError as error:
-        return _fail(reason=f"ffmpeg no está disponible: {error}")
+        return _unsupported(f"ffmpeg no está disponible: {error}")
     except subprocess.TimeoutExpired:
-        return _fail(reason=f"volumedetect excedió el timeout de {_VOLUMEDETECT_TIMEOUT_S} s")
+        return _unsupported(f"volumedetect excedió el timeout de {_VOLUMEDETECT_TIMEOUT_S} s")
     except OSError as error:
-        return _fail(reason=f"no se pudo ejecutar ffmpeg: {error}")
+        return _unsupported(f"no se pudo ejecutar ffmpeg: {error}")
     return _parse_volumedetect(completed)
 
 
@@ -509,26 +586,31 @@ def _parse_volumedetect(completed: subprocess.CompletedProcess[str]) -> CheckOut
         completed: Proceso ffmpeg ya terminado.
 
     Returns:
-        PASS si el ``max_volume`` reportado no supera los -80.0 dB; FAIL en
-        cualquier otro caso (fallo de ffmpeg, salida sin medición o audio
-        audible).
+        PASS si el ``max_volume`` reportado no supera los -80.0 dB; FAIL si se
+        midió y hay audio audible; UNSUPPORTED si ffmpeg falló, no publicó
+        ``max_volume`` o el valor no es un número (#83).
     """
     if completed.returncode != 0:
-        return _fail(
-            reason=f"volumedetect falló con código {completed.returncode}",
+        return _unsupported(
+            f"volumedetect falló con código {completed.returncode}",
             stderr=completed.stderr.strip()[-_STDERR_TAIL:],
         )
     match = _MAX_VOLUME_RE.search(completed.stderr)
     if match is None:
-        return _fail(
-            reason="volumedetect no reportó max_volume",
+        return _unsupported(
+            "volumedetect no reportó max_volume",
             stderr=completed.stderr.strip()[-_STDERR_TAIL:],
         )
     raw = match.group(1)
     try:
         max_volume = float(raw)
     except ValueError:
-        return _fail(reason=f"max_volume no medible: {raw!r}")
+        # Rama hoy INALCANZABLE: `_MAX_VOLUME_RE` solo admite `-inf`, `inf` y
+        # un decimal con signo, y `float()` se come los tres. Se deja como red
+        # por si el regex se ensancha: sin ella, un valor raro reventaria el
+        # gate con una excepcion en vez de devolver un veredicto. No la cuenta
+        # ningun test, y no se debe escribir uno que finja lo contrario.
+        return _unsupported(f"max_volume no medible: {raw!r}")
     if max_volume <= _SILENCE_THRESHOLD_DB:
         return _pass(max_volume_db=raw, threshold_db=_SILENCE_THRESHOLD_DB)
     return _fail(
@@ -1609,6 +1691,9 @@ DEFAULT_VALIDATORS: dict[str, Validator] = {
     "assets.required": check_required_assets,
     "audio.present": check_audio_present,
     "audio.policy": check_audio_policy,
+    "audio.own_clip": check_audio_own_clip,
+    "audio.no_trending": check_audio_no_trending,
+    "audio.official_track": check_audio_official_track,
     "audio.silence": check_audio_silence,
     "brand.safety": check_brand_safety,
     "caption.first_line": check_first_line,

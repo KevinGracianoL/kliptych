@@ -42,6 +42,8 @@ from kliptych.contract import (
     PlatformRules,
 )
 from kliptych.gate import (
+    UNVALIDATED_RULE_REASON,
+    CheckResult,
     CheckStatus,
     Gate,
     GateResult,
@@ -392,10 +394,17 @@ def _is_piece_exportable(gate_result: GateResult, *, approve_manual_review: bool
     publica, aunque el estado global no sea REJECTED. La aprobación manual
     solo cubre checks MANUAL_REVIEW (o PASS).
 
+    Y dentro de los MANUAL_REVIEW, solo los que de verdad ejecutaron un
+    validador (#85). El motor emite MANUAL_REVIEW tambien para una regla SIN
+    validador registrado, con el motivo de que nadie la inspeccionó
+    mecánicamente; firmar eso equivaldría a certificar que una persona miró
+    algo que, por construcción, no miró. La firma cubre un criterio dudoso
+    aplicado sobre una medición existente, no la ausencia de medición.
+
     Args:
         gate_result: Resultado completo del gate sobre la pieza.
         approve_manual_review: Si es True, permite publicar piezas en estado
-            PENDING_REVIEW sin ningún check en FAIL.
+            PENDING_REVIEW sin ningún check en FAIL y sin reglas sin validar.
 
     Returns:
         True si la pieza pasó el gate o su revisión manual es aprobable.
@@ -404,10 +413,24 @@ def _is_piece_exportable(gate_result: GateResult, *, approve_manual_review: bool
         return True
     if not approve_manual_review or gate_result.status is not GateStatus.PENDING_REVIEW:
         return False
-    return all(
-        check.status is CheckStatus.PASS or check.status is CheckStatus.MANUAL_REVIEW
-        for check in gate_result.checks
-    )
+    return all(_is_signable(check) for check in gate_result.checks)
+
+
+def _is_signable(check: CheckResult) -> bool:
+    """Si un check concreto deja que una firma humana lo substitute.
+
+    Args:
+        check: Check evaluado sobre la pieza.
+
+    Returns:
+        False para una regla sin validador (nadie pudo inspeccionarla); True
+        para PASS y para un MANUAL_REVIEW que venga de un validador real.
+    """
+    if check.status is CheckStatus.PASS:
+        return True
+    if check.status is not CheckStatus.MANUAL_REVIEW:
+        return False
+    return check.evidence.get("reason") != UNVALIDATED_RULE_REASON
 
 
 def _export_piece(

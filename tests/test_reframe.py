@@ -18,7 +18,9 @@ import pytest
 from pydantic import ValidationError
 
 from kliptych import reframe
+from kliptych.contract.enums import Aspect
 from kliptych.encoding import RenderConfig
+from kliptych.gate.checks import matches_declared_aspect
 from kliptych.reframe import (
     FaceBox,
     FFmpegFrameSource,
@@ -358,6 +360,102 @@ def test_crop_size_small_landscape_is_exact_aspect() -> None:
 def test_crop_size_rejects_non_positive() -> None:
     with pytest.raises(ValueError, match="origen"):
         _ = _crop_size(0, 100)
+
+
+# El productor tiene que negarse a emitir el recorte que su propio gate va a
+# rechazar. Medido con la predicada del gate sobre la rejilla 2..400 x 2..400:
+# el lado menor MAS GRANDE entre los recortes rechazados es 20 px (20x38), y por
+# encima de 24 px no hay ni un rechazo. De ahi el minimo de 24 como
+# fail-closed del PRODUCTOR.
+_UNVIABLE_CROP = r"origen inviable para recorte 9:16: .+ \(< 24 px\)"
+
+
+def test_crop_size_refuses_tiny_sources_instead_of_emitting_them() -> None:
+    """#84: 16x16 salen 8x16 y 20x38 sale 20x36; ambos son basura publicable."""
+    with pytest.raises(ValueError, match=_UNVIABLE_CROP):
+        _ = _crop_size(16, 16)
+    with pytest.raises(ValueError, match=_UNVIABLE_CROP):
+        _ = _crop_size(20, 38)
+
+
+def test_crop_size_refusal_names_the_unviable_origin_and_its_crop() -> None:
+    with pytest.raises(ValueError, match=r"16x16 produce 8x16 \(< 24 px\)"):
+        _ = _crop_size(16, 16)
+
+
+def test_crop_size_accepts_the_smallest_viable_source() -> None:
+    """44x44 sale 24x44: el lado menor justo en el minimo, y se emite."""
+    assert _crop_size(44, 44) == (24, 44)
+
+
+def test_crop_size_refuses_22px_even_though_the_gate_would_accept_it() -> None:
+    """El minimo es un piso de TAMAÑO, no solo de aspecto.
+
+    40x40 salen 22x40, y `matches_declared_aspect` lo acepta (2,2 % de
+    desviacion, dentro del 5 %). El gate solo mide proporcion: un recorte de
+    22 px de ancho no es entregable para ningun canal, aunque su proporcion sea
+    correcta. Por eso el productor se niega tambien a la franja que el gate
+    toleraria, y este test deja la decision escrita para que no se lea como un
+    descuido al tocar la constante.
+    """
+    assert matches_declared_aspect(
+        22, 40, Aspect.VERTICAL, tolerancia=RenderConfig().aspect_tolerance
+    )
+    with pytest.raises(ValueError, match=r"40x40 produce 22x40 \(< 24 px\)"):
+        _ = _crop_size(40, 40)
+
+
+def test_crop_size_never_emits_a_crop_below_the_minimum_over_the_grid() -> None:
+    """Barrido estructural: lo que `crop_size` EMITE tiene ambos lados >= 24.
+
+    Cierra la clase de defecto por encima de los casos sueltos: no basta con que
+    16x16 y 20x38 se neguen, tiene que negarse todo origen que caiga por debajo
+    del minimo, y seguir emitiendo todo el que no.
+    """
+    emitidos: list[str] = []
+    for ancho_origen in range(2, 400, 2):
+        for alto_origen in range(2, 400, 2):
+            try:
+                ancho, alto = _crop_size(ancho_origen, alto_origen)
+            except ValueError:
+                continue
+            if min(ancho, alto) < 24:
+                emitidos.append(f"origen {ancho_origen}x{alto_origen} -> {ancho}x{alto}")
+
+    assert emitidos == [], f"crop_size emitio recortes por debajo de 24 px: {emitidos[:8]}"
+
+
+def test_crop_size_never_refuses_a_source_whose_crop_clears_the_minimum() -> None:
+    """La contraparte: el piso no puede comerse los origenes que si son viables.
+
+    Un `raise` puesto antes de tiempo deja de producir clips validos, que es un
+    fallo tan grave como emitir basura. En la diagonal de cuadrados el par sale
+    de forma analitica (`_even(n)` de alto, `_even(round(n * 9 / 16))` de ancho),
+    asi que la frontera se puede escribir sin duplicar la formula del productor.
+    Medido: 40x40 produce 22x40 y se niega; 42x42 produce 24x42 y se emite.
+    """
+    se_negaron_de_mas: list[str] = []
+    emitidos_bajo_el_minimo: list[str] = []
+
+    for lado in range(2, 200, 2):
+        esperado = round(lado * 9 / 16)
+        esperado = esperado if esperado % 2 == 0 else esperado - 1
+        try:
+            ancho, alto = _crop_size(lado, lado)
+        except ValueError:
+            # Negarse solo es legitimo si el par caia por debajo del minimo.
+            if esperado >= 24:
+                se_negaron_de_mas.append(f"{lado}x{lado} (ancho teorico {esperado} px)")
+            continue
+        if min(ancho, alto) < 24:
+            emitidos_bajo_el_minimo.append(f"{lado}x{lado} -> {ancho}x{alto}")
+
+    assert se_negaron_de_mas == [], (
+        f"crop_size se nego a origenes cuyo recorte es viable: {se_negaron_de_mas[:8]}"
+    )
+    assert emitidos_bajo_el_minimo == [], (
+        f"crop_size emitio recortes por debajo del minimo: {emitidos_bajo_el_minimo[:8]}"
+    )
 
 
 def test_primary_face_picks_largest_above_confidence() -> None:
@@ -1135,15 +1233,28 @@ def test_reframe_target_accepts_full_frame() -> None:
 
 
 def test_targets_reject_source_too_small_to_crop() -> None:
-    """Un frame de 1 px no admite un recorte de 2 px: falla en cerrado.
+    """Un frame de 1 px no se puede recortar: falla en cerrado (#84).
 
-    ``_crop_size`` acota el recorte a 2 px por el mínimo de ffmpeg, así que
-    sobre una fuente más estrecha la ventana normalizada sería mayor que 1.0.
-    Se prefiere el ``ValidationError`` explícito (que el orquestador traduce a
-    ``PipelineError``) a emitir un ``crop`` más ancho que el frame.
+    Antes este caso lo detenia el `ValidationError` de `ReframeTarget`: sin el
+    piso, ``_crop_size`` acotaba el recorte a 2 px (el minimo de ffmpeg) y la
+    ventana normalizada de un frame de 1 px salia mayor que 1.0. Con el piso de
+    24 px la negativa llega ANTES, en `crop_size`, y con un motivo que nombra el
+    origen y el recorte imposible; el `ValidationError` queda como segunda
+    linea para el caso de que la aritmetica se moviera.
+    """
+    with pytest.raises(ValueError, match=r"1x480 produce 2x2 \(< 24 px\)"):
+        _ = _targets_from_faces([()], source_width=1, source_height=480, config=ReframeConfig())
+
+
+def test_reframe_target_still_refuses_a_window_wider_than_the_source() -> None:
+    """La segunda linea sigue en pie aunque el piso la haya adelantado.
+
+    Se construye el objetivo a mano, sin pasar por `crop_size`, para no
+    depender de que la aritmetica produzca ese caso: lo que se comprueba es que
+    `ReframeTarget` no admita una ventana mayor que el frame.
     """
     with pytest.raises(ValidationError, match="less than or equal to 1"):
-        _ = _targets_from_faces([()], source_width=1, source_height=480, config=ReframeConfig())
+        _ = ReframeTarget(x=0.0, y=0.0, width=2.0, height=1.0)
 
 
 def test_reframe_target_rejects_extra_fields() -> None:
