@@ -2299,6 +2299,10 @@ def _render_all_segments(
             primary_reframe = reframe
             primary_subtitles = subtitles
         final_videos.append(final_video)
+        # Issue #94: persistir la coordenada EN CUANTO el segmento completa. Si
+        # un segmento secundario falla más adelante, el checkpoint ya sabe que
+        # este está hecho y el resume lo reutiliza en vez de borrarlo.
+        state.update_segment_coord(idx, (segment.start_s, segment.end_s))
 
     state.set_segment_coords(tuple((s.start_s, s.end_s) for s in selection.segments))
     return primary_reframe, primary_subtitles, tuple(final_videos)
