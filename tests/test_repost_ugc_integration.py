@@ -20,7 +20,7 @@ from kliptych.contract import Contract
 from kliptych.encoding import RenderConfig
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.orchestrator import PipelineConfig, PipelineResult, run_long_video
-from kliptych.reframe import FaceBox, FFmpegReframer, RgbFrame
+from kliptych.reframe import FaceBox, FFmpegReframer, ReframeTarget, RgbFrame
 from kliptych.transcribe import Transcript, Word
 
 _FFMPEG = shutil.which("ffmpeg")
@@ -121,8 +121,14 @@ class _StaticFaceDetector:
     def __init__(self, confidence: float = 0.9) -> None:
         self._confidence: float = confidence
 
-    def detect(self, frame: RgbFrame) -> tuple[FaceBox, ...]:
+    def detect(
+        self,
+        frame: RgbFrame,
+        *,
+        region: ReframeTarget | None = None,
+    ) -> tuple[FaceBox, ...]:
         _ = frame
+        _ = region
         return (FaceBox(x=0.3, y=0.3, width=0.4, height=0.4, confidence=self._confidence),)
 
 

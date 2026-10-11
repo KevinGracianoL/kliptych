@@ -47,6 +47,9 @@ _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_MIN_SUPPRESSION = 0.3
 _STDERR_TAIL = 400
 _DIMENSION_PARTS = 2
+# Mínimo absoluto de un recorte en píxeles: yuv420p exige dimensiones pares y
+# un recorte de 0 o 1 píxeles no es un recorte, es un error de escala.
+_EVEN_MIN_PX = 2
 
 
 class ReframeError(Exception):
@@ -146,10 +149,34 @@ class RgbFrame:
 
 @dataclass(frozen=True, slots=True)
 class SampledFrame:
-    """Frame muestreado con su marca de tiempo dentro del video."""
+    """Frame muestreado con su marca de tiempo y la región de origen que ocupa.
+
+    ``frame`` es el fragmento RGB que se entrega al detector. Con ``region`` a
+    ``None`` ese fragmento ES el frame fuente completo. Con ``region``
+    declarada, ``frame`` contiene SOLO ese rectángulo normalizado del fuente, y
+    ``source_width``/``source_height`` conservan las dimensiones reales del
+    video, que son las que necesita la trayectoria de recorte.
+
+    La región viaja CON el frame a propósito: el espacio de coordenadas de una
+    caja detectada es una propiedad del dato, no una suposición de quien la
+    normaliza.
+    """
 
     timestamp_s: float
     frame: RgbFrame
+    region: ReframeTarget | None = None
+    source_width: int = 0
+    source_height: int = 0
+
+    @property
+    def full_width(self) -> int:
+        """Ancho real del video fuente, incluso cuando el frame está recortado."""
+        return self.source_width if self.source_width > 0 else self.frame.width
+
+    @property
+    def full_height(self) -> int:
+        """Alto real del video fuente, incluso cuando el frame está recortado."""
+        return self.source_height if self.source_height > 0 else self.frame.height
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +187,7 @@ class ReframeConfig:
     smoothing: float = _DEFAULT_SMOOTHING
     max_step_ratio: float = _DEFAULT_MAX_STEP_RATIO
     min_confidence: float = _DEFAULT_MIN_CONFIDENCE
+    bounded_region: ReframeTarget | None = None
 
     def __post_init__(self) -> None:
         """Valida los parámetros del reframe.
@@ -184,11 +212,20 @@ class ReframeConfig:
 class FaceDetector(Protocol):
     """Detector de caras que consume el reframe."""
 
-    def detect(self, frame: RgbFrame) -> tuple[FaceBox, ...]:
+    def detect(
+        self,
+        frame: RgbFrame,
+        *,
+        region: ReframeTarget | None = None,
+    ) -> tuple[FaceBox, ...]:
         """Detecta caras en un frame RGB.
 
         Args:
-            frame: Frame RGB24 crudo.
+            frame: Frame RGB24 crudo entregado al detector.
+            region: Región normalizada del fuente que ocupa ``frame``, o
+                ``None`` si ``frame`` es el frame fuente completo. Quien
+                normalice las cajas DEBE usarla para devolver coordenadas de
+                fuente; sin ella las cajas quedan en el espacio del frame.
 
         Returns:
             Las cajas de las caras detectadas, normalizadas al frame.
@@ -199,12 +236,20 @@ class FaceDetector(Protocol):
 class FrameSource(Protocol):
     """Fuente de frames muestreados de un video."""
 
-    def frames(self, video: Path, *, sample_fps: float) -> Iterator[SampledFrame]:
+    def frames(
+        self,
+        video: Path,
+        *,
+        sample_fps: float,
+        region: ReframeTarget | None = None,
+    ) -> Iterator[SampledFrame]:
         """Extrae frames del video a la tasa pedida.
 
         Args:
             video: Ruta del video fuente.
             sample_fps: Frames por segundo a muestrear.
+            region: Región normalizada del fuente a la que restringir los
+                frames; por defecto ``None``, que entrega el frame completo.
 
         Yields:
             Los frames muestreados, en orden temporal.
@@ -306,24 +351,32 @@ class MediaPipeFaceDetector:
         self._api: _MediaPipeApi | None = None
         self._detector: _RawFaceDetector | None = None
 
-    def detect(self, frame: RgbFrame) -> tuple[FaceBox, ...]:
+    def detect(
+        self,
+        frame: RgbFrame,
+        *,
+        region: ReframeTarget | None = None,
+    ) -> tuple[FaceBox, ...]:
         """Detecta caras en un frame RGB.
 
         El detector se construye una sola vez y se reutiliza entre frames; el
         modelo no se recarga en el camino caliente.
 
         Args:
-            frame: Frame RGB24 crudo.
+            frame: Frame RGB24 crudo entregado al detector.
+            region: Región normalizada del fuente que ocupa ``frame``, o
+                ``None`` si el frame es el fuente completo. Las cajas se
+                devuelven en coordenadas de FUENTE, no del frame.
 
         Returns:
-            Las cajas de las caras detectadas, normalizadas al frame.
+            Las cajas de las caras detectadas, en coordenadas del fuente.
 
         Raises:
             ReframeError: Si el modelo no existe o MediaPipe no está disponible.
         """
         detector = self._ensure_detector()
         image = self._ensure_api().make_image(frame)
-        return _boxes_from_result(detector.detect(image), frame)
+        return _boxes_from_result(detector.detect(image), frame, region=region)
 
     def close(self) -> None:
         """Libera el detector de MediaPipe si fue creado."""
@@ -384,12 +437,20 @@ class FFmpegFrameSource:
         self._ffprobe: str = ffprobe
         self._timeout_s: float = timeout_s
 
-    def frames(self, video: Path, *, sample_fps: float) -> Iterator[SampledFrame]:
+    def frames(
+        self,
+        video: Path,
+        *,
+        sample_fps: float,
+        region: ReframeTarget | None = None,
+    ) -> Iterator[SampledFrame]:
         """Extrae frames del video a la tasa pedida, sin cargarlos todos en memoria.
 
         Args:
             video: Ruta del video fuente.
             sample_fps: Frames por segundo a muestrear.
+            region: Región normalizada del fuente a la que restringir los
+                frames; por defecto ``None``, que entrega el frame completo.
 
         Yields:
             Los frames muestreados, en orden temporal.
@@ -405,23 +466,14 @@ class FFmpegFrameSource:
             msg = f"el video no existe: {video}"
             raise ReframeError(msg)
         width, height = _probe_dimensions(video, ffprobe=self._ffprobe, timeout_s=self._timeout_s)
-        frame_size = width * height * 3
-        argv = [
-            self._ffmpeg,
-            "-hide_banner",
-            "-nostdin",
-            "-v",
-            "error",
-            "-i",
-            str(video),
-            "-vf",
-            f"fps={_num(sample_fps)}",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-",
-        ]
+        sampling = _sampling_geometry(region, source_width=width, source_height=height)
+        frame_size = sampling.emitted_width * sampling.emitted_height * 3
+        argv = self._sampling_argv(
+            video,
+            sample_fps=sample_fps,
+            crop=sampling.crop,
+            cropped=sampling.cropped,
+        )
         process = _open_process(argv, ffmpeg=self._ffmpeg)
         stdout = cast("BinaryIO", process.stdout)
         deadline = time.monotonic() + self._timeout_s
@@ -437,7 +489,14 @@ class FFmpegFrameSource:
                     break
                 yield SampledFrame(
                     timestamp_s=index / sample_fps,
-                    frame=RgbFrame(width=width, height=height, data=chunk),
+                    frame=RgbFrame(
+                        width=sampling.emitted_width,
+                        height=sampling.emitted_height,
+                        data=chunk,
+                    ),
+                    region=region,
+                    source_width=width,
+                    source_height=height,
                 )
                 index += 1
             _ = process.wait(timeout=self._timeout_s)
@@ -446,6 +505,146 @@ class FFmpegFrameSource:
         if process.returncode != 0:
             msg = f"ffmpeg falló al extraer frames con código {process.returncode}"
             raise ReframeError(msg)
+
+    def _sampling_argv(
+        self,
+        video: Path,
+        *,
+        sample_fps: float,
+        crop: tuple[int, int, int, int],
+        cropped: bool,
+    ) -> list[str]:
+        """Arma el argv de ffmpeg que extrae frames, recortados o completos.
+
+        Args:
+            video: Ruta del video fuente.
+            sample_fps: Frames por segundo a muestrear.
+            crop: Tupla ``(ancho, alto, x, y)`` del recorte en píxeles pares.
+            cropped: Si se declaró una región; en ``False`` no se emite ningún
+                ``crop`` y el argv es exactamente el de siempre.
+
+        Returns:
+            El argv completo de extracción de frames RGB24.
+        """
+        video_filter = f"fps={_num(sample_fps)}"
+        if cropped:
+            crop_w, crop_h, crop_x, crop_y = crop
+            video_filter += f",crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+        return [
+            self._ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            str(video),
+            "-vf",
+            video_filter,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class _SamplingGeometry:
+    """Geometría del muestreo: recorte a pedir y tamaño de frame a esperar."""
+
+    crop: tuple[int, int, int, int]
+    emitted_width: int
+    emitted_height: int
+    cropped: bool
+
+
+def _sampling_geometry(
+    region: ReframeTarget | None,
+    *,
+    source_width: int,
+    source_height: int,
+) -> _SamplingGeometry:
+    """Deriva el recorte y el tamaño de frame que corresponde a una región.
+
+    Args:
+        region: Región normalizada del fuente, o ``None`` para el frame
+            completo.
+        source_width: Ancho real del video fuente.
+        source_height: Alto real del video fuente.
+
+    Returns:
+        La geometría de muestreo con el recorte en píxeles pares.
+    """
+    crop = _region_crop_box(region, source_width=source_width, source_height=source_height)
+    if region is None:
+        return _SamplingGeometry(
+            crop=crop,
+            emitted_width=source_width,
+            emitted_height=source_height,
+            cropped=False,
+        )
+    return _SamplingGeometry(
+        crop=crop,
+        emitted_width=crop[0],
+        emitted_height=crop[1],
+        cropped=True,
+    )
+
+
+def _region_crop_box(
+    region: ReframeTarget | None,
+    *,
+    source_width: int,
+    source_height: int,
+) -> tuple[int, int, int, int]:
+    """Recorte en píxeles pares que le corresponde a una región sobre el fuente.
+
+    Con ``region`` a ``None`` devuelve el frame completo: es el caso por defecto
+    y no debe alterar ni un píxel del comportamiento de siempre.
+
+    Args:
+        region: Región normalizada a recortar, o ``None``.
+        source_width: Ancho real del video fuente.
+        source_height: Alto real del video fuente.
+
+    Returns:
+        La tupla ``(ancho, alto, x, y)`` del recorte, en píxeles pares y dentro
+        del frame.
+    """
+    if region is None:
+        return source_width, source_height, 0, 0
+    width = max(_EVEN_MIN_PX, _even(round(region.width * source_width)))
+    height = max(_EVEN_MIN_PX, _even(round(region.height * source_height)))
+    width = min(width, _even(source_width))
+    height = min(height, _even(source_height))
+    x = min(_even(round(region.x * source_width)), _even(source_width - width))
+    y = min(_even(round(region.y * source_height)), _even(source_height - height))
+    return width, height, max(0, x), max(0, y)
+
+
+def _frame_honours_region(declared: ReframeTarget, sample: SampledFrame) -> bool:
+    """Dice si lo que ve el detector es exactamente la región declarada.
+
+    Una fuente que entrega el frame completo con ``region=None`` solo satisface
+    una región que cubre el fuente entero; en cualquier otro caso estaría dando
+    al detector píxeles de fuera de la región, que es una regla declarada
+    ignorándose en silencio.
+
+    Args:
+        declared: Región declarada en la configuración del reframe.
+        sample: Frame muestreado que se va a entregar al detector.
+
+    Returns:
+        ``True`` si el frame no contiene más que la región declarada.
+    """
+    if sample.region is not None:
+        return sample.region == declared
+    box = _region_crop_box(
+        declared,
+        source_width=sample.full_width,
+        source_height=sample.full_height,
+    )
+    return box == (sample.full_width, sample.full_height, 0, 0)
 
 
 class FFmpegReframer:
@@ -495,14 +694,26 @@ class FFmpegReframer:
         if not video.is_file():
             msg = f"el video no existe: {video}"
             raise ReframeError(msg)
+        declared_region = self._config.bounded_region
         faces_per_frame: list[tuple[FaceBox, ...]] = []
         source_width = 0
         source_height = 0
-        for sample in self._frame_source.frames(video, sample_fps=self._config.sample_fps):
+        for sample in self._frame_source.frames(
+            video,
+            sample_fps=self._config.sample_fps,
+            region=declared_region,
+        ):
             if source_width == 0:
-                source_width = sample.frame.width
-                source_height = sample.frame.height
-            faces_per_frame.append(self._detector.detect(sample.frame))
+                source_width = sample.full_width
+                source_height = sample.full_height
+            if declared_region is not None and not _frame_honours_region(declared_region, sample):
+                msg = (
+                    "la región acotada declarada no se aplicó a los frames "
+                    f"muestreados de {video}: el detector vería píxeles de fuera"
+                )
+                raise ReframeError(msg)
+            sample_region = sample.region
+            faces_per_frame.append(self._detector.detect(sample.frame, region=sample_region))
         if source_width == 0:
             msg = f"no se pudieron extraer frames del video: {video}"
             raise ReframeError(msg)
@@ -943,7 +1154,31 @@ def _crop_filter(
     return f"crop={width}:{height}:x='{expression_x}':y='{expression_y}'"
 
 
-def _boxes_from_result(result: _MpResult, frame: RgbFrame) -> tuple[FaceBox, ...]:
+def _boxes_from_result(
+    result: _MpResult,
+    frame: RgbFrame,
+    *,
+    region: ReframeTarget | None = None,
+) -> tuple[FaceBox, ...]:
+    """Normaliza las cajas de MediaPipe a coordenadas del frame O del fuente.
+
+    El espacio de salida se declara con ``region`` y no se deduce: con
+    ``region`` a ``None`` las cajas salen normalizadas respecto a ``frame``,
+    que es el fuente completo. Con ``region`` declarada, ``frame`` es SOLO ese
+    rectángulo del fuente, así que cada caja se remapea sumando el offset de la
+    región y escalando por su tamaño. Omitir ese remapeo devolvería coordenadas
+    del recorte haciéndose pasar por coordenadas del fuente, y el ``crop``
+    resultante apuntaría al sitio equivocado sin que nada falle.
+
+    Args:
+        result: Resultado crudo de la detección de MediaPipe.
+        frame: Frame que se entregó al detector.
+        region: Región normalizada del fuente que ocupa ``frame``, o ``None``
+            si ``frame`` es el fuente completo.
+
+    Returns:
+        Las cajas normalizadas, en el espacio de coordenadas declarado.
+    """
     boxes: list[FaceBox] = []
     for detection in result.detections:
         box = detection.bounding_box
@@ -954,12 +1189,20 @@ def _boxes_from_result(result: _MpResult, frame: RgbFrame) -> tuple[FaceBox, ...
         height = _clamp(box.height / frame.height, 0.0, 1.0 - y)
         if width <= 0.0 or height <= 0.0:
             continue
+        if region is None:
+            source_x, source_y = x, y
+            source_width, source_height = width, height
+        else:
+            source_x = region.x + x * region.width
+            source_y = region.y + y * region.height
+            source_width = width * region.width
+            source_height = height * region.height
         boxes.append(
             FaceBox(
-                x=x,
-                y=y,
-                width=width,
-                height=height,
+                x=source_x,
+                y=source_y,
+                width=source_width,
+                height=source_height,
                 confidence=_clamp(confidence, 0.0, 1.0),
             )
         )
