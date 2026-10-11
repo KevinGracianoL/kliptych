@@ -103,6 +103,16 @@ attributed signature that is sealed into the delivery record next to
 
 ## Current Limits
 
+- faster-whisper needs the CUDA runtime libraries (`cublas` and `cudnn` from the
+  `nvidia-*` packages, e.g. `cublas64_12.dll` on Windows). They are registered
+  automatically before loading, and it is best-effort: if they are missing, or
+  if CUDA fails to initialize, transcription falls back **loudly** to CPU
+  inference with a `CUDA no disponible (...); usando CPU` warning instead of
+  failing quietly. With `--device cuda` there is no fallback: it raises
+  `TranscriptionError`. CPU inference is markedly slower than the CUDA numbers
+  in [docs/benchmarks.md](docs/benchmarks.md), and no reproducible CPU
+  real-time factor has been measured yet, so treat any RT figure quoted for the
+  CPU path as unverified. **VRAM metrics are meaningless during CPU execution.**
 - 4 GB VRAM constraint requires a strictly sequential pipeline: one GPU
   stage at a time, no parallel model execution.
 - Under heavy load, manual CUDA garbage collection/purging between models

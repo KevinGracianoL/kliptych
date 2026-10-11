@@ -140,12 +140,15 @@ con una suposición. Queda null/UNKNOWN y produce MANUAL_REVIEW o
 NEW_ARCHETYPE. Un contrato contaminado con alucinaciones haría que el gate
 valide una campaña inventada por el modelo.
 
-4.3 Esquema Contract (v1.1):
+4.3 Esquema Contract (v1.2):
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "campaign_id": str,
   "format": "video" | "slideshow",
   "mode": "given_clips" | "long_video" | "audio_locked" | "repost_ugc" | "slideshow",
+  "outputs": [
+    {"aspect": "9:16" | "16:9" | "1:1" | "4:5", "index": int}
+  ],
   "platforms": {
     "tiktok": {
       "duration": {"min_s": int|null, "max_s": int|null},
@@ -191,6 +194,26 @@ valide una campaña inventada por el modelo.
 }
 
 Notas de diseño:
+- `outputs` declara qué formatos hay que EMITIR, no cuál se usa: es una lista
+  ordenada y no vacía, y por eso una campaña puede pedir la misma pieza en 9:16 y
+  4:5. `aspect` es un conjunto CERRADO (9:16, 16:9, 1:1, 4:5); cualquier otra
+  relación es un error de construcción y no un render silenciosamente
+  equivocado. `index` es una etiqueta ordenada dentro del conjunto, no un
+  identificador único, y el par (plataforma, formato) es un producto cartesiano.
+- Compatibilidad en las DOS direcciones, y es SINTÁCTICA, no semántica:
+  `schema_version` es `Literal["1.1", "1.2"]` con default `"1.2"`. Esta versión
+  EMITE documentos 1.2, y LEE documentos 1.1 sin cambiar su significado: al
+  faltar `outputs`, el default (una única entrada vertical 9:16) es exactamente
+  lo que un 1.1 significaba siempre. Endurecer el Literal a un solo valor
+  parecería más estricto y rompería los documentos 1.1 que ya existen; como el
+  contrato prohíbe campos extra, un binario que solo aceptara 1.2 rechazaría un
+  1.1 con "schema_version no soportado" en vez de ignorarle `outputs` y fallar
+  más tarde con un error que no dice nada.
+- El gate NO tiene exención por versión: `artifact.aspect` valida el artefacto
+  renderizado CONTRA las salidas declaradas, y un 1.1 también se mide, porque su
+  conjunto efectivo es una entrada vertical. La comprobación es de
+  PERTENENCIA, no de igualdad: basta con satisfacer AL MENOS una salida
+  declarada, y un aspecto que no se puede medir da `UNSUPPORTED`, nunca `PASS`.
 - `segments` es obligatorio (al menos un segmento) cuando `mode="long_video"` y
   está prohibido en cualquier otro modo: cada segmento exige `start_s >= 0` y
   `end_s > start_s`, ambos finitos.

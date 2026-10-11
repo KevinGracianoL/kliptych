@@ -1,5 +1,12 @@
 # Benchmarks — GTX 1650 Ti, 4,096 MiB VRAM
 
+> ⚠️ **Historical Measurements.** The figures in Table A and Table B below are
+> historical baseline transcriptions from initial development. Until the
+> automated benchmark generator (`kliptych bench`) lands, these tables do not
+> carry a reproducible CLI command and must be treated as **unverified
+> historical baseline transcriptions** per Brief §15. The host line below was
+> captured with `uv run kliptych env`; the table figures were not.
+
 Measured host (`uv run kliptych env`): `NVIDIA GeForce GTX 1650 Ti`,
 `vram_mib: 4096`, `nvenc_available: true`. Transcription in `int8` CUDA;
 reframe via MediaPipe CPU delegate; render via `h264_nvenc`.
