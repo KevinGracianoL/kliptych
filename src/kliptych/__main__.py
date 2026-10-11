@@ -720,11 +720,13 @@ _ZERO_CONTRACT_IGNORED_FLAGS = (
     ("audio_track_path", "--audio-track-path"),
     ("audio_track_url", "--audio-track-url"),
 )
-# Modos que el modo zero-contract no puede ejecutar: el gestor fuerza repost
-# porque es el único camino sin selección LLM. `long_video` es el defecto del
-# parser y `repost`/`repost_ugc` coinciden con el modo efectivo, así que solo
-# avisamos cuando el operador pidió algo que no va a ocurrir.
-_ZERO_CONTRACT_REJECTED_MODES = frozenset({"slideshow", "audio_locked"})
+# Modos que el modo zero-contract HONRA de verdad: el gestor fuerza repost
+# porque es el único camino sin selección LLM. La lista es de los que se
+# aceptan, no de los que se rechazan (#55): con una denylist, cualquier modo
+# nuevo que se añadiera a `--mode` colaría en silencio y se ejecutaría como
+# repost debajo, que es exactamente el fallo que se quiere evitar. Fail-closed
+# significa que lo no listado se avisa.
+_ZERO_CONTRACT_HONORED_MODES = frozenset({"long_video", "repost", "repost_ugc"})
 
 
 def _ignored_zero_contract_flags(args: argparse.Namespace) -> list[str]:
@@ -740,7 +742,7 @@ def _ignored_zero_contract_flags(args: argparse.Namespace) -> list[str]:
         args: Argumentos parseados del subcomando ``campaign``.
 
     Returns:
-        Los nombres de los flags presentes y de los modos rechazados.
+        Los nombres de los flags presentes y de los modos no honrados.
     """
     ignored: list[str] = []
     for attribute, flag in _ZERO_CONTRACT_IGNORED_FLAGS:
@@ -748,7 +750,7 @@ def _ignored_zero_contract_flags(args: argparse.Namespace) -> list[str]:
         if value not in {None, ""}:
             ignored.append(flag)
     mode = cast("str", getattr(args, "mode", ""))
-    if mode in _ZERO_CONTRACT_REJECTED_MODES:
+    if mode and mode not in _ZERO_CONTRACT_HONORED_MODES:
         ignored.append(f"--mode {mode}")
     return ignored
 

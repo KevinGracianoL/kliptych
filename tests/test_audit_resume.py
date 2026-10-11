@@ -439,8 +439,12 @@ def test_long_video_without_model_fails_closed_outside_repost(
     ``model=None``. El guard existe porque ``model`` es opcional en la firma
     (el modo zero-contract lo ejecuta sin backend), así que el fallo tiene que
     ser un ``PipelineError`` con nombre, no un ``AttributeError`` más abajo.
+
+    Y falla ANTES de bajar nada (#53). El guard estaba dentro de
+    ``_resolve_intelligence_stages``, o sea después de ``_resolve_source_stage``:
+    sin modelo se descargaba el VOD entero para morir un paso después.
     """
-    config, deps, _ = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"source-bytes"))
+    config, deps, counter = _setup_resume(monkeypatch, tmp_path, _PayloadBox(b"source-bytes"))
     assert config.repost_mode is False
     with pytest.raises(PipelineError, match="modelo de runtime"):
         _ = run_long_video(
@@ -453,6 +457,8 @@ def test_long_video_without_model_fails_closed_outside_repost(
             reframer=deps.reframer,
             subtitle_renderer=deps.subtitle_renderer,
         )
+
+    assert counter.download_calls == 0, "el guard falló después de descargar el VOD completo"
 
 
 def test_repost_without_model_does_not_raise(
