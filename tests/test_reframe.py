@@ -227,9 +227,16 @@ class _FakeDetector:
     def __init__(self, boxes: Sequence[tuple[FaceBox, ...]]) -> None:
         self._boxes: list[tuple[FaceBox, ...]] = list(boxes)
         self.calls: int = 0
+        self.regions_seen: list[ReframeTarget | None] = []
 
-    def detect(self, frame: RgbFrame) -> tuple[FaceBox, ...]:
+    def detect(
+        self,
+        frame: RgbFrame,
+        *,
+        region: ReframeTarget | None = None,
+    ) -> tuple[FaceBox, ...]:
         _ = frame
+        self.regions_seen.append(region)
         result = self._boxes[self.calls] if self.calls < len(self._boxes) else ()
         self.calls += 1
         return result
@@ -239,10 +246,18 @@ class _FakeFrameSource:
     def __init__(self, samples: Sequence[SampledFrame]) -> None:
         self._samples: list[SampledFrame] = list(samples)
         self.sample_fps: float | None = None
+        self.regions_seen: list[ReframeTarget | None] = []
 
-    def frames(self, video: Path, *, sample_fps: float) -> Iterator[SampledFrame]:
+    def frames(
+        self,
+        video: Path,
+        *,
+        sample_fps: float,
+        region: ReframeTarget | None = None,
+    ) -> Iterator[SampledFrame]:
         _ = video
         self.sample_fps = sample_fps
+        self.regions_seen.append(region)
         yield from self._samples
 
 
@@ -1057,17 +1072,24 @@ def test_reframer_builds_default_frame_source() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("build", "message"),
     [
-        ({"sample_fps": 0.0}, "fps"),
-        ({"smoothing": 0.0}, "suavizado"),
-        ({"max_step_ratio": 1.5}, "paso"),
-        ({"min_confidence": 1.5}, "confianza"),
+        (lambda: ReframeConfig(sample_fps=0.0), "fps"),
+        (lambda: ReframeConfig(smoothing=0.0), "suavizado"),
+        (lambda: ReframeConfig(max_step_ratio=1.5), "paso"),
+        (lambda: ReframeConfig(min_confidence=1.5), "confianza"),
     ],
 )
-def test_reframe_config_rejects_invalid(kwargs: dict[str, float], message: str) -> None:
+def test_reframe_config_rejects_invalid(build: Callable[[], ReframeConfig], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        _ = ReframeConfig(**kwargs)
+        _ = build()
+
+
+def test_reframe_config_accepts_bounded_region() -> None:
+    """La región acotada es un parámetro más del reframe, sin revalidación propia."""
+    region = ReframeTarget(x=0.25, y=0.25, width=0.5, height=0.5)
+    assert ReframeConfig(bounded_region=region).bounded_region == region
+    assert ReframeConfig().bounded_region is None
 
 
 def test_reframe_target_rejects_negative_x() -> None:
