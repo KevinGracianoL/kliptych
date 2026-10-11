@@ -892,14 +892,19 @@ def test_video_orchestrator_without_model_lets_repost_through(
     assert seen["model"] is None
 
 
-@pytest.mark.parametrize("mode", ["slideshow", "audio_locked"])
+@pytest.mark.parametrize(
+    "mode",
+    ["slideshow", "audio_locked", "podcast", "unknown_mode", "cualquier_cosa"],
+)
 def test_zero_contract_warns_about_modes_it_cannot_run(
     mode: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """``slideshow`` y ``audio_locked`` se avisan: el modo efectivo es repost.
+    """Cualquier modo fuera del conjunto honrado se avisa (#55).
 
-    Sin aviso, el operador recibía exit 0 con una entrega de repost cuando
-    pidió un slideshow o una pista de audio externa.
+    La guarda era una denylist con dos modos escritos a mano, así que un modo
+    nuevo añadido a ``--mode`` colaba en silencio y se ejecutaba como repost
+    debajo. ``podcast`` y ``unknown_mode`` ni siquiera existen hoy: si algún día
+    se añaden al parser, este test ya los cubre.
     """
     _ = caplog
     namespace = argparse.Namespace(

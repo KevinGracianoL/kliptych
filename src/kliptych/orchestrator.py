@@ -2318,6 +2318,15 @@ def _run_stages(
     state: PipelineStateManager,
     resume: bool = False,
 ) -> PipelineResult:
+    # Guard ANTES de descargar (#53). El check vivía dentro de
+    # `_resolve_intelligence_stages`, o sea un paso DESPUÉS de haber bajado el
+    # VOD completo: sin modelo, la corrida se pasaba gigabytes para morir
+    # inmediatamente después. `model` es opcional en la firma porque el modo
+    # zero-contract ejecuta con `None` y fuerza repost, así que el fallo tiene
+    # que ser explícito aquí, no un `AttributeError` más abajo.
+    if not config.repost_mode and model is None:
+        msg = "la selección de segmentos fuera del modo repost exige un modelo de runtime"
+        raise PipelineError(msg)
     source = _resolve_source_stage(
         url,
         config=config,
