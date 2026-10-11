@@ -49,7 +49,12 @@ from tests.support import FakeProbe, make_media, make_piece
 if TYPE_CHECKING:
     from kliptych.orchestrator import PipelineResult, SlideshowResult
 
-_AV_HARD_RULES = ("artifact.aspect", "artifact.integrity", "artifact.video_stream")
+_AV_HARD_RULES = (
+    "artifact.aspect",
+    "artifact.integrity",
+    "artifact.video_stream",
+    "duration.min",
+)
 _LLM_ENV_VARS = ("KLIPTYCH_LLM_BASE_URL", "KLIPTYCH_LLM_API_KEY", "KLIPTYCH_LLM_MODEL")
 
 
@@ -259,21 +264,38 @@ def test_vanilla_contract_requires_no_watermark() -> None:
     assert contract.watermark.visible_full_video is False
 
 
-def test_vanilla_contract_has_no_duration_or_caption_bounds() -> None:
+def test_vanilla_contract_bounds_duration_but_leaves_caption_open() -> None:
+    """#67: la duracion tiene PISO, y las menciones y hashtags siguen abiertas.
+
+    Este test afirmaba lo contrario hasta que #67 llego: `min_s` y `max_s` a
+    `None`. Era la asercion del defecto, no una decision de diseno: sin banda el
+    gate no tenia nada que verificar sobre la duracion.
+
+    La distincion que queda es la que importa: hay un minimo tecnico publicable
+    (3 s) y no hay tope, porque el tope es una preferencia de campana y aqui no
+    hay campana que la haya expresado. Las menciones y los hashtags dependen del
+    brief, que tampoco existe; no se inventan.
+    """
     contract = vanilla_contract(campaign_id="abc123def456")
     rules = contract.platforms[Platform.TIKTOK]
-    assert rules.duration.min_s is None
+    assert rules.duration.min_s == 3
     assert rules.duration.max_s is None
     assert rules.required_hashtags == []
     assert rules.required_mentions == []
     assert rules.audio_rule.value == "any"
 
 
-def test_vanilla_contract_activates_no_restriction_rules() -> None:
-    """Las reglas A/V no son restricciones de campaña: no exigen clasificación.
+def test_vanilla_contract_activates_only_the_minimum_duration_rule() -> None:
+    """Las reglas A/V no son restricciones; el piso de duracion si.
 
-    Si activaran alguna, el validador ``_declared_restrictions_are_classified``
-    exigiría declararla y la construcción del contrato fallaría.
+    Antes activaba cero. Ahora activa exactamente `duration.min`, y esta
+    clasificada en `rules.hard`: el validador
+    `_declared_restrictions_are_classified` exige que cada restriccion declarada
+    tenga regla, asi que declarar un piso sin clasificarlo haria que el contrato
+    no validase.
+
+    `duration.max` NO aparece, y esa ausencia es el contrato: no hay tope en
+    zero-contract. Si alguien lo anade, este test lo dice.
     """
     contract = vanilla_contract(campaign_id="abc123def456")
     restrictions = GlobalRestrictions(
@@ -281,8 +303,12 @@ def test_vanilla_contract_activates_no_restriction_rules() -> None:
         audio_policy=contract.audio_policy,
         hook_keyword=contract.hook_keyword,
     )
-    for rules in contract.platforms.values():
-        assert active_restriction_rules(rules, restrictions) == []
+    for platform, rules in contract.platforms.items():
+        activas = active_restriction_rules(rules, restrictions)
+        assert set(activas) == {"duration.min"}, platform
+        declaradas = set(contract.rules.hard) | set(contract.rules.recommended)
+        declaradas |= set(contract.rules.manual_review)
+        assert set(activas) <= declaradas
 
 
 def test_vanilla_contract_av_rules_all_have_a_registered_validator() -> None:
@@ -316,12 +342,14 @@ def _gate() -> Gate:
 
 
 def test_gate_passes_vanilla_contract_on_artifact_rules(tmp_path: Path) -> None:
-    """El gate aprueba exactamente las dos reglas de artefacto, sin audio.
+    """El gate aprueba las reglas de artefacto y la duracion, sin audio.
 
     ``artifact.integrity`` y ``artifact.video_stream`` cubren la integridad
     estándar del A/V: el artefacto existe, es legible y tiene video. No se
     comprueba la presencia de audio porque no hay regla que la exija: con
     ``audio_rule=ANY`` el resolver no añade ``audio.present``.
+    ``duration.min`` cubre el otro extremo: que el clip tenga duracion
+    publicable (#67).
     """
     artifact = tmp_path / "final.mp4"
     _ = artifact.write_bytes(b"media-bytes")
@@ -330,6 +358,88 @@ def test_gate_passes_vanilla_contract_on_artifact_rules(tmp_path: Path) -> None:
     assert result.status is GateStatus.PASSED, result.checks
     assert {check.id for check in result.checks} == set(_AV_HARD_RULES)
     assert result.artifact_sha256 is not None
+
+
+def test_gate_rejects_a_zero_contract_clip_shorter_than_three_seconds(tmp_path: Path) -> None:
+    """#67: en modo zero-contract, un clip por debajo de 3 s NO puede pasar.
+
+    Sin `duration.min` declarado, `vanilla_contract` no tenia piso que
+    verificar: el segmenter comprobaba sus limites, pero el GATE no miraba la
+    duracion. Un artefacto de 0,5 s manufactured a mano pasaba el gate entero,
+    porque las tres reglas de artefacto que se comprobaban seguian cumpliendose.
+
+    El fallo no es teorico: un corte mal calculado, un ffmpeg que se corta a
+    medias, o un fragmento concatenation mal delimitado producen justo eso.
+    """
+    artifact = tmp_path / "corto.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(duration_s=0.5)))
+
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.REJECTED, result.checks
+    assert _check_status(result, "duration.min") == "fail"
+
+
+def test_gate_accepts_a_zero_contract_clip_at_the_three_second_floor(tmp_path: Path) -> None:
+    """Contrapunto de #67: exactamente en el piso se acepta.
+
+    El limite es 3,0 s y el borde es inclusivo, asi que 3,0 s tiene que pasar y
+    2,99 s no. El caso de 2,99 s lo comprueba el test de al lado.
+    """
+    artifact = tmp_path / "justo.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(duration_s=3.0)))
+
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.PASSED, result.checks
+    assert _check_status(result, "duration.min") == "pass"
+
+
+def test_gate_rejects_a_zero_contract_clip_one_hundredth_below_the_floor(
+    tmp_path: Path,
+) -> None:
+    """El borde, por dentro: 2,99 s es exactamente igual de inviable que 0,5 s.
+
+    Sin este, un piso implementado como `< 3` en vez de `<= 3` pasaria verde: el
+    unico test de no-regresion estaria en el otro lado del borde y no lo miraria.
+    """
+    artifact = tmp_path / "al_borde.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    gate = Gate(probe=FakeProbe(info=make_media(duration_s=2.99)))
+
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.REJECTED, result.checks
+    assert _check_status(result, "duration.min") == "fail"
+
+
+def test_zero_contract_does_not_cap_the_duration(tmp_path: Path) -> None:
+    """El cero-contract NO impone tope: un clip largo no puede ser rechazado por eso.
+
+    Es el otro lado de #67. Fijar un ``max_s`` sin brief rechazaria en el gate
+    cualquier video largo que entre por ``_full_video_selection`` (el camino
+    cuando no hay habla detectable), sin que el operador pueda corregirlo. El
+    troceado del habla ya lo acota ``segmenter.MAX_CLIP_S``; el gate solo tiene
+    que quedarse fuera de ese negocio.
+    """
+    artifact = tmp_path / "largo.mp4"
+    _ = artifact.write_bytes(b"media-bytes")
+    contract = vanilla_contract(campaign_id="abc123def456")
+    rules = contract.platforms[Platform.TIKTOK]
+
+    assert rules.duration.max_s is None
+    assert "duration.max" not in contract.rules.hard
+
+    gate = Gate(probe=FakeProbe(info=make_media(duration_s=90.0)))
+    result = gate.evaluate_piece(make_piece(artifact), contract=contract)
+
+    assert result.status is GateStatus.PASSED, result.checks
+    assert _check_status(result, "duration.min") == "pass"
 
 
 def test_gate_rejects_vanilla_contract_when_artifact_is_missing(tmp_path: Path) -> None:

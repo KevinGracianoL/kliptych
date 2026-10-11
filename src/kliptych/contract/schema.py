@@ -976,6 +976,7 @@ _ZERO_CONTRACT_AV_RULES = (
     "artifact.aspect",
     "artifact.integrity",
     "artifact.video_stream",
+    "duration.min",
 )
 _ZERO_CONTRACT_LANGUAGE = "es"
 
@@ -999,6 +1000,23 @@ def vanilla_contract(
     el artefacto ausente, porque ``_derive_status`` devuelve ``PASSED`` sobre
     cero checks.
 
+    Y ``duration.min`` (#67), con un piso de 3 s y SIN tope. El segmenter ya
+    comprobaba sus límites, pero el GATE no miraba la duración, así que un
+    artefacto de 0,5 s manufactured a mano pasaba el gate entero. El piso de 3 s
+    no es un requisito de campaña: es la duración mínima por debajo de la cual
+    ningún canal publica, con brief o sin él.
+
+    El tope NO se declara, y es deliberado. Un cero-contract no tiene brief, así
+    que nada en él se puede corregir: si aquí se fijara un ``max_s``, un vídeo
+    largo caería en `_full_video_selection` (el camino que se usa cuando no hay
+    habla detectable) y el gate lo rechazaría sin que el operador pueda hacer
+    nada. Y no aporta: el segmenter ya acota sus tramos a ``MAX_CLIP_S``, de modo
+    que un ``max_s`` aquí no cambia lo que se trocea, solo lo que se RECHAZA.
+    El tope es una preferencia de campaña y la campaña aquí no ha dicho ninguna.
+    Con ``max_s=None`` no se activa ``duration.max``, así que tampoco hace falta
+    clasificarla: el schema solo exige clasificar las restricciones que se
+    declaran.
+
     No declara reglas de audio. La plataforma usa ``PlatformRules()``, cuyo
     ``audio_rule`` es ``ANY``: no hay audio que exigir, y el resolver solo añade
     ``audio.present`` cuando alguna plataforma exige audio. Declararla aquí
@@ -1006,9 +1024,12 @@ def vanilla_contract(
 
     Lo que el contrato NO declara es precisamente lo que no se puede saber sin
     un brief: sin prohibiciones léxicas, sin ``brand_safety_required``, sin
-    bounds de duración, sin menciones ni hashtags, y sin watermark. El audio
-    original se conserva declarando ``AudioPolicy.ORIGINAL_AUDIO``, que no
-    silencia la pista.
+    menciones ni hashtags, y sin watermark. El audio original se conserva
+    declarando ``AudioPolicy.ORIGINAL_AUDIO``, que no silencia la pista.
+
+    La banda de duracion NO es de esa lista porque si se puede saber: un clip
+    por debajo de 3 s no es publicable en ninguna plataforma, con brief o sin
+    el. Eso es un minimo tecnico, no una preferencia de campaña.
 
     Args:
         campaign_id: Identificador de campaña; debe ser un segmento de ruta
@@ -1033,7 +1054,9 @@ def vanilla_contract(
         campaign_id=campaign_id,
         format=Format.VIDEO,
         mode=Mode.REPOST_UGC,
-        platforms={platform: PlatformRules()},
+        platforms={
+            platform: PlatformRules(duration=DurationRange(min_s=3, max_s=None)),
+        },
         languages=Languages(source=language, caption=language),
         watermark=Watermark(required=False, visible_full_video=False),
         rules=RuleSet(hard=list(_ZERO_CONTRACT_AV_RULES)),
