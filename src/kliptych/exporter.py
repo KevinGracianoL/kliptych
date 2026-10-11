@@ -50,6 +50,7 @@ from kliptych.gate import (
     GateStatus,
     Piece,
 )
+from kliptych.gate.engine import rule_applies, rule_applies_anywhere
 from kliptych.hashing import sha256_bytes
 from kliptych.naming import is_safe_segment
 
@@ -318,7 +319,7 @@ def _build_report(
         status=_status(exported=exported, rejected=rejected),
         exported=tuple(exported),
         rejected=tuple(rejected),
-        reminders=_reminders(context.contract),
+        reminders=_reminders(context.contract, tuple(plan.piece.platform for plan in plans)),
         manually_approved_rules=all_approved_rules,
         approved_by=approved_by,
         approved_at_utc=approved_at_utc,
@@ -566,7 +567,33 @@ def _rejection_reason(gate_result: GateResult) -> str:
     return f"el gate no aprobó la pieza ({gate_result.status.value}): {failed}"
 
 
-def _reminders(contract: Contract) -> tuple[Reminder, ...]:
+def _reminders(
+    contract: Contract, platforms: Sequence[Platform] | None = None
+) -> tuple[Reminder, ...]:
+    """Recordatorios del informe, acotados a las plataformas de la entrega.
+
+    Los recordatorios de ``manual_review`` se filtran por el MISMO predicado de
+    aplicabilidad que usa el gate (#57). Antes iban por la lista global de
+    ``contract.rules.manual_review``, asi que una entrega solo de reels
+    recordaba ``audio.no_trending``, una regla que solo pide tiktok y que
+    ninguna pieza de esa entrega podia cumplir. Un recordatorio que hay que
+    ignorar enseña a ignorar el informe entero.
+
+    El filtro solo puede QUITAR recordatorios. Una regla sin predicado de
+    plataforma sigue apareciendo siempre, porque ahi no hay forma de saber que
+    no aplica, y quedarse en silencio seria afirmar que nadie tiene que mirar.
+
+    Args:
+        contract: Contrato de la entrega.
+        platforms: Plataformas representadas en las piezas de la entrega,
+            exportadas y rechazadas. Se cuentan tambien las rechazadas a
+            proposito: un paquete bloqueado por completo tiene que seguir
+            recordando lo que el operador tiene que revisar. Si es ``None``, se
+            consideran todas las del contrato.
+
+    Returns:
+        Los recordatorios, ya acotados a las plataformas de la entrega.
+    """
     reminders: list[Reminder] = []
     geo = contract.geo_target
     if geo is not None:
@@ -593,8 +620,42 @@ def _reminders(contract: Contract) -> tuple[Reminder, ...]:
                 detail="guardar la prueba de analytics después de publicar",
             )
         )
+    objetivo = (
+        tuple(contract.platforms.keys()) if not platforms else tuple(dict.fromkeys(platforms))
+    )
+    aplicables = tuple(p for p in objetivo if p in contract.platforms)
     reminders.extend(
         Reminder(kind="manual_review", detail=f"revisión manual pendiente: {rule_id}")
         for rule_id in contract.rules.manual_review
+        if _recuerda_regla(rule_id, contract, aplicables)
     )
     return tuple(reminders)
+
+
+def _recuerda_regla(rule_id: str, contract: Contract, plataformas: Sequence[Platform]) -> bool:
+    """Si un recordatorio de revision manual sigue siendo cierto en esta entrega.
+
+    Replica la distincion del motor entre "aplica aqui", "aplica en otra" y
+    "no la aplica nadie", porque las dos ultimas no se pueden tratar igual:
+
+    - Si la regla aplica a alguna de las plataformas de la entrega, el aviso
+      sale. Es el caso que #57 resuelve: una entrega solo de reels no recuerda
+      una regla que solo pide tiktok.
+    - Si la regla NO aplica a ninguna, pero el contrato entero tiene alguna
+      plataforma que si la pide, el aviso calla: la pidio para otro destino.
+    - Y si NINGUNA plataforma del contrato la pide, el aviso sale SIEMPRE. Esa
+      regla esta declarada y huerfana, el contrato es incoherente, y el aviso
+      es la unica senal que queda de que hay que mirarlo. Acotarlo por
+      plataforma lo suprimiria justo cuando avisar es todo lo que hay.
+
+    Args:
+        rule_id: Regla declarada en revision manual.
+        contract: Contrato de la entrega.
+        plataformas: Plataformas representadas en las piezas de la entrega.
+
+    Returns:
+        True si el recordatorio debe emitirse.
+    """
+    if any(rule_applies(rule_id, contract.platforms[p]) for p in plataformas):
+        return True
+    return not rule_applies_anywhere(rule_id, contract)

@@ -2,22 +2,30 @@
 
 ``contract.rules`` es global: una sola declaracion cubre todas las plataformas.
 Lo que describen es por plataforma. Estos tests fijan que una regla solo afecta
-a las plataformas que la declararon, en el motor, que es el UNICO consumidor que
-consulta el predicado de aplicabilidad. El exportador NO lo consulta: sus
-recordatorios son planos por informe y no pueden expresar el caso B (#57).
+a las plataformas que la declararon, en el motor, que es donde se decide eso, y
+en los recordatorios de la entrega, que ya no son planos (#57).
 
 El riesgo que estos tests cubren no es que el motor pase de mas, sino que pase
 de menos: una plataforma que SI declara una regla tiene que seguir exigiendo su
 firma. Por eso hay tests de no-regresion explicitos.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from kliptych.assets import AssetRegistry
-from kliptych.contract import Contract, Platform, contract_digest
-from kliptych.contract.schema import PlatformRules
+from kliptych.contract import (
+    Attribution,
+    AttributionType,
+    Contract,
+    LinkRules,
+    Platform,
+    contract_digest,
+)
+from kliptych.contract.enums import AudioRule
+from kliptych.contract.schema import PlatformRules, canonical_rule_id
 from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
 from kliptych.gate import (
     CheckOutcome,
@@ -28,6 +36,7 @@ from kliptych.gate import (
     GateStatus,
     Piece,
 )
+from kliptych.gate.engine import rule_applies
 from tests.support import (
     FakeProbe,
     make_contract,
@@ -212,21 +221,19 @@ def test_single_platform_requiring_audio_behaves_exactly_as_before(
 
 
 def test_reminder_is_still_emitted_for_a_rule_no_platform_claims(tmp_path: Path) -> None:
-    """El recordatorio NO se puede acotar por plataforma en este PR.
+    """CASO C: una regla declarada que NADIE reclama sigue emitiendo su aviso.
 
-    Se intentó y se revirtió, por dos motivos medidos:
+    Acotar los recordatorios a las plataformas de la entrega (#57) solo puede
+    callar el CASO B, donde la regla es de otra plataforma. El CASO C es el
+    contrario: la regla esta declarada en el contrato y ninguna plataforma la
+    pide, o sea que el contrato es incoherente. Ahi el aviso es la UNICA senal
+    de que hay que mirarlo, y el filtro no puede suprimirlo.
 
-    - Con el aviso acotado a las piezas exportadas, un paquete bloqueado se
-      quedaba sin recordatorios y rompia
-      ``test_report_lists_post_publication_reminders``.
-    - Acotarlo a nivel de contrato solo puede suprimir el caso C (una regla que
-      ninguna plataforma reclama), que es justo cuando el aviso SÍ es verdad.
-      El caso B necesita saber qué piezas hay en el paquete, y
-      ``DeliveryReport.reminders`` es una lista plana sin ese contexto.
+    Por eso `_recuerda_regla` no es "aplica a alguna plataforma de la entrega" a
+    secas: cuando no aplica en ninguna, distingue si el contrato entero la pide
+    en otra (callar) de si no la pide nadie (avisar).
 
-    Este test fija el comportamiento que queda: si la regla está declarada, el
-    aviso sale. Es lo mismo que ``main``, y es la razón por la que el consumidor
-    del exportador queda fuera de este arreglo.
+    Este test fija esa mitad: si la regla esta declarada, el aviso sale.
     """
     contract = make_contract(
         audio_rule="any",
@@ -491,3 +498,237 @@ def test_manual_review_rule_claimed_by_no_platform_is_recorded_and_blocks(
 
     assert _check(result, "audio.no_trending").status is CheckStatus.MANUAL_REVIEW
     assert result.status is GateStatus.PENDING_REVIEW
+
+
+# --- #63: atribucion y link.in_bio tambien son requisitos por plataforma ------
+
+
+def _contract_with_platform_restrictions(
+    *,
+    tiktok_rules: PlatformRules,
+    reels_rules: PlatformRules,
+    hard: Sequence[str],
+    manual_review: Sequence[str] = (),
+) -> Contract:
+    """Contrato de dos plataformas con reglas de atribucion/link distintas.
+
+    Args:
+        tiktok_rules: Reglas de la plataforma que SI declara las restricciones.
+        reels_rules: Reglas de la plataforma que NO las declara.
+        hard: Reglas duras declaradas globalmente.
+        manual_review: Reglas de revision manual declaradas globalmente.
+
+    Returns:
+        El contrato de dos plataformas, ya revalidado.
+    """
+    base = make_contract(audio_rule="any", hard=hard, manual_review=manual_review)
+    return with_platform(
+        with_platform(base, Platform.TIKTOK, tiktok_rules), Platform.INSTAGRAM_REELS, reels_rules
+    )
+
+
+_LINK_RULES_ON = PlatformRules(link_rules=LinkRules(link_in_bio=True))
+_LINK_RULES_OFF = PlatformRules()
+_ATTRIBUTION_ON = PlatformRules(attribution=Attribution(type=AttributionType.TAG, value="@marca"))
+_ATTRIBUTION_OFF = PlatformRules()
+
+
+def test_link_in_bio_does_not_block_a_platform_that_never_declared_it(tmp_path: Path) -> None:
+    """#63: `link.in_bio` es de tiktok; reels no lo pidió y no paga su firma.
+
+    Sin predicado de aplicabilidad, la regla se despacha en TODAS las plataformas
+    del contrato y reels queda bloqueada por un requisito que no declaró.
+    """
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=_LINK_RULES_ON,
+        reels_rules=_LINK_RULES_OFF,
+        hard=["artifact.integrity", "duration.min", "link.in_bio"],
+    )
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    result = _gate().run(contract=contract, piece=reels, assets=AssetRegistry(tmp_path))
+
+    assert "link.in_bio" not in [check.id for check in result.checks]
+    assert result.status is GateStatus.PASSED
+
+
+def test_link_in_bio_still_blocks_the_platform_that_declared_it(tmp_path: Path) -> None:
+    """NO-REGRESION: tiktok si pidió el link y sigue exigiendo revision.
+
+    Si este test falla, #63 ha abierto un agujero: la plataforma que declara la
+    regla estaría publicando sin que nadie mire.
+    """
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=_LINK_RULES_ON,
+        reels_rules=_LINK_RULES_OFF,
+        hard=["artifact.integrity", "duration.min", "link.in_bio"],
+    )
+    tiktok = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    result = _gate().run(contract=contract, piece=tiktok, assets=AssetRegistry(tmp_path))
+
+    assert _check(result, "link.in_bio").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED
+
+
+def test_attribution_required_does_not_block_a_platform_with_attribution_none(
+    tmp_path: Path,
+) -> None:
+    """#63, atribucion: `attribution.type=none` significa que no hay requisito."""
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=_ATTRIBUTION_ON,
+        reels_rules=_ATTRIBUTION_OFF,
+        hard=["artifact.integrity", "duration.min", "attribution.required"],
+    )
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    result = _gate().run(contract=contract, piece=reels, assets=AssetRegistry(tmp_path))
+
+    assert "attribution.required" not in [check.id for check in result.checks]
+    assert result.status is GateStatus.PASSED
+
+
+def test_attribution_required_still_blocks_the_platform_that_declared_it(
+    tmp_path: Path,
+) -> None:
+    """NO-REGRESION de atribucion."""
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=_ATTRIBUTION_ON,
+        reels_rules=_ATTRIBUTION_OFF,
+        hard=["artifact.integrity", "duration.min", "attribution.required"],
+    )
+    tiktok = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    result = _gate().run(contract=contract, piece=tiktok, assets=AssetRegistry(tmp_path))
+
+    assert _check(result, "attribution.required").status is CheckStatus.UNSUPPORTED
+    assert result.status is GateStatus.UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonico", "exigida", "no_exigida"),
+    [
+        ("attribution.present", "attribution.required", _ATTRIBUTION_ON, _ATTRIBUTION_OFF),
+        ("link_rules.link_in_bio", "link.in_bio", _LINK_RULES_ON, _LINK_RULES_OFF),
+    ],
+)
+def test_los_alias_de_atribucion_y_link_respetan_el_predicado(
+    alias: str,
+    canonico: str,
+    exigida: PlatformRules,
+    no_exigida: PlatformRules,
+) -> None:
+    """Un alias debe heredar la aplicabilidad de su id canonico, no la suprimir.
+
+    Si el motor buscara el predicado por el alias literal, no lo encontraria y la
+    plataforma sin requisitos volveria a quedar bloqueada: el alias seria una
+    puerta trasera del defecto de #63.
+    """
+    assert canonical_rule_id(alias) == canonico
+    # El alias y su canonico tienen que coincidir en las DOS plataformas, no solo
+    # en la que exige: si solo coincidieran en una, el fallo aparece en runtime.
+    assert rule_applies(alias, exigida) is True
+    assert rule_applies(alias, no_exigida) is False
+    assert rule_applies(alias, exigida) is rule_applies(canonico, exigida)
+    assert rule_applies(alias, no_exigida) is rule_applies(canonico, no_exigida)
+
+
+# --- #57: los recordatorios tambien son por plataforma ------------------------
+
+
+def _audio_contract() -> Contract:
+    """Tiktok exige `no_trending`; reels declara `any` y no exige nada.
+
+    Returns:
+        El contrato de dos plataformas con una regla de audio que solo una pide.
+    """
+    return _contract_with_platform_restrictions(
+        tiktok_rules=PlatformRules(audio_rule=AudioRule.NO_TRENDING),
+        reels_rules=PlatformRules(audio_rule=AudioRule.ANY),
+        hard=["artifact.integrity", "duration.min"],
+        manual_review=["audio.no_trending"],
+    )
+
+
+def test_recordatorio_de_audio_ya_no_aparece_en_una_entrega_solo_de_reels(
+    tmp_path: Path,
+) -> None:
+    """#57: una entrega solo de reels no recuerda una regla que solo pide tiktok.
+
+    El recordatorio global obligaba al operador a repasar `audio.no_trending`
+    en entregas donde ninguna pieza podia cumplirlo. Enseñar a ignorar el
+    informe es peor que no mostrarlo.
+    """
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    report = _export(tmp_path, contract=_audio_contract(), pieces=[reels], approve=True, tag="ig")
+
+    assert [r.detail for r in report.reminders if r.kind == "manual_review"] == []
+
+
+def test_recordatorio_de_audio_si_aparece_cuando_la_entrega_tiene_una_pieza_de_tiktok(
+    tmp_path: Path,
+) -> None:
+    """NO-REGRESION de #57: con tiktok en la entrega, el recordatorio vuelve."""
+    tiktok = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+
+    report = _export(tmp_path, contract=_audio_contract(), pieces=[tiktok], approve=True, tag="tk")
+
+    assert any(
+        r.kind == "manual_review" and "audio.no_trending" in r.detail for r in report.reminders
+    )
+
+
+def test_recordatorio_sigue_apareciendo_para_una_regla_sin_predicado_de_plataforma(
+    tmp_path: Path,
+) -> None:
+    """Una regla que aplica en todas las plataformas no puede desaparecer nunca.
+
+    Si el alcance no la puede acotar, el recordatorio se mantiene: el filtro
+    solo puede quitar recordatorios, nunca inventar una ausencia.
+    """
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=PlatformRules(),
+        reels_rules=PlatformRules(),
+        hard=["artifact.integrity", "duration.min"],
+        manual_review=["caption.tone"],
+    )
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    report = _export(tmp_path, contract=contract, pieces=[reels], approve=True, tag="tone")
+
+    assert any(r.kind == "manual_review" and "caption.tone" in r.detail for r in report.reminders)
+
+
+@pytest.mark.parametrize(
+    ("exigida_tiktok", "regla"),
+    [(_LINK_RULES_ON, "link.in_bio"), (_ATTRIBUTION_ON, "attribution.required")],
+)
+def test_recordatorio_de_atribucion_y_link_tambien_se_acota_a_la_entrega(
+    tmp_path: Path,
+    exigida_tiktok: PlatformRules,
+    regla: str,
+) -> None:
+    """Los recordatorios de las reglas nuevas de #63 obeyecen el mismo filtro.
+
+    Sin este caso, `_recuerda_regla` podria estar acotando solo el audio y las
+    reglas de atribucion y link seguirian apareciendo en todas las entregas.
+    """
+    contract = _contract_with_platform_restrictions(
+        tiktok_rules=exigida_tiktok,
+        reels_rules=PlatformRules(),
+        hard=["artifact.integrity", "duration.min"],
+        manual_review=[regla],
+    )
+    reels = _piece(_artifact(tmp_path), piece_id="ig", platform=Platform.INSTAGRAM_REELS)
+
+    report = _export(tmp_path, contract=contract, pieces=[reels], approve=True, tag=f"ig-{regla}")
+
+    assert [r.detail for r in report.reminders if r.kind == "manual_review"] == []
+
+    tiktok = _piece(_artifact(tmp_path), piece_id="tk", platform=Platform.TIKTOK)
+    con_tiktok = _export(
+        tmp_path, contract=contract, pieces=[tiktok], approve=True, tag=f"tk-{regla}"
+    )
+
+    assert any(r.kind == "manual_review" and regla in r.detail for r in con_tiktok.reminders)
