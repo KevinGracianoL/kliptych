@@ -15,6 +15,7 @@ from kliptych.contract.enums import (
     AudioRule,
     CaptionCapitalization,
     Format,
+    Layout,
     Mode,
     Platform,
     SubtitleLanguage,
@@ -196,6 +197,30 @@ class CaptionStyleDraft(ContractBase):
     alignment: FieldCandidate[int] | dict[str, object] | int | None = None
 
 
+class NormalizedRectDraft(ContractBase):
+    """Ventana rectangular normalizada propuesta con evidencia opcional."""
+
+    x: FieldCandidate[float] | dict[str, object] | float | None = None
+    y: FieldCandidate[float] | dict[str, object] | float | None = None
+    width: FieldCandidate[float] | dict[str, object] | float | None = None
+    height: FieldCandidate[float] | dict[str, object] | float | None = None
+
+
+class BandDraft(ContractBase):
+    """Franja de composición propuesta con evidencia opcional."""
+
+    source_rect: NormalizedRectDraft | dict[str, object] | None = None
+    source: FieldCandidate[str] | dict[str, object] | str | None = None
+
+
+class LayoutSpecDraft(ContractBase):
+    """Especificación de composición multifranga propuesta."""
+
+    layout: FieldCandidate[Layout] | dict[str, object] | Layout | str | None = None
+    bands: list[BandDraft] = Field(default_factory=list)
+    gap: FieldCandidate[int] | dict[str, object] | int | None = None
+
+
 class ContractDraft(ContractBase):
     """Salida cruda del LLM: todo campo es opcional y lleva su evidencia."""
 
@@ -220,6 +245,7 @@ class ContractDraft(ContractBase):
     lyric_video: LyricConfigDraft | None = None
     split_screen: SplitScreenDraft | None = None
     caption_style: CaptionStyleDraft | None = None
+    layout_spec: LayoutSpecDraft | None = None
     rules: RuleSetDraft | None = None
     assets: AssetsDraft | None = None
     segments: SegmentsDraft | None = None

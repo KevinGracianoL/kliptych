@@ -12,15 +12,23 @@ render exitoso reemplaza el destino; un fallo deja intacto el artefacto previo.
 """
 
 import contextlib
+import logging
 import math
 import os
 import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import assert_never
+from typing import Final, assert_never
 
-from kliptych.contract import Layout, SplitScreenConfig, Watermark, WatermarkPosition
+from kliptych.contract import (
+    Band,
+    Layout,
+    LayoutSpec,
+    SplitScreenConfig,
+    Watermark,
+    WatermarkPosition,
+)
 from kliptych.encoding import (
     Invocation,
     RenderConfig,
@@ -29,12 +37,16 @@ from kliptych.encoding import (
     video_encoder_arguments,
 )
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_WIDTH = 1080
 _DEFAULT_HEIGHT = 1920
 _DEFAULT_TIMEOUT_S = 300.0
 _SPLIT_AUDIO_PROBE_TIMEOUT_S = 30.0
 _WATERMARK_MARGIN = 20
 _STDERR_TAIL = 400
+_DIMENSION_PARTS: Final[int] = 2
+_DEFAULT_PROBED_DIMENSIONS: Final[tuple[int, int]] = (1920, 1080)
 
 
 class AssembleError(Exception):
@@ -109,6 +121,8 @@ class RenderSpec:
     split_screen: SplitScreenConfig | None = None
     top_clip: Path | None = None
     bottom_clip: Path | None = None
+    layout_spec: LayoutSpec | None = None
+    band_clips: tuple[Path, ...] = ()
 
 
 class FFmpegAssembler:
@@ -159,8 +173,8 @@ class FFmpegAssembler:
         """
         if spec.layout is Layout.SPLIT_SCREEN:
             return self._assemble_split(spec)
-        if spec.layout is not Layout.SINGLE:
-            assert_never(spec.layout)
+        if spec.layout is not Layout.SINGLE or spec.layout_spec is not None:
+            return self._assemble_layout_spec(spec)
         _require_file(spec.clip, what="clip")
         if spec.watermark is not None:
             _require_file(spec.watermark, what="watermark")
@@ -242,6 +256,41 @@ class FFmpegAssembler:
             subtitles=spec.subtitles,
             mute_audio=spec.mute_audio,
         )
+        cwd = None if spec.subtitles is None else temporary.parent
+        return self._run_and_publish(
+            argv, temporary=temporary, destination=spec.destination, cwd=cwd
+        )
+
+    def _assemble_layout_spec(self, spec: RenderSpec) -> Path:
+        """Ensambla video multifranga (Dividido, Trío, Spotlight, etc.) con vstack.
+
+        Args:
+            spec: Entradas del render con layout multifranga.
+
+        Returns:
+            La ruta del artefacto final publicado.
+
+        Raises:
+            AssembleError: Si las dimensiones son inválidas, los archivos no
+                existen o ffmpeg falla al procesar el ensamble.
+        """
+        if spec.width <= 0 or spec.height <= 0:
+            msg = f"dimensiones de lienzo inválidas: {spec.width}x{spec.height}"
+            raise AssembleError(msg)
+        _require_file(spec.clip, what="clip")
+        for band_clip in spec.band_clips:
+            _require_file(band_clip, what="band clip")
+        if spec.watermark is not None:
+            _require_file(spec.watermark, what="watermark")
+        if spec.subtitles is not None:
+            _require_file(spec.subtitles, what="subtítulos")
+        try:
+            spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            msg = f"no se pudo preparar el directorio del destino {spec.destination}: {error}"
+            raise AssembleError(msg) from error
+        temporary = _temporary_path(spec.destination)
+        argv = self._build_layout_spec_argv(spec, destination=temporary)
         cwd = None if spec.subtitles is None else temporary.parent
         return self._run_and_publish(
             argv, temporary=temporary, destination=spec.destination, cwd=cwd
@@ -432,8 +481,8 @@ class FFmpegAssembler:
                     mute_audio=spec.mute_audio,
                 )
             )
-        if spec.layout is not Layout.SINGLE:
-            assert_never(spec.layout)
+        if spec.layout is not Layout.SINGLE or spec.layout_spec is not None:
+            return tuple(self._build_layout_spec_argv(spec))
         return tuple(
             self._build_argv(
                 clip=spec.clip,
@@ -691,6 +740,210 @@ class FFmpegAssembler:
         if mute_audio and not mute_embedded:
             tail += list(muted_audio_arguments())
         return tail
+
+    def _build_layout_spec_argv(
+        self,
+        spec: RenderSpec,
+        *,
+        destination: Path | None = None,
+    ) -> list[str]:
+        target = destination if destination is not None else spec.destination
+        layout_spec = spec.layout_spec or _default_layout_spec_for(spec.layout)
+        band_heights = layout_spec.band_heights(spec.height)
+        bands = layout_spec.bands or tuple(Band() for _ in range(len(band_heights)))
+        n = len(bands)
+        clips = [spec.band_clips[i] if i < len(spec.band_clips) else spec.clip for i in range(n)]
+        argv, target_str = self._layout_spec_base_argv(clips, spec, target)
+        gap = layout_spec.gap if n > 1 else 0
+        filter_chains = [
+            _band_filter(
+                i,
+                b,
+                band_h=h,
+                clip_path=c,
+                canvas_width=spec.width,
+                ffprobe=self._ffprobe,
+                timeout_s=self._timeout_s,
+                gap=gap,
+            )
+            for i, (b, h, c) in enumerate(zip(bands, band_heights, clips, strict=True))
+        ]
+        video_label = self._layout_spec_overlay_tail(filter_chains, argv, spec, n, target)
+        argv += ["-filter_complex", ";".join(filter_chains), "-map", video_label, "-map", "0:a?"]
+        if spec.mute_audio:
+            argv += list(muted_audio_arguments())
+        argv += list(video_encoder_arguments(nvenc_available=self._render.nvenc_available))
+        argv += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", target_str]
+        return argv
+
+    def _layout_spec_base_argv(
+        self, clips: list[Path], spec: RenderSpec, target: Path
+    ) -> tuple[list[str], str]:
+        if spec.subtitles is None:
+            clip_args = [str(c) for c in clips]
+            target_str = str(target)
+        else:
+            clip_args = [str(c.resolve()) for c in clips]
+            target_str = str(target.resolve())
+        argv = [self._ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y"]
+        for c_arg in clip_args:
+            argv += ["-i", c_arg]
+        return argv, target_str
+
+    @staticmethod
+    def _layout_spec_overlay_tail(
+        filter_chains: list[str],
+        argv: list[str],
+        spec: RenderSpec,
+        n: int,
+        target: Path,
+    ) -> str:
+        if n > 1:
+            stack_inputs = "".join(f"[b{i}]" for i in range(n))
+            filter_chains.append(f"{stack_inputs}vstack=inputs={n}[v_stacked]")
+            current_v = "[v_stacked]"
+        else:
+            filter_chains.append("[b0]null[v_stacked]")
+            current_v = "[v_stacked]"
+        if spec.watermark is not None:
+            wm_path = (
+                str(spec.watermark.resolve()) if spec.subtitles is not None else str(spec.watermark)
+            )
+            argv += ["-i", wm_path]
+            config = spec.watermark_config or Watermark(required=True, visible_full_video=True)
+            filter_chains.append(
+                _watermark_overlay(
+                    wm_input=f"[{n}:v]",
+                    main_label=current_v,
+                    out_label="[v_wm]",
+                    config=config,
+                    canvas_width=spec.width,
+                )
+            )
+            current_v = "[v_wm]"
+        if spec.subtitles is not None:
+            sub_val = _subtitles_filter_value(spec.subtitles, target)
+            filter_chains.append(f"{current_v}subtitles=filename='{sub_val}'[vout]")
+            current_v = "[vout]"
+        return current_v
+
+
+def _default_layout_spec_for(layout: Layout) -> LayoutSpec:
+    if layout in {Layout.DIVIDIDO, Layout.SPOTLIGHT}:
+        return LayoutSpec(layout=layout, bands=(Band(), Band()))
+    if layout is Layout.TRIO:
+        return LayoutSpec(layout=layout, bands=(Band(), Band(), Band()))
+    return LayoutSpec(layout=layout, bands=(Band(),))
+
+
+def _band_filter(
+    i: int,
+    band: Band,
+    *,
+    band_h: int,
+    clip_path: Path,
+    canvas_width: int,
+    ffprobe: str,
+    timeout_s: float,
+    gap: int = 0,
+) -> str:
+    """Construye el filtro de una franja: recorte normalizado, escala y SAR.
+
+    Args:
+        i: Índice de la franja, usado para etiquetar la salida ``[b{i}]``.
+        band: Definición de la franja con su rectángulo normalizado.
+        band_h: Alto útil de vídeo de la franja (sin franja negra de separación).
+        clip_path: Ruta del clip que alimenta la franja.
+        canvas_width: Ancho del lienzo emitido.
+        ffprobe: Binario para leer las dimensiones reales del clip.
+        timeout_s: Tiempo máximo de la inspección.
+        gap: Franja negra a añadir por debajo de la imagen, en píxeles.
+
+    Returns:
+        El filtro completo que termina en ``...,setsar=1[b{i}]``.
+    """
+    source_w, source_h = _probe_clip_dimensions(clip_path, ffprobe=ffprobe, timeout_s=timeout_s)
+    rect = band.source_rect
+    crop_w = round(rect.width * source_w / 2) * 2
+    crop_h = round(rect.height * source_h / 2) * 2
+
+    crop_w = max(2, min(crop_w, source_w))
+    crop_h = max(2, min(crop_h, source_h))
+    crop_x = max(0, min(round(rect.x * source_w / 2) * 2, source_w - crop_w))
+    crop_y = max(0, min(round(rect.y * source_h / 2) * 2, source_h - crop_h))
+
+    content_h = band_h - gap
+    chain = (
+        f"[{i}:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+        f"scale={canvas_width}:{content_h}:force_original_aspect_ratio=increase,"
+        f"crop={canvas_width}:{content_h},setsar=1"
+    )
+    if gap > 0:
+        chain += f",pad={canvas_width}:{band_h}:0:0:color=black"
+    return f"{chain}[b{i}]"
+
+
+def _probe_clip_dimensions(clip: Path, *, ffprobe: str, timeout_s: float) -> tuple[int, int]:
+    """Lee las dimensiones del video con ffprobe o devuelve (1920, 1080) por defecto.
+
+    Args:
+        clip: Ruta del archivo de video a inspeccionar.
+        ffprobe: Binario de ffprobe.
+        timeout_s: Timeout de la invocación.
+
+    Returns:
+        Tupla (ancho, alto) en píxeles.
+    """
+    argv = [
+        ffprobe,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=s=x:p=0",
+        str(clip),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning(
+            "No se pudieron leer las dimensiones de %s (%s); se usa %dx%d para el recorte",
+            clip,
+            error,
+            *_DEFAULT_PROBED_DIMENSIONS,
+        )
+        return _DEFAULT_PROBED_DIMENSIONS
+    if completed.returncode != 0 or not completed.stdout.strip():
+        logger.warning(
+            "ffprobe no reportó dimensiones de %s (rc=%s); se usa %dx%d para el recorte",
+            clip,
+            completed.returncode,
+            *_DEFAULT_PROBED_DIMENSIONS,
+        )
+        return _DEFAULT_PROBED_DIMENSIONS
+    first_line = completed.stdout.strip().splitlines()[0]
+    parts = first_line.split("x")
+    if len(parts) == _DIMENSION_PARTS and parts[0].isdigit() and parts[1].isdigit():
+        w, h = int(parts[0]), int(parts[1])
+        if w > 0 and h > 0:
+            return w, h
+    logger.warning(
+        "Salida de ffprobe no interpretable para %s: %r; se usa %dx%d para el recorte",
+        clip,
+        first_line,
+        *_DEFAULT_PROBED_DIMENSIONS,
+    )
+    return _DEFAULT_PROBED_DIMENSIONS
 
 
 def _split_panel_has_audio(path: Path, *, ffprobe: str, timeout_s: float) -> bool:

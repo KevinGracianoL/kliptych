@@ -44,6 +44,8 @@ from kliptych.contract import (
     AttributionType,
     AudioPolicy,
     AudioRule,
+    Band,
+    BandDraft,
     CaptionRules,
     CaptionStyleConfig,
     Confidence,
@@ -55,10 +57,13 @@ from kliptych.contract import (
     GeoTarget,
     GlobalRestrictions,
     Languages,
+    LayoutSpec,
     LinkRules,
     LyricConfig,
     MinViewsForPayout,
     Mode,
+    NormalizedRect,
+    NormalizedRectDraft,
     OfficialAudio,
     Platform,
     PlatformDraft,
@@ -1252,6 +1257,7 @@ def _build_contract(
             value=bool(_value(draft.analytics_proof_required))
         ),
         caption_style=_resolve_caption_style(draft),
+        layout_spec=_resolve_layout_spec(draft),
     )
 
 
@@ -1589,6 +1595,68 @@ def _raw_candidate_value(candidate: object) -> object:
         d = cast("dict[str, object]", candidate)
         return d.get("value")
     return candidate
+
+
+def _resolve_normalized_rect(
+    draft: NormalizedRectDraft | dict[str, object] | None,
+) -> NormalizedRect:
+    if draft is None:
+        return NormalizedRect()
+    kw: dict[str, object] = {}
+    if isinstance(draft, dict):
+        for k in ("x", "y", "width", "height"):
+            if (v := draft.get(k)) is not None:
+                kw[k] = v
+    else:
+        for k in ("x", "y", "width", "height"):
+            val = _raw_candidate_value(getattr(draft, k, None))
+            if val is not None:
+                kw[k] = val
+    return NormalizedRect.model_validate(kw)
+
+
+def _resolve_band(draft: BandDraft | dict[str, object]) -> Band:
+    kw: dict[str, object] = {}
+    if isinstance(draft, dict):
+        if "source_rect" in draft and draft["source_rect"] is not None:
+            kw["source_rect"] = _resolve_normalized_rect(
+                cast("NormalizedRectDraft | dict[str, object]", draft["source_rect"])
+            )
+        if (src := draft.get("source")) is not None:
+            kw["source"] = src
+    else:
+        if draft.source_rect is not None:
+            kw["source_rect"] = _resolve_normalized_rect(draft.source_rect)
+        src = _raw_candidate_value(draft.source)
+        if src is not None:
+            kw["source"] = src
+    return Band.model_validate(kw)
+
+
+def _resolve_layout_spec(draft: ContractDraft) -> LayoutSpec | None:
+    spec_draft = draft.layout_spec
+    if spec_draft is None:
+        return None
+    kw: dict[str, object] = {}
+    if isinstance(spec_draft, dict):
+        d = cast("dict[str, object]", spec_draft)
+        if (layout_val := _raw_candidate_value(d.get("layout"))) is not None:
+            kw["layout"] = layout_val
+        if d.get("bands"):
+            raw_bands = cast("list[BandDraft | dict[str, object]]", d["bands"])
+            kw["bands"] = tuple(_resolve_band(b) for b in raw_bands)
+        if (gap_val := _raw_candidate_value(d.get("gap"))) is not None:
+            kw["gap"] = gap_val
+    else:
+        layout_val = _raw_candidate_value(spec_draft.layout)
+        if layout_val is not None:
+            kw["layout"] = layout_val
+        if spec_draft.bands:
+            kw["bands"] = tuple(_resolve_band(b) for b in spec_draft.bands)
+        gap_val = _raw_candidate_value(spec_draft.gap)
+        if gap_val is not None:
+            kw["gap"] = gap_val
+    return LayoutSpec.model_validate(kw)
 
 
 def _resolve_watermark(draft: ContractDraft) -> Watermark:

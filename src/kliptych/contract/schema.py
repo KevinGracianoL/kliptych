@@ -25,6 +25,7 @@ from kliptych.contract.enums import (
     AudioRule,
     CaptionCapitalization,
     Format,
+    Layout,
     Mode,
     Platform,
     SubtitleLanguage,
@@ -324,6 +325,118 @@ class SplitScreenConfig(ContractBase):
         return self
 
 
+_TWO_BANDS: Final[int] = 2
+_THREE_BANDS: Final[int] = 3
+_MAX_SINGLE_BANDS: Final[int] = 1
+_SINGLE_BAND_LAYOUTS: Final[set[Layout]] = {Layout.SINGLE, Layout.VERTICAL, Layout.HORIZONTAL}
+_TWO_BAND_LAYOUTS: Final[set[Layout]] = {Layout.DIVIDIDO, Layout.SPOTLIGHT}
+
+
+class NormalizedRect(ContractBase):
+    """Ventana rectangular normalizada en el rango [0.0, 1.0]."""
+
+    x: float = Field(default=0.0, ge=0.0, le=1.0)
+    y: float = Field(default=0.0, ge=0.0, le=1.0)
+    width: float = Field(default=1.0, gt=0.0, le=1.0)
+    height: float = Field(default=1.0, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _rect_stays_inside_bounds(self) -> Self:
+        """Rechaza rectángulos que se salgan del espacio unitario normalizado.
+
+        Returns:
+            La propia instancia si cabe dentro del espacio unitario.
+
+        Raises:
+            ValueError: Si la ventana supera los límites 1.0 por la derecha o abajo.
+        """
+        right = self.x + self.width
+        if right > 1.0:
+            msg = f"la ventana se sale por la derecha: x+width={right} > 1.0"
+            raise ValueError(msg)
+        bottom = self.y + self.height
+        if bottom > 1.0:
+            msg = f"la ventana se sale por abajo: y+height={bottom} > 1.0"
+            raise ValueError(msg)
+        return self
+
+
+class Band(ContractBase):
+    """Definición de una franja de composición de video con su recorte normalizado."""
+
+    source_rect: NormalizedRect = Field(default_factory=NormalizedRect)
+    source: str | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_safe(cls, source: str | None) -> str | None:
+        if source is not None and not is_safe_segment(source):
+            msg = "band source no es un segmento de ruta seguro"
+            raise ValueError(msg)
+        return source
+
+
+class LayoutSpec(ContractBase):
+    """Especificación de composición espacial multifranga para video."""
+
+    layout: Layout = Layout.SINGLE
+    bands: tuple[Band, ...] = ()
+    gap: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_bands_count(self) -> Self:
+        """Verifica que el número de franjas corresponda a las expectativas del layout.
+
+        Returns:
+            La propia instancia si el número de franjas es coherente.
+
+        Raises:
+            ValueError: Si el conteo de franjas no coincide con el layout.
+        """
+        count = len(self.bands)
+        if self.layout in _TWO_BAND_LAYOUTS and count != _TWO_BANDS:
+            msg = f"layout '{self.layout.value}' exige exactamente 2 franjas, se recibieron {count}"
+            raise ValueError(msg)
+        if self.layout is Layout.TRIO and count != _THREE_BANDS:
+            msg = f"layout 'trio' exige exactamente 3 franjas, se recibieron {count}"
+            raise ValueError(msg)
+        if self.layout in _SINGLE_BAND_LAYOUTS and count > _MAX_SINGLE_BANDS:
+            msg = f"layout '{self.layout.value}' admite 0 o 1 franja, se recibieron {count}"
+            raise ValueError(msg)
+        return self
+
+    def band_heights(self, canvas_height: int = 1920) -> tuple[int, ...]:
+        """Calcula las alturas en píxeles pares de cada franja sumando exactamente canvas_height.
+
+        Args:
+            canvas_height: Altura total del lienzo en píxeles (por defecto 1920).
+
+        Returns:
+            Tupla de enteros pares cuya suma es exactamente canvas_height.
+
+        Raises:
+            ValueError: Si canvas_height no es positivo.
+        """
+        if canvas_height <= 0:
+            msg = f"canvas_height debe ser positivo: {canvas_height}"
+            raise ValueError(msg)
+        if self.layout in _SINGLE_BAND_LAYOUTS:
+            return (canvas_height,)
+        if self.layout is Layout.DIVIDIDO:
+            h1 = (canvas_height // 2 // 2) * 2
+            h2 = canvas_height - h1
+            return (h1, h2)
+        if self.layout is Layout.TRIO:
+            part = (canvas_height // 3 // 2) * 2
+            remainder = canvas_height - (part * 2)
+            return (part, part, remainder)
+        if self.layout is Layout.SPOTLIGHT:
+            top = round(canvas_height * 0.5625 / 2) * 2
+            bottom = canvas_height - top
+            return (top, bottom)
+        return (canvas_height,)
+
+
 class LyricConfig(ContractBase):
     """Configuración de video de letras (format lyric_video)."""
 
@@ -591,6 +704,7 @@ class Contract(ContractBase):
     min_views_for_payout: MinViewsForPayout = Field(default_factory=MinViewsForPayout)
     analytics_proof_required: AnalyticsProofRequired = Field(default_factory=AnalyticsProofRequired)
     caption_style: CaptionStyleConfig = Field(default_factory=CaptionStyleConfig)
+    layout_spec: LayoutSpec | None = None
 
     @model_validator(mode="after")
     def _mode_matches_format(self) -> Self:
@@ -1041,6 +1155,8 @@ def _prune_unset_media_options(contract: Contract, dump: dict[str, object]) -> N
         _ = dump.pop("split_screen", None)
     if contract.caption_style == CaptionStyleConfig():
         _ = dump.pop("caption_style", None)
+    if contract.layout_spec is None:
+        _ = dump.pop("layout_spec", None)
 
 
 def _prune_default_watermark_options(dump: dict[str, object]) -> None:
