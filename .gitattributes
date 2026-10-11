@@ -1,0 +1,26 @@
+# Normalizacion de finales de linea en todo el repo.
+#
+# Sin esto, `git status` en Windows muestra modificaciones fantasma en ficheros
+# que nadie toco, porque el checkout escribe CRLF y el indice compara contra LF.
+# `text=auto` deja que Git detecte el texto y lo guarde normalizado en el
+# indice; `eol=lf` fuerza LF tambien en el checkout, para que el arbol de
+# trabajo coincida con lo que hay versionado (#64).
+#
+# `text=auto` NO convierte un fichero binario: los que Git detecta como tales
+# (png, mp4, dll...) quedan intactos.
+* text=auto eol=lf
+
+# Binarios explicitos. `text=auto` ya los detecta por contenido, pero la
+# deteccion es una heuristica (busca bytes nulos en los primeros 8000). Declarar
+# los formatos que versiona el repo la vuelve innecesaria para esos ficheros, y
+# asi un `.mp4` cuya cabecera cambiara no acabaria normalizado.
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.dll binary
+*.exe binary
+*.zip binary

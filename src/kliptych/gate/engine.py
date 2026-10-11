@@ -5,7 +5,7 @@ from pathlib import Path
 
 from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, RuleStrength, contract_digest
-from kliptych.contract.enums import AudioRule
+from kliptych.contract.enums import AttributionType, AudioRule
 from kliptych.contract.schema import PlatformRules, canonical_rule_id
 from kliptych.encoding import RenderConfig
 from kliptych.gate.checks import DEFAULT_VALIDATORS, GateContext, Validator
@@ -22,15 +22,25 @@ from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_file
 
 # Predicados de aplicabilidad por plataforma, indexados por rule_id canonico.
-# Es la UNICA tabla de aplicabilidad: la consultan el despacho de checks y el
-# lookup de validadores, ambos del motor. El exportador NO la consulta: sus
-# recordatorios son planos por informe y no pueden expresar el caso B, asi que
-# siguen usando la lista global de manual_review (#57 abierto).
+# Es la UNICA tabla de aplicabilidad: la consultan el despacho de checks, el
+# lookup de validadores y los recordatorios de la entrega, los tres desde el
+# mismo predicado (#57). Sin esta tabla, una regla se despacha en TODAS las
+# plataformas del contrato y una plataforma que no declaro el requisito paga
+# una firma que nadie pidio.
+#
+# Se indexa por el id CANONICO a proposito: `rule_applies` canonicaliza antes
+# de consultar, asi que un alias (`attribution.present`, `link_rules.link_in_bio`)
+# hereda el predicado de su canonico en lugar de quedarse sin predicado.
 _RULE_APPLICABILITY: dict[str, Callable[[PlatformRules], bool]] = {
     "audio.present": lambda rules: rules.audio_rule is not AudioRule.ANY,
     "audio.own_clip": lambda rules: rules.audio_rule is AudioRule.OWN_CLIP,
     "audio.no_trending": lambda rules: rules.audio_rule is AudioRule.NO_TRENDING,
     "audio.official_track": lambda rules: rules.audio_rule is AudioRule.OFFICIAL_REQUIRED,
+    # `attribution.type=none` y `link_in_bio=false` significan que la plataforma
+    # NO exige nada. Tratarlos como si exigieran haria que una regla declarada
+    # para una plataforma bloqueara a las demas (#63).
+    "attribution.required": lambda rules: rules.attribution.type is not AttributionType.NONE,
+    "link.in_bio": lambda rules: rules.link_rules.link_in_bio,
 }
 
 
@@ -40,9 +50,11 @@ def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     Los ``rule_id`` de ``contract.rules`` son globales: una sola declaracion
     cubre todas las plataformas del contrato. Su contenido, en cambio, es por
     plataforma, asi que la misma regla puede tener requisitos en una plataforma
-    y en otra no. Este predicado es el unico lugar del motor donde se decide eso,
-    y lo consultan el despacho de checks y el lookup de validadores. El
-    exportador no lo consulta: sus recordatorios son planos por informe (#57).
+    y en otra no. Este predicado es el unico lugar del codigo donde se decide eso
+    (#57), y lo consultan el despacho de checks, el lookup de validadores y los
+    recordatorios de la entrega. Que los tres lo consulten es lo que evita que
+    el motor bloquee una plataforma que no declaro la regla mientras el
+    exportador, con la misma regla, se la recuerda al operador (#63).
 
     Ojo con la distincion que separa las dos situaciones:
 
@@ -66,8 +78,14 @@ def rule_applies(rule_id: str, rules: PlatformRules) -> bool:
     borraria la evidencia de los checks que si deben constancia. Solo se omite
     lo que tiene un predicado declarado aqui.
 
+    Las reglas de atribucion y link son el caso de #63: `attribution.type=none`
+    y `link_in_bio=false` no son "requisitos vacios" sino requisitos INEXISTENTES,
+    y por eso llevan predicado. Una plataforma que no los declara no tiene nada
+    que revisar, ni que firmar, ni que recordar.
+
     Args:
-        rule_id: Identificador de la regla declarada en el contrato.
+        rule_id: Identificador de la regla declarada en el contrato. Puede ser
+            un alias; se canonicaliza antes de consultar el predicado.
         rules: Reglas de la plataforma de la pieza, ya resueltas.
 
     Returns:
