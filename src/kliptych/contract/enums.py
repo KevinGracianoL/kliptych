@@ -62,11 +62,11 @@ class Aspect(StrEnum):
     codificador respeta y que ningun check podria comparar con exactitud; un
     enum hace que el conjunto soportado sea explicito y que un aspecto no
     soportado sea un error de construccion y no un render silenciosamente
-    equivocado. Cualquier otra relacion (1:1, 4:5) se anade aqui de forma
-    explicita cuando haga falta.
+    equivocado. Cualquier otra relacion se anade aqui de forma explicita, con su
+    entrada en `_ASPECT_DIMENSIONS`, cuando haga falta.
 
     La razon la expone cada miembro para que ningun consumidor la vuelva a
-    escribir: el unico lugar que conoce el 9:16 y el 16:9 es este enum.
+    escribir: el unico lugar que conoce las razones soportadas es este enum.
 
     Las dimensiones son ENTERAS y se guardan como tal. La razon derivada sigue
     siendo un float, pero la pertenencia y la validacion de lienzo se hacen con

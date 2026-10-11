@@ -322,11 +322,13 @@ def test_c1_el_lienzo_se_valida_contra_su_aspecto_declarado() -> None:
 
 
 def test_c1b_el_lienzo_tiene_techo() -> None:
-    """El cociente del aspecto no puede reventar con un entero gigante.
+    """Un entero gigante se rechaza por el campo, no por un crash del validador.
 
-    `width / height` sobre enteros sin cota lanza `OverflowError`, que pydantic
-    no envuelve: un documento no confiable alcanzaba un crash sin `ValidationError`.
-    Con el techo, el mismo documento se rechaza como lo que es.
+    El techo existia porque el cociente `width / height` lanzaba `OverflowError`
+    sobre enteros sin cota, y pydantic no envolvia ese crash. Desde #80 la
+    validacion multiplica en lugar de dividir, asi que el `OverflowError` ya no
+    aplica: el techo sigue rechazando el documento absurdo, ahora por la propia
+    restriccion de campo.
     """
     with pytest.raises(ValidationError, match="less than or equal to 65536"):
         _ = SplitScreenConfig.model_validate(_split(width=10**400, height=2))
@@ -358,10 +360,11 @@ def test_c1f_no_hay_tolerancia_de_coma_flotante_en_el_validador() -> None:
     """La exactitud es estructural: el validador no compara cocientes.
 
     Con `_MAX_CANVAS_PX` en 65536 la minima desviacion posible del cociente
-    `width / height` ronda los 5e-7, muy por encima de la eps de 1e-9 que habia:
-    ningun documento dentro del techo colaba por ella. Pero la eps seguia siendo
-    una comparacion de floats esperando a que alguien subiera el techo, y el
-    issue #80 pide eliminarla, no solo neutralizarla.
+    `width / height` es 1/(16*65529) = 9.5378e-07 (alcanzada en 36860x65529),
+    casi 1000 veces por encima de la eps de 1e-9 que habia: ningun documento
+    dentro del techo colaba por ella. Pero la eps seguia siendo una comparacion
+    de floats esperando a que alguien subiera el techo, y el issue #80 pide
+    eliminarla, no solo neutralizarla.
 
     Este test es el gate: si alguien reintroduce `_SPLIT_ASPECT_EPS`, un
     `abs(...) > ...` o un `.ratio` dentro del validador, falla AQUI.
