@@ -241,12 +241,12 @@ class Watermark(ContractBase):
 WatermarkConfig = Watermark
 
 
-_SPLIT_ASPECT_EPS = 1e-9
 _SPLIT_EVEN_PX = 2
 _SPLIT_MIN_PANEL_PX = 2
-# Techo del lienzo. Ademas de que ningun encoder llega aqui, acota el cociente
-# `width / height`: con enteros arbitrariamente grandes la division launcha
-# `OverflowError`, que pydantic no envuelve, en vez de un `ValidationError`.
+# Techo del lienzo. Ademas de que ningun encoder llega aqui, acota el producto
+# `width * aspect.denominator`: con enteros arbitrariamente grandes la
+# multiplicacion no desborda en Python, pero un documento absurdo sigue siendo
+# absurdo y esto lo rechaza antes de que llegue a un validador de pertenencia.
 _MAX_CANVAS_PX = 65_536
 
 
@@ -305,8 +305,10 @@ class SplitScreenConfig(ContractBase):
         if self.width % _SPLIT_EVEN_PX != 0 or self.height % _SPLIT_EVEN_PX != 0:
             msg = f"el lienzo split_screen exige dimensiones pares, no {self.width}x{self.height}"
             raise ValueError(msg)
-        declarado = self.aspect.ratio
-        if abs(self.width / self.height - declarado) > _SPLIT_ASPECT_EPS:
+        # Multiplicacion cruzada en ENTEROS, no cociente con tolerancia. El
+        # cociente `width / height` es inexacto en coma flotante, y una eps fija
+        # deja pasar lienzos que difieren del aspecto declarado por un pixel.
+        if self.width * self.aspect.denominator != self.height * self.aspect.numerator:
             msg = (
                 f"el lienzo split_screen exige el aspecto declarado "
                 f"{self.aspect.value}, no {self.width}x{self.height}"

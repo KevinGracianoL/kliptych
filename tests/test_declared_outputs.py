@@ -17,6 +17,9 @@ siguientes existen. Lo que no se permite es que las piezas se contradigan entre
 si, que es lo que estos tests comprueban.
 """
 
+import inspect
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -56,9 +59,11 @@ def _split(**overrides: object) -> dict[str, object]:
 
 def test_a1_el_enum_expone_solo_los_formatos_soportados() -> None:
     """El conjunto de aspectos es cerrado y explicito."""
-    assert [aspect.value for aspect in Aspect] == ["9:16", "16:9"]
+    assert [aspect.value for aspect in Aspect] == ["9:16", "16:9", "1:1", "4:5"]
     assert Aspect("9:16") is Aspect.VERTICAL
     assert Aspect("16:9") is Aspect.HORIZONTAL
+    assert Aspect("1:1") is Aspect.SQUARE
+    assert Aspect("4:5") is Aspect.PORTRAIT_4_5
 
 
 @pytest.mark.parametrize("aspect", list(Aspect))
@@ -75,18 +80,30 @@ def test_a2_todo_aspecto_expone_su_razon(aspect: Aspect) -> None:
 
 
 def test_a2b_las_razones_conocidas_son_las_declaradas() -> None:
-    """El enum no crece en silencio."""
+    """El enum no crece en silencio, y la razon sale de enteros exactos."""
+    assert Aspect.VERTICAL.numerator == 9
+    assert Aspect.VERTICAL.denominator == 16
     assert Aspect.VERTICAL.ratio == pytest.approx(9 / 16)
+
+    assert Aspect.HORIZONTAL.numerator == 16
+    assert Aspect.HORIZONTAL.denominator == 9
     assert Aspect.HORIZONTAL.ratio == pytest.approx(16 / 9)
 
+    assert Aspect.SQUARE.numerator == 1
+    assert Aspect.SQUARE.denominator == 1
+    assert Aspect.SQUARE.ratio == pytest.approx(1.0)
 
-@pytest.mark.parametrize("invalido", ["4:5", "9:16 ", "1:1", ""])
+    assert Aspect.PORTRAIT_4_5.numerator == 4
+    assert Aspect.PORTRAIT_4_5.denominator == 5
+    assert Aspect.PORTRAIT_4_5.ratio == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("invalido", ["2:3", "16:10", "9:16 ", ""])
 def test_a3_un_aspecto_fuera_del_conjunto_no_construye(invalido: str) -> None:
     """Un string raro es un error de construccion, no un render raro.
 
-    El conjunto es cerrado a proposito: 4:5 y 1:1 son relaciones que ningun
-    codificador respeta aqui, asi que admitirlas seria aceptar algo que el
-    render no sabe cumplir.
+    El conjunto es cerrado a proposito: 2:3 y 16:10 no estan declarados, asi que
+    admitirlos seria aceptar algo que el render no sabe cumplir.
     """
     with pytest.raises(ValueError, match="not a valid Aspect"):
         _ = Aspect(invalido)
@@ -313,6 +330,70 @@ def test_c1b_el_lienzo_tiene_techo() -> None:
     """
     with pytest.raises(ValidationError, match="less than or equal to 65536"):
         _ = SplitScreenConfig.model_validate(_split(width=10**400, height=2))
+
+
+def test_c1c_cuadrado_1_1_valida_contra_su_lienzo() -> None:
+    """1:1 con un lienzo cuadrado pasa, y uno vertical no."""
+    square = SplitScreenConfig.model_validate(_split(aspect="1:1", width=1080, height=1080))
+    assert square.aspect is Aspect.SQUARE
+    assert (square.width, square.height) == (1080, 1080)
+
+    with pytest.raises(ValidationError) as excinfo:
+        _ = SplitScreenConfig.model_validate(_split(aspect="1:1", width=1080, height=1920))
+    assert "1:1" in str(excinfo.value)
+
+
+def test_c1d_retrato_4_5_valida_contra_su_lienzo() -> None:
+    """4:5 con un lienzo 864x1080 pasa, y uno cuadrado no."""
+    portrait = SplitScreenConfig.model_validate(_split(aspect="4:5", width=864, height=1080))
+    assert portrait.aspect is Aspect.PORTRAIT_4_5
+    assert (portrait.width, portrait.height) == (864, 1080)
+
+    with pytest.raises(ValidationError) as excinfo:
+        _ = SplitScreenConfig.model_validate(_split(aspect="4:5", width=1080, height=1080))
+    assert "4:5" in str(excinfo.value)
+
+
+def test_c1f_no_hay_tolerancia_de_coma_flotante_en_el_validador() -> None:
+    """La exactitud es estructural: el validador no compara cocientes.
+
+    Con `_MAX_CANVAS_PX` en 65536 la minima desviacion posible del cociente
+    `width / height` ronda los 5e-7, muy por encima de la eps de 1e-9 que habia:
+    ningun documento dentro del techo colaba por ella. Pero la eps seguia siendo
+    una comparacion de floats esperando a que alguien subiera el techo, y el
+    issue #80 pide eliminarla, no solo neutralizarla.
+
+    Este test es el gate: si alguien reintroduce `_SPLIT_ASPECT_EPS`, un
+    `abs(...) > ...` o un `.ratio` dentro del validador, falla AQUI.
+    """
+    source_file = Path(inspect.getfile(SplitScreenConfig))
+    source = source_file.read_text(encoding="utf-8")
+    validator_start = source.index("def _canvas_and_panels_are_viable")
+    validator_end = source.index("\n    def ", validator_start + 10)
+    validator = source[validator_start:validator_end]
+
+    assert "_SPLIT_ASPECT_EPS" not in validator
+    assert ".ratio" not in validator, "el validador sigue comparando el cociente flotante"
+    assert "abs(" not in validator, "el validador sigue usando una comparacion con eps"
+    assert "* self.aspect.denominator != self.height * self.aspect.numerator" in validator
+
+
+def test_c1e_la_validacion_es_cruzamiento_entero_exacto() -> None:
+    """La pertenencia del lienzo se decide con enteros, sin tolerancia.
+
+    El cociente `width / height` es inexacto en coma flotante, asi que comparar
+    con una eps deja la exactitud en manos de un numero magico. La multiplicacion
+    cruzada no: 1098x1952 satisface 9:16 exacto y 1100x1952 no, y ninguno de los
+    dos depende de una tolerancia.
+    """
+    # 9:16 exacto: 1098*16 == 1952*9 == 17568.
+    exacto = SplitScreenConfig.model_validate(_split(aspect="9:16", width=1098, height=1952))
+    assert exacto.aspect is Aspect.VERTICAL
+
+    # Un lienzo que no satisface la igualdad se rechaza, sea cual sea la eps.
+    with pytest.raises(ValidationError) as excinfo:
+        _ = SplitScreenConfig.model_validate(_split(aspect="9:16", width=1100, height=1952))
+    assert "9:16" in str(excinfo.value)
 
 
 def test_c2_el_lienzo_vertical_por_defecto_seguida_siendo_valido() -> None:

@@ -67,10 +67,36 @@ class Aspect(StrEnum):
 
     La razon la expone cada miembro para que ningun consumidor la vuelva a
     escribir: el unico lugar que conoce el 9:16 y el 16:9 es este enum.
+
+    Las dimensiones son ENTERAS y se guardan como tal. La razon derivada sigue
+    siendo un float, pero la pertenencia y la validacion de lienzo se hacen con
+    `numerator`/`denominator` por multiplicacion cruzada, que es exacta: un
+    cociente de enteros no lo es, y una tolerancia fija sobre el deja pasar
+    lienzos que difieren del declarado por un pixel.
     """
 
     VERTICAL = "9:16"
     HORIZONTAL = "16:9"
+    SQUARE = "1:1"
+    PORTRAIT_4_5 = "4:5"
+
+    @property
+    def numerator(self) -> int:
+        """El ancho de la razon, como entero exacto.
+
+        Returns:
+            El numerador de la relacion ancho:alto.
+        """
+        return _ASPECT_DIMENSIONS[self][0]
+
+    @property
+    def denominator(self) -> int:
+        """El alto de la razon, como entero exacto.
+
+        Returns:
+            El denominador de la relacion ancho:alto.
+        """
+        return _ASPECT_DIMENSIONS[self][1]
 
     @property
     def ratio(self) -> float:
@@ -83,12 +109,14 @@ class Aspect(StrEnum):
         Returns:
             La razon como float.
         """
-        return _ASPECT_RATIOS[self]
+        return self.numerator / self.denominator
 
 
-_ASPECT_RATIOS: dict["Aspect", float] = {
-    Aspect.VERTICAL: 9.0 / 16.0,
-    Aspect.HORIZONTAL: 16.0 / 9.0,
+_ASPECT_DIMENSIONS: dict["Aspect", tuple[int, int]] = {
+    Aspect.VERTICAL: (9, 16),
+    Aspect.HORIZONTAL: (16, 9),
+    Aspect.SQUARE: (1, 1),
+    Aspect.PORTRAIT_4_5: (4, 5),
 }
 
 

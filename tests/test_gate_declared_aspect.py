@@ -207,13 +207,16 @@ def test_b2_ninguna_salida_satisfecha_falla(tmp_path: Path) -> None:
     Este es el fallo que la pertenencia existe para cazar. Sin ella, un contrato
     que declara (9:16, 16:9) aceptaria cualquier artefacto, porque siempre habria
     un formato declarado que "podria" ser. Un 1x1 no es ninguno de los dos.
+
+    Desde #89 el 1:1 es aspecto declarable, asi que la medicion ya tiene nombre
+    para el y lo dice: antes se reducia a "1000:1000", que no nombraba nada.
     """
     outcome = check_declared_outputs(
         _context(tmp_path, outputs=_DUAL, split_aspect=None, width=1000, height=1000)
     )
 
     assert outcome.status is CheckStatus.FAIL
-    assert outcome.evidence["measured_aspect"] == "1000:1000"
+    assert outcome.evidence["measured_aspect"] == "1:1"
     assert outcome.evidence["declared_aspects"] == ["9:16", "16:9"]
 
 
@@ -454,6 +457,10 @@ def test_d3_el_gate_no_elige_por_el_contrato(tmp_path: Path) -> None:
         (Aspect.VERTICAL, (1920, 1080), False),
         (Aspect.HORIZONTAL, (1920, 1080), True),
         (Aspect.HORIZONTAL, (1080, 1920), False),
+        (Aspect.SQUARE, (1080, 1080), True),
+        (Aspect.SQUARE, (1080, 1920), False),
+        (Aspect.PORTRAIT_4_5, (864, 1080), True),
+        (Aspect.PORTRAIT_4_5, (1080, 1080), False),
     ],
 )
 def test_e1_matriz_declarado_contra_medido(
