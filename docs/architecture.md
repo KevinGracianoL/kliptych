@@ -21,7 +21,7 @@ Batch export is all-or-nothing atomic (staging directory + atomic rename in
 shipment.
 
 The validator catalog is mechanical and closed (`KNOWN_VALIDATOR_RULES`,
-19 rule ids). Declared rules without a registered validator never pass
+22 rule ids). Declared rules without a registered validator never pass
 silently: they resolve to `MANUAL_REVIEW` when the contract classified them
 so or cited them, otherwise `UNSUPPORTED` - which blocks the piece at every rule
 strength. Requirements with no mechanical validator at all are

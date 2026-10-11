@@ -308,6 +308,70 @@ def test_pending_review_exported_when_approved(tmp_path: Path) -> None:
     assert approved.exported[0].gate_status is GateStatus.PENDING_REVIEW
 
 
+def test_unvalidated_rule_is_not_signable_by_a_human(tmp_path: Path) -> None:
+    """#85: una regla sin validador no se firma; no hay nadie que la inspeccionara.
+
+    ``link.in_bio`` se declara en revision manual y no tiene validador en
+    `DEFAULT_VALIDATORS`, asi que el motor emite MANUAL_REVIEW con el motivo
+    "no hay validador mecanico registrado para esta regla". Aprobar eso a mano
+    declararia que una persona miró algo que, por construccion, nadie miró.
+    """
+    contract = make_contract(manual_review=("link.in_bio",))
+    report = _export(tmp_path, contract=contract, approve_manual_review=True)
+
+    assert report.status is ExportStatus.BLOCKED
+    assert report.exported == ()
+    assert len(report.rejected) == 1
+    assert report.rejected[0].gate_status is GateStatus.PENDING_REVIEW
+
+
+def test_unmapped_citations_stay_signable_because_a_human_can_read_them(
+    tmp_path: Path,
+) -> None:
+    """La contrapuesta de #85: `rules.unmapped` SI se firma, y por que.
+
+    Una cita sin mapear trae el TEXTO del brief (`citations`). Un humano puede
+    leerlo y juzgarlo, y eso es exactamente lo que una firma declara haber
+    hecho, asi que bloquearla haria inexportable cualquier contrato con una
+    sola cita sin mapear. No es el caso opposite de `link.in_bio`: alli hay una
+    regla y NADIE sabe que mirar; aqui hay material para mirar.
+    """
+    contract = make_contract(unmapped=(("link.in_bio", "pon el link en la bio"),))
+    report = _export(tmp_path, contract=contract, approve_manual_review=True)
+
+    assert report.status is ExportStatus.EXPORTED
+    assert report.manually_approved_rules == ("audio.own_clip", "rules.unmapped")
+
+
+def test_a_cited_unmapped_rule_naming_a_known_rule_is_rejected_at_build() -> None:
+    """La otra mitad de la distincion: la colision se PARA en el contrato.
+
+    `audio.own_clip` esta en el catalogo de validadores, asi que declararla en
+    `unmapped` es una contradiccion y el contrato no llega a construirse. Sin
+    esa comprobacion la regla se despacharia dos veces: una por el validador y
+    otra dentro de `rules.unmapped`.
+    """
+    with pytest.raises(ValidationError, match="colisiona con un validador"):
+        _ = make_contract(unmapped=(("audio.own_clip", "usa tu audio"),))
+
+
+def test_unvalidated_rule_blocks_even_beside_a_signable_one(tmp_path: Path) -> None:
+    """Un MANUAL_REVIEW firmable no lava el que no lo es: basta uno para tapar."""
+    signed_off = CheckOutcome(status=CheckStatus.MANUAL_REVIEW, evidence={"reason": "visual"})
+    gate = Gate(
+        FakeProbe(info=make_media()),
+        validators={**DEFAULT_VALIDATORS, "watermark.full_video": lambda _ctx: signed_off},
+    )
+    contract = make_contract(
+        hard=[*ALL_HARD_RULES, "watermark.full_video"],
+        manual_review=("link.in_bio",),
+    )
+    report = _export(tmp_path, contract=contract, gate=gate, approve_manual_review=True)
+
+    assert report.status is ExportStatus.BLOCKED
+    assert report.exported == ()
+
+
 def test_partial_delivery_exports_only_passing_pieces(tmp_path: Path) -> None:
     good = make_piece(_artifact(tmp_path, "good.mp4"), caption="mira @marca #marca")
     bad = make_piece(_artifact(tmp_path, "bad.mp4"), caption="sin mención #marca").model_copy(

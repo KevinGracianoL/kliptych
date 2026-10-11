@@ -18,6 +18,7 @@ from kliptych.gate.checks import (
 from kliptych.gate.engine import Gate, GateError
 from kliptych.gate.hook import check_hook_keyword
 from kliptych.gate.models import (
+    UNVALIDATED_RULE_REASON,
     CheckResult,
     CheckStatus,
     GateResult,
@@ -31,6 +32,7 @@ from kliptych.gate.watermark import check_watermark_full_video, check_watermark_
 
 __all__ = [
     "DEFAULT_VALIDATORS",
+    "UNVALIDATED_RULE_REASON",
     "BrandSafetyAssessment",
     "BrandSafetyError",
     "CheckOutcome",

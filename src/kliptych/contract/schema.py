@@ -626,6 +626,15 @@ KNOWN_VALIDATOR_RULES: frozenset[str] = frozenset(
         "audio.present",
         "audio.policy",
         "audio.silence",
+        # Estas tres las decide una persona, asi que su validador no mide el
+        # audio: confirma que la regla corresponde a la plataforma y deja
+        # constancia de que la revision es manual (#85). Figuran aqui por la
+        # misma razon que cualquier otra: son rule_ids con validador registrado,
+        # y el catalogo tiene que ser EXACTO, o un contrato podria declararlas
+        # en `unmapped` sin que la colision se detecte al construir.
+        "audio.no_trending",
+        "audio.official_track",
+        "audio.own_clip",
         "brand.safety",
         "caption.first_line",
         "caption.forbidden",

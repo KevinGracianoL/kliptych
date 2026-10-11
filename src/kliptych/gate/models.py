@@ -12,6 +12,14 @@ from kliptych.assets import AssetRegistry
 from kliptych.contract import Contract, Platform, PlatformRules
 from kliptych.encoding import RenderConfig
 
+# Motivo con el que el motor marca una regla sin validador registrado (#85).
+# Vive aqui, y no escrito en el motor o en el exportador, porque es un dato
+# COMPARTIDO por dos capas: lo produce `engine._run_rule` y lo consume
+# `exporter._is_signable` para negarse a firmarlo. Duplicar el literal en los
+# dos sitios seria una politica en dos copias, que es como estas reglas se
+# desincronizan sin que nadie se entere.
+UNVALIDATED_RULE_REASON = "no hay validador mecánico registrado para esta regla"
+
 
 class _GateBase(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)

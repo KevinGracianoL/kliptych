@@ -25,7 +25,7 @@ is a deliberate hardening **beyond** the brief: `docs/brief_v2.md` §5.1 scopes
 its "jamás PASS" clause to `hard` rules, and this code no longer stops there.
 
 The validator catalog is mechanical and closed (`KNOWN_VALIDATOR_RULES`,
-19 rule ids). Declared rules without a registered validator never pass
+22 rule ids). Declared rules without a registered validator never pass
 silently: they resolve to `MANUAL_REVIEW` when the contract classified them
 so or cited them, otherwise `UNSUPPORTED` — which blocks the piece at every rule
 strength. Requirements with no mechanical validator at all are

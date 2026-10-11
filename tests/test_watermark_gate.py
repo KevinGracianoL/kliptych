@@ -275,6 +275,12 @@ def _concat_all(parts: Sequence[Path], destination: Path) -> Path:
 
 
 def test_missing_png_is_fail_closed(tmp_path: Path) -> None:
+    """Falta la PLANTILLA, no el video: la campaña esta mal montada, y eso es FAIL.
+
+    No se toca en #83: `UNSUPPORTED` es para "la sonda no pudo responder", y aqui
+    la sonda responde bien y la respuesta es que el recurso que el contrato exige
+    no existe. Confundirlo dejaria una campaña rota disfrazada de "no verificable".
+    """
     video = tmp_path / "video.mp4"
     _ = video.write_bytes(b"video")
     contract = _contract(full_video=True)
@@ -290,16 +296,71 @@ def test_missing_png_is_fail_closed(tmp_path: Path) -> None:
     assert check_watermark_present(context).status is CheckStatus.FAIL
 
 
-def test_missing_video_is_fail_closed(tmp_path: Path) -> None:
+def test_missing_video_is_unsupported_not_fail(tmp_path: Path) -> None:
+    """#83: sin artefacto no se puede correlacionar; no se afirma que falte el logo."""
     context = _context(tmp_path, tmp_path / "ausente.mp4", full_video=True)
-    assert check_watermark_full_video(context).status is CheckStatus.FAIL
+    for check in (check_watermark_full_video, check_watermark_present):
+        outcome = check(context)
+        assert outcome.status is CheckStatus.UNSUPPORTED
+        assert "no existe" in str(outcome.evidence["reason"])
+
+
+def test_unmeasurable_duration_is_unsupported_not_fail(tmp_path: Path) -> None:
+    """Sin duracion no se reparten las muestras, y no hay nada que concluir."""
+    video = tmp_path / "video.mp4"
+    _ = video.write_bytes(b"video")
+    context = _context(tmp_path, video, full_video=True, duration_s=0.0)
+    for check in (check_watermark_full_video, check_watermark_present):
+        outcome = check(context)
+        assert outcome.status is CheckStatus.UNSUPPORTED
+        assert "duración" in str(outcome.evidence["reason"])
+
+
+def test_absent_media_info_is_unsupported_not_fail(tmp_path: Path) -> None:
+    """`media is None` es "ffprobe no pudo leerlo", que no es "el logo no esta"."""
+    video = tmp_path / "video.mp4"
+    _ = video.write_bytes(b"video")
+    base = _context(tmp_path, video, full_video=True)
+    context = GateContext(
+        contract=base.contract,
+        rules=base.rules,
+        piece=base.piece,
+        artifact_sha256=base.artifact_sha256,
+        media=None,
+        assets=base.assets,
+    )
+    for check in (check_watermark_full_video, check_watermark_present):
+        assert check(context).status is CheckStatus.UNSUPPORTED
 
 
 def test_unreadable_video_is_fail_closed(tmp_path: Path) -> None:
+    """El archivo existe pero no se decodifica: WatermarkError sigue siendo FAIL.
+
+    Aqui la sonda si entro y la evaluacion fallo sobre un artefacto concreto, no
+    sobre una Herramienta ausente. #83 solo separa "no se pudo" de "no cumplio",
+    y este caso no es el primero.
+    """
     video = tmp_path / "video.mp4"
     _ = video.write_bytes(b"video")
     context = _context(tmp_path, video, full_video=True)
     assert check_watermark_full_video(context).status is CheckStatus.FAIL
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_NEEDS_TOOLS, reason="ffmpeg/ffprobe no disponibles")
+def test_measured_absent_watermark_is_still_fail(tmp_path: Path) -> None:
+    """La contrapuesta del par: logo ausente de verdad sigue siendo FAIL.
+
+    Un video valido que se decodifica, con duracion y plantilla, en el que la
+    correlacion no encuentra nada: la sonda RESPONDIO. Cambiar esto a
+    UNSUPPORTED dejaria el check sin poder reprobar el caso que existe para
+    cazar.
+    """
+    clip = _generate_clip(tmp_path / "clip.mp4")
+    context = _context(tmp_path, clip, full_video=True, duration_s=2.0)
+    outcome = check_watermark_full_video(context)
+    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is not CheckStatus.UNSUPPORTED
 
 
 @pytest.mark.integration

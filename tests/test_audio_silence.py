@@ -2,8 +2,15 @@
 
 El gate no confía en que se pasara `-af volume=0` a ffmpeg: mide el
 `max_volume` real del MP4 final cuando
-`audio_policy=internal_official_sound`. Fail-closed: sin ffmpeg, sin archivo
-o sin medición, el resultado es FAIL (REJECTED).
+`audio_policy=internal_official_sound`.
+
+#83 separa las dos preguntas que este check respondia con un solo estado.
+``FAIL`` significa "el probe respondió y el contenido no cumple": hay audio
+audible por encima de -80 dB, o el conteo de pistas dio 0 o 2. ``UNSUPPORTED``
+significa "el probe no pudo responder": no hay ffmpeg, falta ffprobe, el
+artefacto no existe, volumedetect falló o no publicó un ``max_volume`` legible.
+Devolver ``FAIL`` en lo segundo le decía al operador que su contenido estaba
+mal cuando lo que se había roto era la medición.
 """
 
 import shutil
@@ -62,6 +69,7 @@ def _mock_ffmpeg(
     which: str | None = "ffmpeg",
     ffprobe_stdout: str = "0\n",
     ffprobe_returncode: int = 0,
+    missing: str = "",
 ) -> list[list[str]]:
     captured: list[list[str]] = []
 
@@ -77,8 +85,8 @@ def _mock_ffmpeg(
             args=argv, returncode=returncode, stdout="", stderr=stderr
         )
 
-    def fake_which(_: str) -> str | None:
-        return which
+    def fake_which(name: str) -> str | None:
+        return None if name == missing else which
 
     monkeypatch.setattr("kliptych.gate.checks.subprocess.run", fake_run)
     monkeypatch.setattr("kliptych.gate.checks.shutil.which", fake_which)
@@ -150,13 +158,19 @@ def test_non_internal_policy_passes_without_ffmpeg(
         assert outcome.status is CheckStatus.PASS
 
 
-def test_missing_ffmpeg_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_ffmpeg_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#83: sin ffmpeg el probe NO pudo medir; el contenido no esta en juicio."""
     _ = _mock_ffmpeg(monkeypatch, which=None)
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
-    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "ffmpeg" in str(outcome.evidence["reason"])
 
 
-def test_missing_artifact_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_artifact_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _ = _mock_ffmpeg(monkeypatch)
     context = _context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND)
     missing = context.piece.model_copy(update={"artifact_path": tmp_path / "ausente.mp4"})
@@ -168,27 +182,44 @@ def test_missing_artifact_is_fail_closed(tmp_path: Path, monkeypatch: pytest.Mon
         media=None,
         assets=context.assets,
     )
-    assert check_audio_silence(context).status is CheckStatus.FAIL
+    assert check_audio_silence(context).status is CheckStatus.UNSUPPORTED
 
 
-def test_ffmpeg_error_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffmpeg_error_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El binario sale con codigo 1: no hay medicion, luego no hay veredicto."""
     _ = _mock_ffmpeg(monkeypatch, stderr="moov atom not found", returncode=1)
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
-    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
 
 
-def test_unparseable_output_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unparseable_output_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``max_volume: n/a`` no es un volumen audible: es un volumen no leido."""
     _ = _mock_ffmpeg(monkeypatch, stderr="max_volume: n/a")
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
-    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
+
+
+def test_missing_max_volume_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El binario sale limpio pero sin linea de medicion: tampoco hay veredicto."""
+    _ = _mock_ffmpeg(monkeypatch, stderr="Stream mapping matches no streams")
+    outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
+    assert outcome.status is CheckStatus.UNSUPPORTED
 
 
 def test_two_audio_tracks_rejected_without_measuring(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """El conteo dio 2: aqui SI se midio, y la respuesta es FAIL."""
     captured = _mock_ffmpeg(monkeypatch, ffprobe_stdout="0\n1\n")
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
     assert outcome.status is CheckStatus.FAIL
+    assert outcome.evidence.get("audio_tracks") == 2
     assert all("volumedetect" not in argv for argv in captured)
     probe_argv = next(argv for argv in captured if "-select_streams" in argv)
     assert "stream=index" in probe_argv
@@ -199,6 +230,7 @@ def test_zero_audio_tracks_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     captured = _mock_ffmpeg(monkeypatch, ffprobe_stdout="")
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
     assert outcome.status is CheckStatus.FAIL
+    assert outcome.evidence.get("audio_tracks") == 0
     assert all("volumedetect" not in argv for argv in captured)
 
 
@@ -213,14 +245,19 @@ def test_single_audio_track_is_measured_with_explicit_map(
     assert "0:a:0" in measure_argv
 
 
-def test_ffprobe_failure_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffprobe_failure_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El conteo con ffprobe salio con 1: las pistas no se pudieron contar."""
     captured = _mock_ffmpeg(monkeypatch, ffprobe_returncode=1, ffprobe_stdout="")
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
-    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
     assert all("volumedetect" not in argv for argv in captured)
 
 
-def test_ffprobe_crash_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffprobe_crash_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def crashing_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         assert isinstance(argv, list)
@@ -233,10 +270,12 @@ def test_ffprobe_crash_is_fail_closed(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("kliptych.gate.checks.subprocess.run", crashing_run)
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
-    assert outcome.status is CheckStatus.FAIL
+    assert outcome.status is CheckStatus.UNSUPPORTED
 
 
-def test_ffmpeg_crash_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffmpeg_crash_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def crashing_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = (argv, kwargs)
         msg = "ffmpeg"
@@ -244,7 +283,75 @@ def test_ffmpeg_crash_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("kliptych.gate.checks.subprocess.run", crashing_run)
     outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
+    assert outcome.status is CheckStatus.UNSUPPORTED
+
+
+def test_missing_ffprobe_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin ffprobe no se pueden contar las pistas, y por tanto tampoco medir.
+
+    Rama distinta de la de ffmpeg ausente: aqui el binario de medir EXISTE, y
+    aun asi no hay veredicto, porque el paso previo no se pudo hacer. Sin este
+    test la guarda de ffprobe podia volverse `_fail` sin que nada lo notase.
+    """
+    captured = _mock_ffmpeg(monkeypatch, missing="ffprobe")
+    outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "ffprobe" in str(outcome.evidence["reason"])
+    assert all("volumedetect" not in argv for argv in captured)
+
+
+def test_ffmpeg_os_error_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un `OSError` al lanzar ffmpeg es infraestructura, no contenido."""
+
+    def denied_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        assert isinstance(argv, list)
+        if "-select_streams" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="0\n", stderr="")
+        raise PermissionError(13, "permiso denegado")
+
+    monkeypatch.setattr("kliptych.gate.checks.subprocess.run", denied_run)
+    outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "ejecutar ffmpeg" in str(outcome.evidence["reason"])
+
+
+def test_volumedetect_timeout_is_unsupported_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#83: volumedetect que expira no midio nada; no es audio audible."""
+
+    def timing_out_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        assert isinstance(argv, list)
+        if "-select_streams" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="0\n", stderr="")
+        raise subprocess.TimeoutExpired(cmd=list(argv), timeout=30)
+
+    monkeypatch.setattr("kliptych.gate.checks.subprocess.run", timing_out_run)
+    outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
+    assert outcome.status is CheckStatus.UNSUPPORTED
+    assert "timeout" in str(outcome.evidence["reason"])
+
+
+def test_measured_loud_audio_is_still_fail_not_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La contrapuesta del par: si se MIDIO y oia, sigue siendo FAIL.
+
+    Sin esto, cambiar la mitad de los FAIL a UNSUPPORTED dejaria al check
+    incapaz de reprobar un artefacto con audio, que es justo lo que existe para
+    cazar.
+    """
+    _ = _mock_ffmpeg(monkeypatch, stderr=_LOUD_STDERR)
+    outcome = check_audio_silence(_context(tmp_path, policy=AudioPolicy.INTERNAL_OFFICIAL_SOUND))
     assert outcome.status is CheckStatus.FAIL
+    assert outcome.evidence.get("max_volume_db") == "-20.0"
+    assert outcome.evidence.get("threshold_db") == pytest.approx(-80.0)
 
 
 def _silence_contract() -> Contract:
