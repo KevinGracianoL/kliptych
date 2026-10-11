@@ -117,6 +117,11 @@ class Layout(StrEnum):
 
     SINGLE = "single"
     SPLIT_SCREEN = "split_screen"
+    VERTICAL = "vertical"
+    HORIZONTAL = "horizontal"
+    DIVIDIDO = "dividido"
+    TRIO = "trio"
+    SPOTLIGHT = "spotlight"
 
 
 class CaptionCapitalization(StrEnum):

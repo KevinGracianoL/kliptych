@@ -15,6 +15,7 @@ from kliptych.contract import (
     Contract,
     ContractDraft,
     Format,
+    LayoutSpec,
     LyricConfig,
     Platform,
     SplitScreenConfig,
@@ -267,6 +268,7 @@ def make_contract(
     split_screen: dict[str, object] | SplitScreenConfig | None = None,
     outputs: Sequence[dict[str, object]] | None = None,
     caption_style: CaptionStyleConfig | None = None,
+    layout_spec: LayoutSpec | None = None,
     schema_version: str = "1.1",
 ) -> Contract:
     plan = _resolve_hard_rules(hard, audio_rule)
@@ -385,6 +387,11 @@ def make_contract(
             **(
                 {"caption_style": caption_style.model_dump(mode="json")}
                 if caption_style is not None
+                else {}
+            ),
+            **(
+                {"layout_spec": layout_spec.model_dump(mode="json")}
+                if layout_spec is not None
                 else {}
             ),
         }

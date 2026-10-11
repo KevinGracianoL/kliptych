@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 
 from kliptych.assembler import AssembleError, FFmpegAssembler, RenderSpec
-from kliptych.contract.enums import Layout
+from kliptych.contract import Band, Layout, LayoutSpec
 from kliptych.degradations import recolectar
 from kliptych.encoding import RenderConfig
 from kliptych.gate.probe import FFprobeProbe
@@ -653,3 +653,38 @@ def test_nvenc_available_but_failing_degrades_and_records(
     assert "h264_nvenc" in calls[0]
     assert "h264_nvenc" not in calls[-1]
     assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)
+
+
+def test_layout_spec_multi_band_assembly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Multi-band assembly ejecuta vstack con setsar=1 y publica atómicamente."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(list(argv))
+        # ffmpeg escribe en el temporal hermano
+        _ = Path(argv[-1]).write_bytes(b"artefacto")
+        return _completed()
+
+    monkeypatch.setattr("kliptych.assembler.subprocess.run", run)
+    clip = _file(tmp_path, "clip.mp4")
+    destination = tmp_path / "out" / "piece.mp4"
+    spec = RenderSpec(
+        clip=clip,
+        destination=destination,
+        width=1080,
+        height=1920,
+        layout=Layout.DIVIDIDO,
+        layout_spec=LayoutSpec(layout=Layout.DIVIDIDO, bands=(Band(), Band())),
+    )
+
+    resultado = FFmpegAssembler().assemble(spec)
+    assert resultado == destination
+    assert destination.is_file()
+    ffmpeg_calls = [c for c in calls if c[0] == "ffmpeg"]
+    assert len(ffmpeg_calls) == 1
+    argv = ffmpeg_calls[0]
+    assert "-filter_complex" in argv
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "vstack=inputs=2" in graph
+    assert "setsar=1" in graph
