@@ -194,21 +194,29 @@ def test_a2_un_hueco_claramente_mayor_que_el_maximo_si_corta() -> None:
 def test_a3_el_borde_exactamente_igual_no_corta() -> None:
     """Un hueco cuyo doble es exactamente MAX_GAP_S no corta: el limite es estricto.
 
-    Este es el UNICO test que puede matar `>` -> `>=`:
+    Este es el UNICO test que puede matar `>` -> `>=`, y solo si el hueco que
+    construye es EXACTAMENTE el valor vigente de ``MAX_GAP_S``.
 
-        0.6 - 1e-9 = 0.599999999   > 0.6 falso, >= 0.6 falso   (iguales)
-        0.6 + 1e-9 = 0.600000001   > 0.6 cierto, >= 0.6 cierto (iguales)
-        1.0 - 0.4   = 0.6          > 0.6 falso, >= 0.6 CIERTO  (distinguen)
+    OJO con el historial, porque aqui hay un test que PASA y no prueba nada: la
+    version anterior de este test razonaba sobre un umbral de 0,6 s y construia
+    el borde restando ``1.0 - 0.4``. Cuando ``MAX_GAP_S`` se ajusto a 2,0 s, el
+    test se quedo midiendo un hueco de 0,6 s contra un umbral de 2,0 s: cierto
+    con `>` y cierto con `>=`, o sea muerto. La mutacion `>` -> `>=` se colaba
+    con la bateria en verde (#75).
 
-    Se construye restando 1.0 menos 0.4, que en IEEE754 da exactamente el doble
-    0.6. Se prueba en `_tramos` y no en la funcion publica porque los suelos duros
-    hacen inalcanzable este caso desde fuera: una busqueda en rejilla de 1e-1 a
-    1e-5 no encontro ningun par (fin, inicio) con fin >= 2.0 cuya diferencia sea
-    el doble 0.6. Eso es lo que se midio, no una prueba de inalcanzabilidad.
+    Asi que el borde se construye contra la CONSTANTE, no contra un literal:
+    ``1.0`` y ``3.0`` son exactos en IEEE754 y su diferencia es exactamente 2,0.
+    Si ``MAX_GAP_S`` vuelve a moverse, hay que volver a comprobar que el nuevo
+    valor es un diádico exacto; con un decimal como ``0.1`` la resta
+    ``(1.0 + 0.1) - 1.0`` da ``0.10000000000000009``, la asercion de abajo falla
+    a proposito y avisa de que el borde ya no se puede construir asi.
     """
-    assert pytest.approx(0.6, abs=0.0) == (1.0 - 0.4), "1.0 - 0.4 debe dar el doble 0.6"
-    assert (segmenter.MAX_GAP_S + 1e-9) >= segmenter.MAX_GAP_S
-    tramos = _tramos_de(fin_primero=0.4, inicio_segundo=1.0)
+    borde = (1.0 + segmenter.MAX_GAP_S) - 1.0
+    assert pytest.approx(segmenter.MAX_GAP_S, abs=0.0) == borde, (
+        "el borde tiene que caer en el doble exacto de MAX_GAP_S; si MAX_GAP_S deja "
+        "de ser un diádico exacto, hay que construir el borde de otra forma"
+    )
+    tramos = _tramos_de(fin_primero=1.0, inicio_segundo=1.0 + segmenter.MAX_GAP_S)
     assert len(tramos) == 1, tramos
 
 
