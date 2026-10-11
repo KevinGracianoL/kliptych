@@ -185,6 +185,32 @@ class PipelineStateManager:
         self.checkpoint.updated_at = datetime.now(UTC).isoformat()
         self.save()
 
+    def update_segment_coord(self, index: int, coord: tuple[float, float]) -> None:
+        """Registra y persiste la coordenada de UN segmento ya completado.
+
+        Existe porque ``set_segment_coords`` solo corre al final del bucle de
+        segmentos: si un segmento secundario falla, ese bucle aborta y el
+        checkpoint se queda con ``segment_coords`` vacío. En el resume
+        siguiente ``coords_match`` es falso para todos los segmentos y
+        ``_invalidate_segment_artifacts`` borra el trabajo ya terminado.
+
+        Persistir en el momento en que cada segmento completa hace que el
+        checkpoint refleje exactamente lo que ya está en disco.
+
+        Args:
+            index: Posición del segmento en la selección.
+            coord: Par ``(start_s, end_s)`` del segmento.
+        """
+        coords = list(self.checkpoint.segment_coords)
+        par = (float(coord[0]), float(coord[1]))
+        if 0 <= index < len(coords):
+            coords[index] = par
+        else:
+            coords.append(par)
+        self.checkpoint.segment_coords = tuple(coords)
+        self.checkpoint.updated_at = datetime.now(UTC).isoformat()
+        self.save()
+
     def set_source_content_hash(self, content_hash: str) -> None:
         """Asigna y persiste la firma de contenido del video fuente.
 

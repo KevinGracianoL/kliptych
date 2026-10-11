@@ -1648,3 +1648,112 @@ def test_un_render_sin_colector_sigue_fallando(tmp_path: Path) -> None:
         )
 
     assert degradaciones.como_tupla() == ("encoder pedido h264_nvenc, usado libx264",)
+
+
+def _dos_segmentos() -> SegmentSelection:
+    return SegmentSelection(
+        segments=(Segment(start_s=0.0, end_s=5.0), Segment(start_s=10.0, end_s=15.0)),
+        rationale="dos tramos",
+    )
+
+
+class _SelectorDeDosSegmentos:
+    """Selector doble que devuelve siempre los dos segmentos del issue."""
+
+    _counter: _CallCounter
+
+    def __init__(self, counter: _CallCounter) -> None:
+        self._counter = counter
+
+    def build_prompt(
+        self, transcript: object, moments: object, contract: object
+    ) -> dict[str, object]:
+        _ = (transcript, moments, contract)
+        self._counter.select_calls += 1
+        return {}
+
+    @staticmethod
+    def parse_response(raw: object) -> SegmentSelection:
+        _ = raw
+        return _dos_segmentos()
+
+
+def test_failure_in_secondary_segment_preserves_completed_segment_coords_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #94: el segmento 0 completado NO se re-renderiza tras un fallo en el 1.
+
+    El defecto: `set_segment_coords` solo corria al final del bucle, asi que un
+    fallo en un segmento secundario dejaba `segment_coords == ()`. En el resume
+    siguientes, `coords_match` era falso para TODOS los segmentos y
+    `_invalidate_segment_artifacts` borraba el trabajo ya hecho.
+    """
+    counter = _CallCounter()
+    config, deps = _setup_pipeline(monkeypatch, counter, tmp_path)
+
+    # El reframer falla en la SEGUNDA llamada (segmento 1), no en la primera.
+    fallos: list[bool] = []
+
+    def analyze(video: Path) -> ReframeResult:
+        _ = video
+        counter.reframe_calls += 1
+        if counter.reframe_calls >= 2 and not fallos:
+            fallos.append(True)
+            msg = "fallo intencional en el segmento secundario"
+            raise PipelineError(msg)
+        return _reframe_result()
+
+    reframer = _TrackedReframer(counter)
+    _ = monkeypatch.setattr(reframer, "analyze", analyze)
+    selector = _SelectorDeDosSegmentos(counter)
+
+    # --- Primera corrida (resume=False): falla en el segmento 1 ---
+    with pytest.raises(PipelineError):
+        _ = run_long_video(
+            _URL,
+            config=config,
+            model=deps.model,
+            detector=deps.detector,
+            transcriber=deps.transcriber,
+            selector=selector,
+            reframer=reframer,
+            subtitle_renderer=deps.subtitle_renderer,
+            resume=False,
+        )
+
+    mgr = PipelineStateManager.load(config.output_dir)
+    assert mgr.checkpoint.segment_coords == ((0.0, 5.0),), (
+        "el segmento 0 completado debe quedar registrado en disco"
+    )
+
+    # El artefacto del segmento 0 existe y tiene bytes concretos.
+    final_00 = config.output_dir / "final_00.mp4"
+    assert final_00.is_file()
+    bytes_antes = final_00.read_bytes()
+
+    # --- Segunda corrida (resume=True): el fallo ya no aplica ---
+    reframes_antes = counter.reframe_calls
+    result = run_long_video(
+        _URL,
+        config=config,
+        model=deps.model,
+        detector=deps.detector,
+        transcriber=deps.transcriber,
+        selector=selector,
+        reframer=reframer,
+        subtitle_renderer=deps.subtitle_renderer,
+        resume=True,
+    )
+
+    # El segmento 0 se REUTILIZA: no se vuelve a reframear.
+    assert counter.reframe_calls == reframes_antes + 1, (
+        "el segmento 0 no debe re-renderizarse; solo el 1"
+    )
+    assert final_00.read_bytes() == bytes_antes, "el artefacto del segmento 0 se toco"
+
+    final_01 = config.output_dir / "final_01.mp4"
+    assert final_01.is_file()
+    assert result.final_videos == (final_00, final_01)
+
+    mgr_final = PipelineStateManager.load(config.output_dir)
+    assert mgr_final.checkpoint.segment_coords == ((0.0, 5.0), (10.0, 15.0))
