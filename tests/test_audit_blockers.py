@@ -44,8 +44,8 @@ from kliptych.contract.schema import Segment
 from kliptych.degradations import recolectar
 from kliptych.encoding import Invocation, RenderConfig, run_ffmpeg_with_fallback
 from kliptych.environment import SubprocessRunner, detect_environment
-from kliptych.exporter import DeliveryReport, ExportStatus, export_delivery
-from kliptych.gate import CheckStatus, Gate, GateStatus, Piece
+from kliptych.exporter import DeliveryReport, ExportStatus, RejectedPiece, export_delivery
+from kliptych.gate import CheckStatus, Gate, GateResult, GateStatus, Piece
 from kliptych.gate.checks import DEFAULT_VALIDATORS, CheckOutcome, GateContext
 from kliptych.git_proposals import GitHubCliProvider, ProposalEngine, PullRequest
 from kliptych.intelligence import Archetype, ArchetypeClassification, CampaignClassifier
@@ -65,6 +65,7 @@ def _ensure_outcome_resolved() -> None:
         _types_namespace={
             "PullRequest": PullRequest,
             "PipelineResult": PipelineResult,
+            "SlideshowResult": SlideshowResult,
             "DeliveryReport": DeliveryReport,
         }
     )
@@ -191,6 +192,78 @@ def test_cli_campaign_exits_one_on_blocked_status_despite_pipeline_success(tmp_p
         manager=MockManager(),
     )
     assert code == 1
+
+
+def test_handle_campaign_result_logs_rejected_pieces_diagnostic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#71: _handle_campaign_result loguea cada pieza rechazada y su motivo."""
+    _ensure_outcome_resolved()
+    report = DeliveryReport(
+        campaign_id="camp-test",
+        package="delivery",
+        status=ExportStatus.PARTIAL,
+        exported=(),
+        rejected=(
+            RejectedPiece(
+                piece_id="piece-07",
+                platform=Platform.TIKTOK,
+                reason="el gate no aprobó la pieza (rejected): caption.required_mention",
+                gate=GateResult(
+                    status=GateStatus.REJECTED,
+                    checks=(),
+                    artifact_sha256=None,
+                    contract_sha256="a" * 64,
+                ),
+            ),
+        ),
+        reminders=(),
+    )
+    outcome = CampaignOutcome(
+        campaign_id="camp-test",
+        archetype=Archetype.KNOWN,
+        status=CampaignStatus.BLOCKED,
+        delivery_report=report,
+    )
+
+    class MockManager:
+        @staticmethod
+        def process(
+            campaign: Campaign,
+            *,
+            mode: str = "long_video",
+            url: str | None = None,
+            resume: bool = False,
+            approve_manual_review: bool = False,
+            approved_by: str | None = None,
+            **kwargs: object,
+        ) -> CampaignOutcome:
+            _ = (campaign, mode, url, resume, approve_manual_review, approved_by, kwargs)
+            return outcome
+
+    brief_file = tmp_path / "brief.txt"
+    _ = brief_file.write_text("brief content", encoding="utf-8")
+    code = main(
+        [
+            "campaign",
+            str(brief_file),
+            "--out",
+            str(tmp_path / "out"),
+            "--url",
+            "http://fake.mp4",
+        ],
+        manager=MockManager(),
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "La campaña no se completó: estado=BLOCKED, delivery_status=partial" in err
+    esperado = (
+        "Pieza rechazada: piece-07 [tiktok] -> "
+        "el gate no aprobó la pieza (rejected): caption.required_mention"
+    )
+    assert esperado in err
 
 
 # ---------------------------------------------------------------------------
