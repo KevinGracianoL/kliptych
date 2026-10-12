@@ -28,6 +28,7 @@ from scripts.barrido_mutaciones import (
     MUTACIONES,
     Mutacion,
     Resultado,
+    aplicar_mutacion,
     clasificar,
     correr,
     seleccionar,
@@ -273,3 +274,87 @@ def _estado_del_arbol() -> str:
         text=True,
         check=False,
     ).stdout
+
+
+# ---------------------------------------------------- ancla y desambiguacion (#65)
+
+
+def test_aplicar_mutacion_sin_ancla_sustituye_la_primera_ocurrencia() -> None:
+    """Sin ancla, el replace(..., 1) toma la primera aparicion en el archivo."""
+    fuente = "ALPHA foo BETA foo GAMMA"
+    mutacion = Mutacion(
+        nombre="test",
+        archivo="test.py",
+        viejo="foo",
+        nuevo="bar",
+        tests=(),
+    )
+    mutado, motivo = aplicar_mutacion(fuente, mutacion)
+    assert motivo is None
+    assert mutado == "ALPHA bar BETA foo GAMMA"
+
+
+def test_aplicar_mutacion_con_ancla_desambigua_ocurrencias_repetidas() -> None:
+    """#65: con ancla, se reemplaza la ocurrencia que cae tras ella."""
+    fuente = "BLOCK_1:\n    foo\nBLOCK_2:\n    foo\n"
+    mutacion = Mutacion(
+        nombre="test",
+        archivo="test.py",
+        viejo="    foo\n",
+        nuevo="    bar\n",
+        tests=(),
+        ancla="BLOCK_2",
+    )
+    mutado, motivo = aplicar_mutacion(fuente, mutacion)
+    assert motivo is None
+    assert mutado == "BLOCK_1:\n    foo\nBLOCK_2:\n    bar\n"
+
+
+def test_aplicar_mutacion_con_ancla_inexistente_reporta_no_verificada() -> None:
+    """Si el ancla no existe, la mutacion no llega a aplicarse."""
+    fuente = "BLOCK_1:\n    foo\n"
+    mutacion = Mutacion(
+        nombre="test",
+        archivo="test.py",
+        viejo="foo",
+        nuevo="bar",
+        tests=(),
+        ancla="BLOCK_INEXISTENTE",
+    )
+    mutado, motivo = aplicar_mutacion(fuente, mutacion)
+    assert mutado is None
+    assert motivo is not None
+    assert "el ancla 'BLOCK_INEXISTENTE' no esta en el fuente" in motivo
+
+
+def test_aplicar_mutacion_con_viejo_ausente_tras_ancla_reporta_no_verificada() -> None:
+    """Si el ancla existe pero el texto viejo no aparece tras ella, no se aplica."""
+    fuente = "BLOCK_1:\n    foo\nBLOCK_2:\n    baz\n"
+    mutacion = Mutacion(
+        nombre="test",
+        archivo="test.py",
+        viejo="foo",
+        nuevo="bar",
+        tests=(),
+        ancla="BLOCK_2",
+    )
+    mutado, motivo = aplicar_mutacion(fuente, mutacion)
+    assert mutado is None
+    assert motivo is not None
+    assert "el texto viejo no esta tras el ancla 'BLOCK_2'" in motivo
+
+
+def test_aplicar_mutacion_sin_ancla_con_viejo_ausente_reporta_no_verificada() -> None:
+    """Sin ancla, si el texto viejo no existe en el archivo, no se aplica."""
+    fuente = "BLOCK_1:\n    foo\n"
+    mutacion = Mutacion(
+        nombre="test",
+        archivo="test.py",
+        viejo="no_existe",
+        nuevo="bar",
+        tests=(),
+    )
+    mutado, motivo = aplicar_mutacion(fuente, mutacion)
+    assert mutado is None
+    assert motivo is not None
+    assert "el texto viejo no esta en el fuente" in motivo

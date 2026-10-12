@@ -51,6 +51,7 @@ class Mutacion:
             se mueve, la mutacion se marca NO VERIFICADA en vez de fingir.
         nuevo: Texto que lo reemplaza.
         tests: Suites focalizadas que deben caer.
+        ancla: Texto previo a partir del cual buscar `viejo` si aparece repetido.
     """
 
     nombre: str
@@ -58,6 +59,7 @@ class Mutacion:
     viejo: str
     nuevo: str
     tests: tuple[str, ...]
+    ancla: str | None = None
 
 
 MUTACIONES: tuple[Mutacion, ...] = (
@@ -133,6 +135,7 @@ MUTACIONES: tuple[Mutacion, ...] = (
     Mutacion(
         nombre="artifact.aspect desaparece de las reglas conocidas del schema",
         archivo="src/kliptych/contract/schema.py",
+        ancla="KNOWN_VALIDATOR_RULES",
         viejo='    "artifact.aspect",\n',
         nuevo="",
         # La puerta real de esta invariante es
@@ -247,6 +250,33 @@ def seleccionar(argumentos: list[str]) -> tuple[Mutacion, ...]:
     return tuple(m for m in MUTACIONES if m.nombre in pedido)
 
 
+def aplicar_mutacion(original: str, mutacion: Mutacion) -> tuple[str | None, str | None]:
+    """Aplica la mutacion sobre el texto original respetando el ancla si existe.
+
+    Args:
+        original: Contenido completo del archivo.
+        mutacion: Definicion de la mutacion a aplicar.
+
+    Returns:
+        Tupla `(texto_mutado, None)` si se aplico con exito, o
+        `(None, motivo)` si no se pudo aplicar (NO VERIFICADA).
+    """
+    if mutacion.ancla is not None:
+        pos_ancla = original.find(mutacion.ancla)
+        if pos_ancla < 0:
+            return None, f"el ancla {mutacion.ancla!r} no esta en el fuente"
+        pos_viejo = original.find(mutacion.viejo, pos_ancla)
+        if pos_viejo < 0:
+            return None, f"el texto viejo no esta tras el ancla {mutacion.ancla!r}"
+        mutado = original[:pos_viejo] + mutacion.nuevo + original[pos_viejo + len(mutacion.viejo) :]
+        return mutado, None
+
+    if mutacion.viejo not in original:
+        return None, "el texto viejo no esta en el fuente"
+
+    return original.replace(mutacion.viejo, mutacion.nuevo, 1), None
+
+
 def main() -> int:
     mutaciones = seleccionar(sys.argv[1:])
     if not mutaciones:
@@ -259,20 +289,18 @@ def main() -> int:
     for mutacion in mutaciones:
         destino = RAIZ / mutacion.archivo
         original = destino.read_text(encoding="utf-8")
-        if mutacion.viejo not in original:
-            # El texto viejo no esta: la mutacion NO LLEGO a aplicarse, asi que
-            # no se ejecuto nada. No es una mutacion superviviente ni una que
-            # fallo, es una que no se corrio.
-            print(f"[NO VERIFICADA] {mutacion.nombre}: el texto viejo no esta en el fuente")
+        mutado, motivo = aplicar_mutacion(original, mutacion)
+        if mutado is None:
+            # El texto viejo o el ancla no esta: la mutacion NO LLEGO a
+            # aplicarse, asi que no se ejecuto nada. No es una mutacion
+            # superviviente ni una que fallo, es una que no se corrio.
+            print(f"[NO VERIFICADA] {mutacion.nombre}: {motivo}")
             conteo["no_verificada"] += 1
             continue
         copia = Path(tempfile.gettempdir()) / f"mutmut_backup_{destino.name}"
         _ = shutil.copy2(destino, copia)
         try:
-            _ = destino.write_text(
-                original.replace(mutacion.viejo, mutacion.nuevo, 1),
-                encoding="utf-8",
-            )
+            _ = destino.write_text(mutado, encoding="utf-8")
             resultado = correr(
                 [
                     "uv",
