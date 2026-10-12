@@ -36,7 +36,7 @@ from kliptych.gate import (
     GateStatus,
     Piece,
 )
-from kliptych.gate.engine import rule_applies
+from kliptych.gate.engine import rule_applies, rule_applies_anywhere
 from tests.support import (
     FakeProbe,
     make_contract,
@@ -732,3 +732,177 @@ def test_recordatorio_de_atribucion_y_link_tambien_se_acota_a_la_entrega(
     )
 
     assert any(r.kind == "manual_review" and regla in r.detail for r in con_tiktok.reminders)
+
+
+# ---------------------------------------------------- matriz enumerada (#65)
+
+_REGLAS_MATRIZ: tuple[str, ...] = (
+    "audio.present",
+    "audio.own_clip",
+    "audio.no_trending",
+    "audio.official_track",
+    "audio.official_selection",
+    "audio.rule",
+    "attribution.required",
+    "attribution.present",
+    "link.in_bio",
+    "link_rules.link_in_bio",
+)
+
+_PLATAFORMAS_MATRIZ: tuple[Platform, ...] = (
+    Platform.TIKTOK,
+    Platform.INSTAGRAM_REELS,
+    Platform.YOUTUBE_SHORTS,
+    Platform.X,
+)
+
+
+def _reglas_activas_para(regla: str) -> PlatformRules:
+    """Construye las PlatformRules que activan el requisito para esta regla.
+
+    Args:
+        regla: Identificador de la regla o alias a activar.
+
+    Returns:
+        Las PlatformRules con la configuración que activa la regla.
+
+    Raises:
+        ValueError: Si la regla no pertenece al catálogo de la matriz.
+    """
+    canonico = canonical_rule_id(regla)
+    if canonico in {"audio.present", "audio.own_clip"}:
+        return PlatformRules(audio_rule=AudioRule.OWN_CLIP)
+    if canonico == "audio.no_trending":
+        return PlatformRules(audio_rule=AudioRule.NO_TRENDING)
+    if canonico == "audio.official_track":
+        return PlatformRules(audio_rule=AudioRule.OFFICIAL_REQUIRED)
+    if canonico == "attribution.required":
+        return PlatformRules(attribution=Attribution(type=AttributionType.TAG, value="@marca"))
+    if canonico == "link.in_bio":
+        return PlatformRules(link_rules=LinkRules(link_in_bio=True))
+    msg = f"regla desconocida en la matriz: {regla}"
+    raise ValueError(msg)
+
+
+def _reglas_neutras() -> PlatformRules:
+    """PlatformRules con todos los requisitos de la matriz inactivos.
+
+    Returns:
+        PlatformRules con configuración neutral para todas las reglas.
+    """
+    return PlatformRules(
+        audio_rule=AudioRule.ANY,
+        attribution=Attribution(type=AttributionType.NONE),
+        link_rules=LinkRules(link_in_bio=False),
+    )
+
+
+def _requisito_activo_en(regla: str, rules: PlatformRules) -> bool:
+    """Verifica directamente el campo de PlatformRules sin invocar rule_applies.
+
+    Se inspecciona el estado puro del modelo para asegurar que el fixture
+    construyó exactamente la condición requerida por el caso de prueba antes
+    de evaluar la predicada.
+
+    Args:
+        regla: Identificador de la regla o alias.
+        rules: Reglas de plataforma a inspeccionar.
+
+    Returns:
+        True si la regla está activada según los campos del modelo.
+
+    Raises:
+        ValueError: Si la regla no pertenece al catálogo de la matriz.
+    """
+    canonico = canonical_rule_id(regla)
+    if canonico == "audio.present":
+        return rules.audio_rule is not AudioRule.ANY
+    if canonico == "audio.own_clip":
+        return rules.audio_rule is AudioRule.OWN_CLIP
+    if canonico == "audio.no_trending":
+        return rules.audio_rule is AudioRule.NO_TRENDING
+    if canonico == "audio.official_track":
+        return rules.audio_rule is AudioRule.OFFICIAL_REQUIRED
+    if canonico == "attribution.required":
+        return rules.attribution.type is not AttributionType.NONE
+    if canonico == "link.in_bio":
+        return bool(rules.link_rules.link_in_bio)
+    msg = f"regla desconocida en la matriz: {regla}"
+    raise ValueError(msg)
+
+
+def _construir_contrato_matriz(
+    configuraciones: dict[Platform, PlatformRules],
+) -> Contract:
+    """Construye un contrato con las cuatro plataformas y todas las reglas clasificadas.
+
+    Args:
+        configuraciones: Mapeo de plataforma a sus PlatformRules.
+
+    Returns:
+        El contrato multi-plataforma construido y revalidado.
+    """
+    c = make_contract(
+        audio_rule="any",
+        official_audio_url="https://example.test/sound",
+        hard=["artifact.integrity", "duration.min"],
+        manual_review=list(_REGLAS_MATRIZ),
+    )
+    for p, r in configuraciones.items():
+        c = with_platform(c, p, r)
+    return c
+
+
+@pytest.mark.parametrize("caso", ["A", "B", "C"])
+@pytest.mark.parametrize("target", _PLATAFORMAS_MATRIZ)
+@pytest.mark.parametrize("regla", _REGLAS_MATRIZ)
+def test_matriz_enumerada_de_aplicabilidad_de_reglas_por_plataforma(
+    caso: str,
+    target: Platform,
+    regla: str,
+) -> None:
+    """#65: enumera todas las reglas, plataformas y casos A/B/C.
+
+    - Caso A: la plataforma target declara el requisito.
+    - Caso B: otra plataforma distinta declara el requisito; target no lo declara.
+    - Caso C: ninguna plataforma declara el requisito.
+
+    Invariante: antes de comprobar el veredicto, el test comprueba explícitamente
+    qué construyó el fixture para no pasar en verde por una construcción vacía.
+    """
+    otra = next(p for p in _PLATAFORMAS_MATRIZ if p != target)
+    if caso == "A":
+        cfg = {
+            p: (_reglas_activas_para(regla) if p == target else _reglas_neutras())
+            for p in _PLATAFORMAS_MATRIZ
+        }
+    elif caso == "B":
+        cfg = {
+            p: (_reglas_activas_para(regla) if p == otra else _reglas_neutras())
+            for p in _PLATAFORMAS_MATRIZ
+        }
+    else:  # Caso C
+        cfg = {p: _reglas_neutras() for p in _PLATAFORMAS_MATRIZ}
+
+    contrato = _construir_contrato_matriz(cfg)
+
+    # 1. Invariante: aserción estricta de la precondición construida en el fixture.
+    activas = [p for p in _PLATAFORMAS_MATRIZ if _requisito_activo_en(regla, contrato.platforms[p])]
+    if caso == "A":
+        assert activas == [target], f"Precondición Caso A falló: activas={activas}"
+    elif caso == "B":
+        assert target not in activas, f"Precondición Caso B falló: target {target} activa"
+        assert activas == [otra], f"Precondición Caso B falló: activas={activas}"
+    else:  # Caso C
+        assert activas == [], f"Precondición Caso C falló: activas={activas}"
+
+    # 2. Invariante: veredicto de aplicabilidad en target y globalmente.
+    if caso == "A":
+        assert rule_applies(regla, contrato.platforms[target]) is True
+        assert rule_applies_anywhere(regla, contrato) is True
+    elif caso == "B":
+        assert rule_applies(regla, contrato.platforms[target]) is False
+        assert rule_applies_anywhere(regla, contrato) is True
+    else:  # Caso C
+        assert rule_applies(regla, contrato.platforms[target]) is False
+        assert rule_applies_anywhere(regla, contrato) is False
