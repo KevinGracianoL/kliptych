@@ -27,6 +27,7 @@ from kliptych.exporter import (
     ExportError,
     ExportStatus,
     export_delivery,
+    failure_report_path,
 )
 from kliptych.gate import (
     DEFAULT_VALIDATORS,
@@ -423,6 +424,149 @@ def test_unverifiable_audio_rule_blocks_without_signature_and_exports_with_one(
     )
     assert approved.status is ExportStatus.EXPORTED
     assert approved.exported[0].gate_status is GateStatus.PENDING_REVIEW
+
+
+def test_atomic_export_with_12_pieces_and_single_failure_diagnostic(tmp_path: Path) -> None:
+    """#71: doce piezas, un rechazo, y un diagnosico que dice cual fallo.
+
+    El lote es ATOMICO: una sola pieza que no pasa el gate tumba las doce, y el
+    destino no se publica. Eso no se toca, y este test lo fija.
+
+    Lo que se arregla es el otro lado: antes el operador se encontraba con el
+    codigo de salida 1, CERO ficheros publicados, ningun JSON en disco y una
+    unica linea generica en el log. Doce clips son muchos para recordar cual de
+    ellos estaba mal, y el unico sitio donde vivia la respuesta era un objeto en
+    memoria que ya habia desaparecido al salir el proceso.
+
+    La pieza 07 falla por `caption.required_mention`, que es un rechazo tipico
+    y no un caso raro: basta con que el caption no lleve la mencion exigida.
+    """
+    pieces: list[Piece] = []
+    for indice in range(1, 13):
+        piece_id = f"piece-{indice:02d}"
+        artifact = tmp_path / f"{piece_id}.mp4"
+        _ = artifact.write_bytes(f"video-{indice}".encode())
+        caption = "mira #marca sin mencion" if piece_id == "piece-07" else "mira @marca #marca"
+        base = make_piece(artifact, caption=caption)
+        pieces.append(base.model_copy(update={"piece_id": piece_id}))
+    destination = tmp_path / "delivery"
+
+    report = export_delivery(
+        contract=make_contract(),
+        pieces=pieces,
+        gate=_gate(),
+        assets=AssetRegistry(tmp_path),
+        destination=destination,
+        # El contrato de prueba trae `audio.own_clip` en revision manual, asi que
+        # sin firma el gate bloquearia las DOCE y no habria ningun rechazo
+        # aislable. Aqui lo que se quiere aislar es el rechazo por caption.
+        approve_manual_review=True,
+        approved_by="auditor-fixture",
+    )
+
+    # Atomicidad intacta: no se publica nada, ni siquiera las once que pasaron.
+    assert report.status is ExportStatus.PARTIAL
+    assert not destination.exists(), "un paquete parcial no puede publicarse"
+    assert report.published_dir is None
+    assert len(report.exported) == 11
+    assert len(report.rejected) == 1
+    assert report.rejected[0].piece_id == "piece-07"
+    assert report.rejected[0].platform is Platform.TIKTOK
+
+    # El motivo nombra el check que fallo, no solo "el gate no aprobo".
+    assert "caption.required_mention" in report.rejected[0].reason
+
+    # Y el mismo detalle, legible por maquina, queda en disco.
+    report_file = failure_report_path(destination)
+    assert report_file.is_file(), "el diagnostico tiene que quedar en disco"
+    saved_report = DeliveryReport.model_validate_json(report_file.read_text(encoding="utf-8"))
+    assert saved_report.status is ExportStatus.PARTIAL
+    assert saved_report.published_dir is None
+    assert len(saved_report.rejected) == 1
+    assert saved_report.rejected[0].piece_id == "piece-07"
+    assert "caption.required_mention" in saved_report.rejected[0].reason
+    fallidos = [c.id for c in saved_report.rejected[0].gate.checks if c.status is CheckStatus.FAIL]
+    assert fallidos == ["caption.required_mention"]
+
+
+def test_no_failure_report_is_written_when_the_batch_succeeds(tmp_path: Path) -> None:
+    """Contrapunto: un paquete publicado no deja un informe de fallo junto a el.
+
+    Si este test falla, se esta escribiendo el diagnostico siempre, y entonces un
+    `EXPORTED` de una corrida anterior se podria leer como el fallo de otra.
+    """
+    destination = tmp_path / "delivery"
+    report = _export(
+        tmp_path,
+        contract=make_contract(),
+        destination=destination,
+        approve_manual_review=True,
+    )
+
+    assert report.status is ExportStatus.EXPORTED
+    assert not failure_report_path(destination).exists()
+    assert (destination / "delivery_report.json").is_file()
+
+
+def test_failure_report_is_replaced_not_appended_between_runs(tmp_path: Path) -> None:
+    """Dos rechazos seguidos: el segundo informe no hereda el primero.
+
+    El informe se escribe de cero cada vez. Si se abriera en modo ``a``, el
+    segundo JSON seria invalido y el operador no podria parsearlo.
+    """
+    destino_roto = tmp_path / "roto"
+    roto = make_piece(_artifact(tmp_path, "roto.mp4"), caption="sin la mencion")
+    primero = export_delivery(
+        contract=make_contract(),
+        pieces=[roto],
+        gate=_gate(),
+        assets=AssetRegistry(tmp_path),
+        destination=destino_roto,
+    )
+    destino_roto_2 = tmp_path / "roto2"
+    segundo = export_delivery(
+        contract=make_contract(),
+        pieces=[make_piece(_artifact(tmp_path, "roto2.mp4"), caption="tampoco #marca")],
+        gate=_gate(),
+        assets=AssetRegistry(tmp_path),
+        destination=destino_roto_2,
+    )
+
+    assert primero.status is ExportStatus.BLOCKED
+    assert segundo.status is ExportStatus.BLOCKED
+    saved_report = DeliveryReport.model_validate_json(
+        failure_report_path(destino_roto_2).read_text(encoding="utf-8")
+    )
+    assert saved_report.rejected[0].piece_id == "piece-01"
+
+
+def test_unverifiable_destination_does_not_hide_the_report(
+    tmp_path: Path,
+) -> None:
+    """El diagnostico es best-effort: si no se puede escribir, el rechazo sigue igual.
+
+    Sin esto, un destino en un directorio de solo lectura convertiria un
+    `PARTIAL` con diagnostico en un `ExportError`, que es otro problema.
+    """
+    piezas = [make_piece(_artifact(tmp_path, "a.mp4"), caption="sin la mencion")]
+    destino = tmp_path / "readonly"
+    solo_lectura = tmp_path / "padre"
+    solo_lectura.mkdir()
+    destino.mkdir()
+    destino.chmod(0o500)
+    try:
+        report = export_delivery(
+            contract=make_contract(),
+            pieces=piezas,
+            gate=_gate(),
+            assets=AssetRegistry(solo_lectura),
+            destination=destino,
+        )
+    finally:
+        destino.chmod(0o700)
+
+    assert report.status is ExportStatus.BLOCKED
+    assert report.rejected[0].piece_id == "piece-01"
 
 
 def test_rejects_unsafe_campaign_id(tmp_path: Path) -> None:

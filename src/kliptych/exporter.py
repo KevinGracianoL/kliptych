@@ -56,6 +56,7 @@ from kliptych.naming import is_safe_segment
 
 _SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
 _SUMMARY_NAME = "delivery_report.json"
+_FAILURE_REPORT_SUFFIX = ".failure_report.json"
 
 
 class ExportError(Exception):
@@ -266,13 +267,9 @@ def export_delivery(
         approved_by=approved_by,
     )
     published = False
+    staging.mkdir(parents=True)
     try:
-        staging.mkdir(parents=True)
-        report = _build_report(context, plans, package=destination.name)
-        if report.status is ExportStatus.EXPORTED:
-            report = _commit_published_package(staging, destination, report)
-            published = True
-            return report
+        report, published = _materialize_export(context, plans, destination, staging)
     except OSError as error:
         msg = f"falló la escritura del paquete de entrega: {error}"
         raise ExportError(msg) from error
@@ -280,6 +277,78 @@ def export_delivery(
         if not published:
             _remove_tree(staging)
     return report
+
+
+def _materialize_export(
+    context: _ExportContext,
+    plans: Sequence[_PiecePlan],
+    destination: Path,
+    staging: Path,
+) -> tuple[DeliveryReport, bool]:
+    """Genera el informe y publica el paquete o escribe el diagnóstico de fallo.
+
+    Args:
+        context: Contexto resuelto de la exportación.
+        plans: Planes de exportación de cada pieza.
+        destination: Directorio de destino final del paquete.
+        staging: Directorio temporal de staging.
+
+    Returns:
+        Tupla con el informe de entrega y un booleano indicando si se publicó.
+    """
+    report = _build_report(context, plans, package=destination.name)
+    if report.status is ExportStatus.EXPORTED:
+        return _commit_published_package(staging, destination, report), True
+    _write_failure_report(destination, report)
+    return report, False
+
+
+def failure_report_path(destination: Path) -> Path:
+    """Donde queda el informe de un lote que no se publico (#71).
+
+    Va al lado del destino, no dentro: el destino no se publica, asi que dentro
+    no habria sitio, y un fichero al lado sobrevive al `unlink` del staging.
+
+    Args:
+        destination: Raíz del paquete que no llegó a publicarse.
+
+    Returns:
+        La ruta del fichero de diagnóstico, exista o no.
+    """
+    return destination.parent / f"{destination.name}{_FAILURE_REPORT_SUFFIX}"
+
+
+def _write_failure_report(destination: Path, report: DeliveryReport) -> None:
+    """Deja el informe del lote rechazado en disco, y de forma atomica (#71).
+
+    Sin esto, un lote de doce clips que acaba en `PARTIAL` deja al operador con
+    el codigo de salida 1, cero ficheros publicados y NINGUN JSON: el detalle de
+    que check tumbo cada pieza vivia solo en el objeto en memoria, que desaparece
+    al salir el proceso. Con esto, el mismo dato queda en la maquina y se puede
+    parsear sin abrir logs.
+
+    Se escribe en un temporal y se renombra, por la misma razon que el paquete:
+    un corte a mitad de escritura deja un JSON truncado, que es peor que
+    ninguno porque parece legible.
+
+    Es BEST-EFFORT a proposito: si el destino padre no permite escribir, el
+    `PARTIAL` con su diagnostico en el log sigue siendo la respuesta correcta, y
+    convertirlo en un `ExportError` seria tapar un rechazo real con un problema
+    de permisos.
+
+    Args:
+        destination: Raíz del paquete que no se publicó.
+        report: El informe completo, con lo exportado, lo rechazado y la
+            evidencia del gate de cada pieza rechazada.
+    """
+    path = failure_report_path(destination)
+    temporal = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
+    try:
+        _ = temporal.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        _ = temporal.replace(path)
+    except OSError:
+        with suppress(OSError):
+            temporal.unlink(missing_ok=True)
 
 
 def _commit_published_package(

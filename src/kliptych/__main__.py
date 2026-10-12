@@ -643,6 +643,13 @@ def _handle_campaign_result(result: CampaignOutcome) -> int:
                 result.status.value,
                 result.delivery_report.status.value,
             )
+            for rejected in result.delivery_report.rejected:
+                logger.error(
+                    "Pieza rechazada: %s [%s] -> %s",
+                    rejected.piece_id,
+                    rejected.platform.value,
+                    rejected.reason,
+                )
         else:
             logger.error("La campaña no se completó: estado=%s", result.status.value)
         return 1
