@@ -2,7 +2,7 @@
 
 Feed it a campaign brief; it delivers publication-ready vertical clips and ruthlessly blocks anything that breaks the brand's rules
 
-[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions) [![Release](https://img.shields.io/github/v/release/KevinGracianoL/kliptych?color=2563eb&logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases) ![Tests](https://img.shields.io/badge/tests-%E2%89%A51%2C500_passed-10b981?logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25_(CI_gate)-0d9488)
+[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions) [![Release](https://img.shields.io/github/v/release/KevinGracianoL/kliptych?color=2563eb&logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases) ![Tests](https://img.shields.io/badge/tests-%E2%89%A52%2C100_passed-10b981?logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25_(CI_gate)-0d9488)
 ![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white) ![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white) ![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white) ![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
 
 Content Rewards / UGC campaigns only pay when every contractual rule holds:
@@ -27,6 +27,11 @@ Requires Python 3.13+ and [`uv`](https://docs.astral.sh/uv/).
 uv sync
 uv sync --extra transcription --extra reframe  # CUDA + MediaPipe
 uv run kliptych env                             # toolchain, GPU, NVENC
+
+# Personal zero-contract mode (pure deterministic local engine)
+uv run kliptych campaign --url "https://..." --out runs/my-run/package
+
+# Campaign mode with contract and verification gate
 uv run kliptych ingest campaigns/fixtures/given-clips/brief.md
 uv run kliptych run campaigns/fixtures/given-clips/brief.md \
   --out runs/demo-pass/package \
@@ -56,6 +61,16 @@ flowchart LR
 | `audio_locked` | Same as above but dubs a mandatory external audio track over the video (slideshows require it). |
 | `repost_ugc` | Reuses an already-approved clip: no re-transcription, just reframe, metadata cleanup, and caption rewrite. |
 | `slideshow` | Turns still images into a video paced against the external audio track. |
+
+## Features & Pipeline Capabilities
+
+- **Zero-Contract Mode:** Instant clipping from a URL without requiring an LLM or campaign brief.
+- **High-Retention Karaoke Subtitles:** Animated syllable/word SubStation Alpha (`{\k}`) tags, customizable highlight sweep color (`CaptionStyleConfig`), and case formatting (`Aa`, `AA`, `aa`).
+- **Multi-Band Layout Composition (`LayoutSpec`):** Normalized rectangular coordinates (`0.0`–`1.0`) with vertical stacking presets (`Dividido` 50/50, `Trío` 33/33/33, `Spotlight` asymmetric).
+- **Spatially-Bounded Face Tracking:** Restricts MediaPipe face detection strictly to the streamer's camera crop, eliminating false positives from game footage and dramatically cutting CPU usage.
+- **Multi-Format Aspect Ratios:** Exact integer ratios supporting TikTok/Reels (`9:16`), YouTube horizontal (`16:9`), Instagram Feed (`4:5`), and Square (`1:1`) with dynamic gate compliance.
+- **Hardware Acceleration:** Native NVENC GPU encoding with runtime fail-closed fallback channel recording to manifest and checkpoint.
+- **Atomic Batch Delivery & Failure Diagnostics:** 12-piece batch publishing is strictly atomic; rejections write an immediate `delivery.failure_report.json` with exact failing checks and evidence.
 
 ## Why the Gate rejects
 
@@ -134,9 +149,9 @@ attributed signature that is sealed into the delivery record next to
 
 ## Project Status
 
-Phases A–F plus Sprints 1–3 implemented, each executable end-to-end. Full
-history in [docs/architecture.md](docs/architecture.md); `campaigns/private/`
-and `runs/` are git-ignored and CI fixtures are synthetic.
+**Phase A (Backend Core Engine)** is 100% completed and verified (2,183 tests, 0 open issues, CI green). Full history in [docs/architecture.md](docs/architecture.md); `campaigns/private/` and `runs/` are git-ignored and CI fixtures are synthetic.
+
+Development is moving to **Phase B: Kliptych Studio** (local desktop UI in Tauri for interactive canvas cropping, visual preview, and lazy rendering).
 
 ## License
 
