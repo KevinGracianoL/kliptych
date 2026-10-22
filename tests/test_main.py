@@ -5,17 +5,52 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast, override
 
 import pytest
 
 from kliptych import __version__
 from kliptych.__main__ import main
 from kliptych.environment import EnvironmentReport
+from kliptych.studio.analyzer import AnalysisCancelled, AnalysisEngineError, AnalysisRequest
+from kliptych.studio.models import (
+    ANALYSIS_SCHEMA_VERSION,
+    AnalysisDocument,
+    AnalysisProvenance,
+    AnalysisSource,
+)
+from kliptych.studio.project_store import ProjectStoreError
 
 
 def _parse(text: str) -> dict[str, object]:
     return cast("dict[str, object]", json.loads(text))
+
+
+def _disable_logging_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_setup_logging(*, verbose: bool = False, quiet: bool = False) -> None:
+        _ = verbose
+        _ = quiet
+
+    monkeypatch.setattr("kliptych.__main__.setup_logging", fake_setup_logging)
+
+
+class _DownloaderProtocol(Protocol):
+    def download_video(self, *, url: str, destination: Path) -> Path:
+        """Download one source artifact."""
+        ...
+
+
+class _CancelledDownloader(_DownloaderProtocol):
+    @override
+    def download_video(self, *, url: str, destination: Path) -> Path:
+        """Simulate cancellation at the download boundary.
+
+        Raises:
+            AnalysisCancelled: Always, to model a controlled cancellation.
+        """
+        _ = url
+        _ = destination
+        raise AnalysisCancelled
 
 
 def test_console_script_is_installed() -> None:
@@ -57,3 +92,253 @@ def test_main_env_prints_environment(
     payload = _parse(capsys.readouterr().out)
     assert payload["ffmpeg_version"] == "N-118380"
     assert payload["nvenc_available"] is True
+
+
+def test_main_analyze_emits_versioned_ndjson_and_completed_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project_dir = tmp_path / "project"
+    _disable_logging_setup(monkeypatch)
+
+    def fake_analyze(
+        request: AnalysisRequest,
+        *,
+        downloader: object,
+        transcriber: object,
+        progress: object,
+    ) -> AnalysisDocument:
+        _ = downloader
+        _ = transcriber
+        assert request.url == "https://example.com/video"
+        assert request.project_dir == project_dir
+        assert request.project_name == "My clip"
+        assert callable(progress)
+        _ = progress("downloading")
+        _ = progress("transcribing")
+        _ = progress("finding_candidates")
+        return AnalysisDocument(
+            schema_version=ANALYSIS_SCHEMA_VERSION,
+            project_id="project-id",
+            project_name="My clip",
+            source=AnalysisSource(url=request.url, sha256="a" * 64),
+            provenance=AnalysisProvenance(transcription_version="1", segmenter_version="1"),
+            candidates=(),
+        )
+
+    monkeypatch.setattr("kliptych.__main__.analyze_project", fake_analyze)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "analyze",
+                "--url",
+                "https://example.com/video",
+                "--project-dir",
+                str(project_dir),
+                "--project-name",
+                "My clip",
+            ]
+        )
+        == 0
+    )
+
+    events = [
+        cast("dict[str, object]", json.loads(line)) for line in capsys.readouterr().out.splitlines()
+    ]
+    run_ids = {event["run_id"] for event in events}
+    assert len(run_ids) == 1
+    assert [event["stage"] for event in events] == [
+        "downloading",
+        "transcribing",
+        "finding_candidates",
+        "completed",
+    ]
+    assert events[-1]["type"] == "completed"
+    assert events[-1]["analysis_path"] == "analysis.json"
+    assert events[-1]["candidate_count"] == 0
+
+
+def test_main_analyze_emits_safe_error_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def fake_analyze(
+        _request: AnalysisRequest,
+        *,
+        downloader: object,
+        transcriber: object,
+        progress: object,
+    ) -> AnalysisDocument:
+        _ = downloader
+        _ = transcriber
+        _ = progress
+        code = "transcript_empty"
+        message = "Transcription produced no timestamped words."
+        raise AnalysisEngineError(code, message)
+
+    monkeypatch.setattr("kliptych.__main__.analyze_project", fake_analyze)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "analyze",
+                "--url",
+                "https://example.com/video",
+                "--project-dir",
+                str(tmp_path / "project"),
+                "--project-name",
+                "My clip",
+            ]
+        )
+        == 1
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "error"
+    assert event["error_code"] == "transcript_empty"
+    assert event["stage"] == "failed"
+
+
+def test_main_analyze_returns_cancel_status_and_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def fake_analyze(
+        _request: AnalysisRequest,
+        *,
+        downloader: object,
+        transcriber: object,
+        progress: object,
+    ) -> AnalysisDocument:
+        _ = downloader
+        _ = transcriber
+        _ = progress
+        raise AnalysisCancelled
+
+    monkeypatch.setattr("kliptych.__main__.analyze_project", fake_analyze)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "analyze",
+                "--url",
+                "https://example.com/video",
+                "--project-dir",
+                str(tmp_path / "project"),
+                "--project-name",
+                "My clip",
+            ]
+        )
+        == 2
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "cancelled"
+    assert event["stage"] == "cancelled"
+
+
+def test_main_analyze_preserves_cancellation_from_download_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    monkeypatch.setattr("kliptych.__main__.MediaDownloader", _CancelledDownloader)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "analyze",
+                "--url",
+                "https://example.com/video",
+                "--project-dir",
+                str(tmp_path / "project"),
+                "--project-name",
+                "My clip",
+            ]
+        )
+        == 2
+    )
+
+    events = [
+        cast("dict[str, object]", json.loads(line)) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert events[-1]["type"] == "cancelled"
+    assert not (tmp_path / "project").exists()
+
+
+def test_main_analyze_translates_project_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def fake_analyze(
+        _request: AnalysisRequest,
+        *,
+        downloader: object,
+        transcriber: object,
+        progress: object,
+    ) -> AnalysisDocument:
+        _ = downloader
+        _ = transcriber
+        _ = progress
+        code = "project_directory_invalid"
+        message = "Project directory is not a completed Kliptych Studio project."
+        raise ProjectStoreError(code, message)
+
+    monkeypatch.setattr("kliptych.__main__.analyze_project", fake_analyze)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "analyze",
+                "--url",
+                "https://example.com/video",
+                "--project-dir",
+                str(tmp_path / "project"),
+                "--project-name",
+                "My clip",
+            ]
+        )
+        == 1
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["error_code"] == "project_directory_invalid"
+
+
+def test_analyze_argument_error_uses_status_one_not_cancellation() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _ = main(["analyze", "--url", "https://example.com/video"])
+
+    assert excinfo.value.code == 1
+
+
+def test_other_command_with_analyze_as_argument_keeps_argparse_status_two() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _ = main(["campaign", "analyze"])
+
+    assert excinfo.value.code == 2
+
+
+def test_analyze_console_invocation_error_uses_status_one() -> None:
+    script = shutil.which("kliptych", path=str(Path(sys.executable).parent))
+    assert script is not None
+
+    completed = subprocess.run(
+        [script, "analyze", "--url", "https://example.com/video"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 1
+    assert not completed.stdout
+    assert "--project-dir" in completed.stderr

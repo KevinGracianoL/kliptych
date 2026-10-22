@@ -9,7 +9,9 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
 from kliptych.contract.enums import Aspect
+from kliptych.download import MediaDownloader
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport, SubprocessRunner, detect_environment
 from kliptych.exporter import ExportError
@@ -51,8 +54,19 @@ from kliptych.runtime import (
     OpenAIChatModel,
     RecordedModel,
 )
+from kliptych.studio.analyzer import (
+    AnalysisCancelled,
+    AnalysisEngineError,
+    AnalysisRequest,
+    analyze_project,
+)
+from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION
+from kliptych.studio.project_store import ProjectStoreError
+from kliptych.transcribe import FasterWhisperTranscriber
 
 logger = logging.getLogger("kliptych.cli")
+_ARGPARSE_USAGE_ERROR_STATUS = 2
+_ANALYZE_INVOCATION_ERROR_STATUS = 1
 
 
 @runtime_checkable
@@ -414,6 +428,8 @@ def main(
     _ = parser.add_argument("--quiet", "-q", action="store_true", help="solo muestra ERROR")
     subcommands = parser.add_subparsers(dest="command")
     _ = subcommands.add_parser("env", help="detecta el entorno local y lo imprime como JSON")
+    analyze_parser = subcommands.add_parser("analyze", help="analiza una URL para Kliptych Studio")
+    _add_analyze_arguments(analyze_parser)
     ingest_parser = subcommands.add_parser(
         "ingest", help="ingiere un brief local y lo imprime como JSON"
     )
@@ -541,29 +557,144 @@ def main(
         default=None,
         help="directorio raíz donde escanear (por defecto 'campaigns')",
     )
-    args = parser.parse_args(argv)
+    args = _parse_cli_arguments(parser, argv)
     setup_logging(
         verbose=cast("bool", getattr(args, "verbose", False)),
         quiet=cast("bool", getattr(args, "quiet", False)),
     )
+    return _dispatch_command(args=args, parser=parser, manager=manager)
+
+
+def _parse_cli_arguments(
+    parser: argparse.ArgumentParser, argv: Sequence[str] | None
+) -> argparse.Namespace:
+    """Parse CLI arguments, reserving status two only for Studio cancellation.
+
+    Existing commands retain argparse's historical status-two behavior. An
+    invalid `analyze` invocation instead reports status one so a Tauri parent
+    cannot confuse it with the documented controlled-cancellation status.
+
+    Returns:
+        The parsed command namespace.
+
+    Raises:
+        SystemExit: If arguments are invalid; `analyze` syntax errors use status
+            one while every existing command retains argparse's status two.
+    """
+    effective_argv = tuple(sys.argv[1:] if argv is None else argv)
+    try:
+        return parser.parse_args(effective_argv)
+    except SystemExit as error:
+        if _is_analyze_invocation(effective_argv) and error.code == _ARGPARSE_USAGE_ERROR_STATUS:
+            raise SystemExit(_ANALYZE_INVOCATION_ERROR_STATUS) from error
+        raise
+
+
+def _is_analyze_invocation(argv: Sequence[str]) -> bool:
+    """Return whether the selected subcommand is `analyze`, ignoring global flags."""
+    global_flags = frozenset({"--quiet", "-q", "--verbose", "-v"})
+    command = next((argument for argument in argv if argument not in global_flags), None)
+    return command == "analyze"
+
+
+def _add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the machine-oriented B1 arguments on an existing parser."""
+    _ = parser.add_argument("--url", required=True, help="URL del vídeo fuente")
+    _ = parser.add_argument("--project-dir", required=True, help="directorio local del proyecto")
+    _ = parser.add_argument("--project-name", required=True, help="nombre visible del proyecto")
+
+
+def _dispatch_command(
+    *,
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    manager: _CampaignManagerProtocol | None,
+) -> int:
+    """Route one parsed command to its thin CLI handler.
+
+    Returns:
+        The selected handler's process exit status.
+    """
     command = cast("str | None", getattr(args, "command", None))
-    if command == "env":
-        return _cmd_env()
-    if command == "ingest":
-        return _cmd_ingest(args)
-    if command == "run":
-        return _run_command(args)
-    if command == "campaign":
-        return _cmd_campaign(args, manager=manager)
-    if command == "clean":
-        return _cmd_clean(args)
-    parser.print_help()
-    return 0
+    match command:
+        case "env":
+            status = _cmd_env()
+        case "analyze":
+            status = _cmd_analyze(args)
+        case "ingest":
+            status = _cmd_ingest(args)
+        case "run":
+            status = _run_command(args)
+        case "campaign":
+            status = _cmd_campaign(args, manager=manager)
+        case "clean":
+            status = _cmd_clean(args)
+        case _:
+            parser.print_help()
+            status = 0
+    return status
 
 
 def _cmd_env() -> int:
     report = detect_environment(SubprocessRunner())
     _ = sys.stdout.write(json.dumps(report.model_dump(mode="json"), indent=2) + "\n")
+    return 0
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    """Run the B1 Studio analysis protocol with NDJSON-only stdout.
+
+    Returns:
+        Zero on success, one on analysis failure, or two on cancellation.
+    """
+    run_id = str(uuid.uuid4())
+
+    def emit(event_type: str, stage: str, **fields: object) -> None:
+        event = {
+            "schema_version": ANALYSIS_SCHEMA_VERSION,
+            "run_id": run_id,
+            "type": event_type,
+            "stage": stage,
+            **fields,
+        }
+        _ = sys.stdout.write(json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n")
+        _ = sys.stdout.flush()
+
+    def cancel_handler(_signum: int, _frame: object) -> None:
+        raise AnalysisCancelled
+
+    request = AnalysisRequest(
+        url=cast("str", args.url),
+        project_dir=Path(cast("str", args.project_dir)),
+        project_name=cast("str", args.project_name),
+    )
+    previous_term = signal.signal(signal.SIGTERM, cancel_handler)
+    previous_int = signal.signal(signal.SIGINT, cancel_handler)
+    try:
+        document = analyze_project(
+            request,
+            downloader=MediaDownloader(),
+            transcriber=FasterWhisperTranscriber(),
+            progress=lambda stage: emit("progress", stage, percent=None),
+        )
+    except AnalysisCancelled:
+        emit("cancelled", "cancelled")
+        return 2
+    except AnalysisEngineError as error:
+        emit("error", "failed", error_code=error.code, message=error.message)
+        return 1
+    except ProjectStoreError as error:
+        emit("error", "failed", error_code=error.code, message=error.message)
+        return 1
+    finally:
+        _ = signal.signal(signal.SIGTERM, previous_term)
+        _ = signal.signal(signal.SIGINT, previous_int)
+    emit(
+        "completed",
+        "completed",
+        analysis_path="analysis.json",
+        candidate_count=len(document.candidates),
+    )
     return 0
 
 

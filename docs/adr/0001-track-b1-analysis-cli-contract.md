@@ -122,12 +122,17 @@ The intended durable layout is:
 <project-directory>/
 ├── source.mp4
 ├── transcript.json
-├── moments.json
+├── candidates.json
 ├── analysis.json
 ├── project.json       # introduced by B2 for user edits
 ├── previews/          # introduced by B2
 └── delivery/          # introduced by final render work
 ```
+
+`candidates.json` is the private cache produced by the deterministic local
+speech-rate segmenter. It is distinct from the existing `moments.json` pipeline
+artifact, which belongs to FFmpeg scene, energy, and chat detection and is not
+produced by B1.
 
 Only `analysis.json` is a B1 analysis result. `project.json` is not created in
 B1; B2 may introduce a separate editable project-state artifact so future user
@@ -261,6 +266,10 @@ segmenter currently emits technical candidates within its own 2–60 second
 window, while the zero-contract contract currently applies a 3 second minimum
 and no contractual maximum. The final render backend remains responsible for
 enforcement.
+
+The B1 downloader uses the existing 2 GiB maximum download guard. Supporting a
+larger VOD requires a separate reproducible benchmark on the target hardware;
+this ADR does not claim support for 10 GiB inputs.
 
 ## Consequences
 
