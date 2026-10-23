@@ -1,4 +1,10 @@
-"""Transactional local storage for a single Kliptych Studio analysis project."""
+"""Transactional local storage for one private, single-user Studio project.
+
+The project root is controlled by its Studio user. Existing symbolic links in
+editable state are rejected, but this is not a multi-writer filesystem sandbox:
+an untrusted concurrent process modifying the same project during a transaction
+is outside the local desktop threat model.
+"""
 
 import os
 import shutil
@@ -22,6 +28,7 @@ _PROJECT_DIRECTORY_INVALID = "project_directory_invalid"
 _ARTIFACT_NAME_INVALID = "artifact_name_invalid"
 _ANALYSIS_PUBLISH_FAILED = "analysis_publish_failed"
 _ANALYSIS_STAGE_INVALID = "analysis_stage_invalid"
+_EDITABLE_STATE_NAMES = ("project.json", "assets", "previews")
 
 
 class ProjectStoreError(Exception):
@@ -136,20 +143,29 @@ class AnalysisStage:
         if self._committed:
             return
         _validate_stage(self.directory)
-        backup = self.store.project_dir.parent / f".analysis-backup-{uuid.uuid4().hex}"
+        backup = self.store.project_dir.parent / (
+            f".analysis-backup-{self.store.project_dir.name}-{uuid.uuid4().hex}"
+        )
         try:
-            if self.store.owns_empty_project_dir:
-                _ = self.store.project_dir.rmdir()
-            else:
-                _ = _replace(self.store.project_dir, backup)
+            self._prepare_publish(backup)
             _ = _replace(self.directory, self.store.project_dir)
-        except OSError as error:
+        except BaseException as error:
             _restore_backup(project_dir=self.store.project_dir, backup=backup)
+            if not isinstance(error, OSError):
+                raise
             msg = "Could not publish analysis transaction."
             raise ProjectStoreError(_ANALYSIS_PUBLISH_FAILED, msg) from error
         else:
-            _remove_tree(backup)
             self._committed = True
+            _remove_tree_best_effort(backup)
+
+    def _prepare_publish(self, backup: Path) -> None:
+        """Move the active project aside and preserve its editable state."""
+        if self.store.owns_empty_project_dir:
+            _ = self.store.project_dir.rmdir()
+            return
+        _ = _replace(self.store.project_dir, backup)
+        _migrate_editable_state(source=backup, destination=self.directory)
 
 
 def open_project_store(project_dir: Path) -> ProjectStore:
@@ -166,7 +182,8 @@ def open_project_store(project_dir: Path) -> ProjectStore:
         ProjectStoreError: If the path is unsafe or not a valid Studio project.
 
     """
-    if project_dir.is_symlink():
+    _cleanup_stale_backups(project_dir)
+    if _is_link_like(project_dir):
         msg = "Project directory must not be a symbolic link."
         raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
     if not project_dir.exists():
@@ -225,6 +242,43 @@ def _restore_backup(*, project_dir: Path, backup: Path) -> None:
         _ = _replace(backup, project_dir)
 
 
+def _migrate_editable_state(*, source: Path, destination: Path) -> None:
+    """Copy editable state from a private local project into its next stage.
+
+    Raises:
+        OSError: If editable state is unsafe or cannot be copied.
+    """
+    for name in _EDITABLE_STATE_NAMES:
+        original = source / name
+        if _is_link_like(original):
+            msg = "Editable project state must not contain symbolic links or junctions."
+            raise OSError(msg)
+        if original.is_file():
+            _ = shutil.copy2(original, destination / name, follow_symlinks=False)
+        elif original.is_dir():
+            _reject_symlinks(original)
+            _ = shutil.copytree(original, destination / name, symlinks=False)
+        elif original.exists() or _is_link_like(original):
+            msg = "Editable project state must be a regular file or directory."
+            raise OSError(msg)
+
+
+def _reject_symlinks(path: Path) -> None:
+    """Reject links from state created under Studio's controlled project root.
+
+    Raises:
+        OSError: If a managed state path contains a symbolic link or junction.
+    """
+    if _is_link_like(path) or any(_is_link_like(child) for child in path.rglob("*")):
+        msg = "Editable project state must not contain symbolic links or junctions."
+        raise OSError(msg)
+
+
+def _is_link_like(path: Path) -> bool:
+    """Return whether a path is a symbolic link or a Windows directory junction."""
+    return path.is_symlink() or path.is_junction()
+
+
 def _replace(source: Path, destination: Path) -> Path:
     """Rename one sibling path, allowing tests to prove rollback behavior.
 
@@ -269,3 +323,32 @@ def _atomic_write_bytes(destination: Path, content: bytes) -> None:
 def _remove_tree(path: Path) -> None:
     with suppress(FileNotFoundError):
         shutil.rmtree(path)
+
+
+def _remove_tree_best_effort(path: Path) -> None:
+    """Try to remove a published transaction backup without affecting success."""
+    with suppress(BaseException):
+        _remove_tree(path)
+
+
+def _cleanup_stale_backups(project_dir: Path) -> None:
+    """Retry cleanup of backups left by an interrupted post-publication cleanup."""
+    prefix = f".analysis-backup-{project_dir.name}-"
+    try:
+        siblings = tuple(project_dir.parent.iterdir())
+    except OSError:
+        return
+    for backup in siblings:
+        if _is_backup_for_project(backup.name, prefix=prefix):
+            _remove_tree_best_effort(backup)
+
+
+def _is_backup_for_project(name: str, *, prefix: str) -> bool:
+    """Return whether a sibling name has this project's exact UUID backup form."""
+    if not name.startswith(prefix):
+        return False
+    try:
+        _ = uuid.UUID(name.removeprefix(prefix))
+    except ValueError:
+        return False
+    return True
