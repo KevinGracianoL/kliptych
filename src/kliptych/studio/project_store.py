@@ -6,6 +6,7 @@ an untrusted concurrent process modifying the same project during a transaction
 is outside the local desktop threat model.
 """
 
+import math
 import os
 import shutil
 import tempfile
@@ -16,10 +17,23 @@ from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
+from kliptych.gate.probe import MediaProbe
+from kliptych.hashing import sha256_file
 from kliptych.studio.models import AnalysisDocument
+from kliptych.studio.project_models import (
+    ProjectDocument,
+    ProjectStatus,
+    VariantOrigin,
+    VariantRange,
+    create_initial_variant,
+)
 
 _ANALYSIS_NAME = "analysis.json"
+_PROJECT_NAME = "project.json"
+_TRANSCRIPT_NAME = "transcript.json"
+_SOURCE_NAME = "source.mp4"
 _REQUIRED_ARTIFACTS = frozenset(
     {_ANALYSIS_NAME, "source.mp4", "transcript.json", "candidates.json"}
 )
@@ -48,6 +62,307 @@ class ProjectStore:
     project_dir: Path
     existing_analysis: AnalysisDocument | None
     owns_empty_project_dir: bool
+
+    def read_project(self) -> ProjectDocument | None:
+        """Read the optional validated B2 editable project document.
+
+        Returns:
+            The project document, or None when it has not been created.
+
+        Raises:
+            ProjectStoreError: If an existing project document is invalid.
+        """
+        path = self.project_dir / _PROJECT_NAME
+        if _is_link_like(path) or (path.exists() and not path.is_file()):
+            msg = "Editable project document is not a regular file."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if not path.exists():
+            return None
+        try:
+            return ProjectDocument.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError, ValueError) as error:
+            msg = "Editable project document is invalid."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+
+    def write_project(self, document: ProjectDocument) -> None:
+        """Atomically persist a validated editable project document.
+
+        Raises:
+            ProjectStoreError: If the document belongs to another project or
+                cannot be stored safely.
+        """
+        try:
+            payload = document.model_dump_json(warnings="error")
+            validated = ProjectDocument.model_validate_json(payload)
+        except (AttributeError, PydanticSerializationError, ValidationError, ValueError) as error:
+            msg = "Editable project document is invalid."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        self._validate_project_binding(validated)
+        previous = self.read_project()
+        if previous is None:
+            msg = "Editable project state must be initialized from measured evidence."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if not _has_same_evidence(previous, validated):
+            msg = "Normal project writes cannot change measured evidence fields."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        try:
+            _atomic_write_text(
+                self.project_dir / _PROJECT_NAME, validated.model_dump_json(indent=2)
+            )
+        except OSError as error:
+            msg = "Editable project document could not be written."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+
+    def initialize_project(self, *, probe: MediaProbe) -> ProjectDocument:
+        """Create project.json from current B1 artifacts and measured source duration.
+
+        Returns:
+            The atomically persisted, empty editable project document.
+
+        Raises:
+            ProjectStoreError: If B1 artifacts or measured source duration are
+                unavailable or invalid.
+        """
+        if self.read_project() is not None:
+            msg = "Editable project state has already been initialized."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        document = self._build_project_document(probe)
+        self._write_initialized_project(document)
+        return document
+
+    def _write_initialized_project(self, document: ProjectDocument) -> None:
+        """Persist the first project document after measured evidence validation.
+
+        Raises:
+            ProjectStoreError: If the initialized document cannot be written.
+        """
+        try:
+            _atomic_write_text(self.project_dir / _PROJECT_NAME, document.model_dump_json(indent=2))
+        except OSError as error:
+            msg = "Initialized editable project document could not be written."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+
+    def rebind_project(self, *, probe: MediaProbe) -> ProjectDocument:
+        """Bind existing editable state to current B1 evidence explicitly.
+
+        Returns:
+            The rebound project with variants requiring review when evidence
+            changed.
+
+        Raises:
+            ProjectStoreError: If no editable project exists or B1 artifacts
+                cannot produce valid current evidence.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Editable project state has not been initialized."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        current = self._current_project_evidence(probe)
+        if current.project_id != project.project_id:
+            msg = "Current analysis belongs to a different analysis project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        rebound = project.require_review_if_evidence_changed(
+            analysis_sha256=current.analysis_sha256,
+            transcript_sha256=current.transcript_sha256,
+            source_sha256=current.source_sha256,
+        )
+        variants = tuple(
+            variant.model_copy(update={"status": ProjectStatus.REQUIRES_REVIEW})
+            if variant.end_ms > current.source_duration_ms
+            else variant
+            for variant in rebound.variants
+        )
+        rebound = rebound.model_copy(
+            update={"source_duration_ms": current.source_duration_ms, "variants": variants}
+        )
+        self._write_rebound_project(rebound)
+        return rebound
+
+    def create_variant(self, *, candidate_id: str, name: str) -> ProjectDocument:
+        """Create and persist an initial variant from an active analysis candidate.
+
+        Returns:
+            The project document containing the new active variant.
+
+        Raises:
+            ProjectStoreError: If editable state is absent, stale, or the
+                candidate is not present in the active analysis.
+        """
+        project = self.read_project()
+        analysis = self._read_current_analysis()
+        if project is None or analysis is None:
+            msg = "Creating a variant requires active analysis and editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        candidate = next(
+            (item for item in analysis.candidates if item.candidate_id == candidate_id), None
+        )
+        if candidate is None:
+            msg = "Candidate is not part of the active analysis."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        try:
+            variant = create_initial_variant(
+                name=name,
+                selection=VariantRange(
+                    start_ms=candidate.recommended_start_ms,
+                    end_ms=candidate.recommended_end_ms,
+                    source_duration_ms=project.source_duration_ms,
+                ),
+                origin=VariantOrigin(
+                    source_candidate_id=candidate.candidate_id,
+                    analysis_sha256=project.analysis_sha256,
+                    transcript_sha256=project.transcript_sha256,
+                    source_sha256=project.source_sha256,
+                ),
+            )
+        except ValueError as error:
+            msg = "Candidate range does not fit measured source duration."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        updated = project.model_copy(update={"variants": (*project.variants, variant)})
+        self.write_project(updated)
+        return updated
+
+    def _write_rebound_project(self, document: ProjectDocument) -> None:
+        """Persist an explicit evidence rebind without normal hash equality checks.
+
+        Raises:
+            ProjectStoreError: If the rebound document cannot be written.
+        """
+        try:
+            _atomic_write_text(self.project_dir / _PROJECT_NAME, document.model_dump_json(indent=2))
+        except OSError as error:
+            msg = "Rebound editable project document could not be written."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+
+    def _current_project_evidence(self, probe: MediaProbe) -> ProjectDocument:
+        """Measure and hash current B1 artifacts into an empty project document.
+
+        Returns:
+            A document containing current B1 evidence and no human variants.
+        """
+        return self._build_project_document(probe)
+
+    def _validate_project_binding(self, document: ProjectDocument) -> None:
+        """Require editable state to bind exactly to current B1 evidence.
+
+        Raises:
+            ProjectStoreError: If B1 analysis is absent or any evidence hash
+                differs from the persisted project artifacts.
+        """
+        analysis = self._read_current_analysis()
+        if analysis is None:
+            msg = "Editable project state requires a completed analysis."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        analysis_path = self.project_dir / _ANALYSIS_NAME
+        source_path = self.project_dir / _SOURCE_NAME
+        transcript_path = self.project_dir / _TRANSCRIPT_NAME
+        if not source_path.is_file() or _is_link_like(source_path):
+            msg = "Editable project state requires a regular source artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if not transcript_path.is_file() or _is_link_like(transcript_path):
+            msg = "Editable project state requires a regular transcript artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if document.project_id != analysis.project_id:
+            msg = "Editable project document belongs to a different analysis project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        source_hash = sha256_file(source_path)
+        if analysis.source.sha256 != source_hash:
+            msg = "Analysis source hash does not match source artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if document.source_sha256 != source_hash:
+            msg = "Editable project document source hash does not match analysis."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if document.analysis_sha256 != sha256_file(analysis_path):
+            msg = "Editable project document analysis hash does not match analysis artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if document.transcript_sha256 != sha256_file(transcript_path):
+            msg = "Editable project document transcript hash does not match transcript artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_active_variant_origins(document, analysis)
+
+    @staticmethod
+    def _validate_active_variant_origins(
+        document: ProjectDocument, analysis: AnalysisDocument
+    ) -> None:
+        """Require active variants to retain verifiable origins in active analysis.
+
+        Raises:
+            ProjectStoreError: If an active variant origin is stale or absent.
+        """
+        candidate_ids = {candidate.candidate_id for candidate in analysis.candidates}
+        for variant in document.variants:
+            if variant.status is not ProjectStatus.ACTIVE:
+                continue
+            if (
+                variant.origin.analysis_sha256 != document.analysis_sha256
+                or variant.origin.transcript_sha256 != document.transcript_sha256
+                or variant.origin.source_sha256 != document.source_sha256
+                or variant.origin.source_candidate_id not in candidate_ids
+            ):
+                msg = "Active variant origin does not match current B1 evidence."
+                raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+
+    def _build_project_document(self, probe: MediaProbe) -> ProjectDocument:
+        """Build an empty project bound to current B1 artifacts.
+
+        Returns:
+            An empty editable document bound to measured current evidence.
+
+        Raises:
+            ProjectStoreError: If required artifacts or duration are invalid.
+        """
+        analysis = self._read_current_analysis()
+        if analysis is None:
+            msg = "Editable project state requires a completed analysis."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        source_path = self.project_dir / _SOURCE_NAME
+        transcript_path = self.project_dir / _TRANSCRIPT_NAME
+        if not source_path.is_file() or _is_link_like(source_path):
+            msg = "Editable project state requires a regular source artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if not transcript_path.is_file() or _is_link_like(transcript_path):
+            msg = "Editable project state requires a regular transcript artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        try:
+            duration_s = probe.probe(source_path).duration_s
+        except Exception as error:
+            msg = "Source duration could not be measured."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        duration_ms = _duration_ms(duration_s)
+        source_sha256 = sha256_file(source_path)
+        if analysis.source.sha256 != source_sha256:
+            msg = "Analysis source hash does not match source artifact."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        return ProjectDocument(
+            schema_version="1",
+            project_id=analysis.project_id,
+            analysis_sha256=sha256_file(self.project_dir / _ANALYSIS_NAME),
+            transcript_sha256=sha256_file(transcript_path),
+            source_sha256=source_sha256,
+            source_duration_ms=duration_ms,
+            variants=(),
+        )
+
+    def _read_current_analysis(self) -> AnalysisDocument | None:
+        """Read current analysis.json instead of retaining a stale store snapshot.
+
+        Returns:
+            The current valid analysis, or None when no analysis is published.
+
+        Raises:
+            ProjectStoreError: If current analysis is unsafe or invalid.
+        """
+        path = self.project_dir / _ANALYSIS_NAME
+        if not path.exists():
+            return None
+        if not path.is_file() or _is_link_like(path):
+            msg = "Analysis artifact is not a regular file."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        try:
+            return AnalysisDocument.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError, ValueError) as error:
+            msg = "Analysis artifact is invalid."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
 
     def stage(self) -> "AnalysisStage":
         """Create an uncommitted stage owned by this store.
@@ -143,6 +458,7 @@ class AnalysisStage:
         if self._committed:
             return
         _validate_stage(self.directory)
+        self._reject_automatic_source_migration()
         backup = self.store.project_dir.parent / (
             f".analysis-backup-{self.store.project_dir.name}-{uuid.uuid4().hex}"
         )
@@ -159,13 +475,39 @@ class AnalysisStage:
             self._committed = True
             _remove_tree_best_effort(backup)
 
+    def _reject_automatic_source_migration(self) -> None:
+        """Require user action before replacing a source bound to editable state.
+
+        Raises:
+            ProjectStoreError: If a staged source differs from a project that
+                already owns editable B2 state.
+        """
+        has_editable_state = any(
+            (self.store.project_dir / name).exists() or _is_link_like(self.store.project_dir / name)
+            for name in _EDITABLE_STATE_NAMES
+        )
+        if not has_editable_state:
+            return
+        active_source = self.store.project_dir / _SOURCE_NAME
+        staged_source = self.directory / _SOURCE_NAME
+        if not active_source.is_file() or _is_link_like(active_source):
+            msg = "Reanalysis source is unavailable and requires explicit user action."
+            raise ProjectStoreError(_ANALYSIS_PUBLISH_FAILED, msg)
+        if not staged_source.is_file() or _is_link_like(staged_source):
+            msg = "Staged reanalysis source is unavailable."
+            raise ProjectStoreError(_ANALYSIS_PUBLISH_FAILED, msg)
+        if sha256_file(active_source) != sha256_file(staged_source):
+            msg = "Reanalysis source changed and requires explicit user action."
+            raise ProjectStoreError(_ANALYSIS_PUBLISH_FAILED, msg)
+
     def _prepare_publish(self, backup: Path) -> None:
         """Move the active project aside and preserve its editable state."""
-        if self.store.owns_empty_project_dir:
+        if self.store.owns_empty_project_dir and not any(self.store.project_dir.iterdir()):
             _ = self.store.project_dir.rmdir()
             return
         _ = _replace(self.store.project_dir, backup)
         _migrate_editable_state(source=backup, destination=self.directory)
+        _mark_migrated_project_requires_review(destination=self.directory)
 
 
 def open_project_store(project_dir: Path) -> ProjectStore:
@@ -263,6 +605,38 @@ def _migrate_editable_state(*, source: Path, destination: Path) -> None:
             raise OSError(msg)
 
 
+def _mark_migrated_project_requires_review(*, destination: Path) -> None:
+    """Block preserved variants when staged B1 evidence differs from their origin."""
+    project_path = destination / _PROJECT_NAME
+    if not project_path.is_file():
+        return
+    try:
+        project = ProjectDocument.model_validate_json(project_path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError, ValueError):
+        return
+    analysis_path = destination / _ANALYSIS_NAME
+    transcript_path = destination / _TRANSCRIPT_NAME
+    source_path = destination / _SOURCE_NAME
+    if not analysis_path.is_file() or not transcript_path.is_file() or not source_path.is_file():
+        return
+    try:
+        analysis = AnalysisDocument.model_validate_json(analysis_path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError, ValueError):
+        return
+    analysis_sha256 = sha256_file(analysis_path)
+    transcript_sha256 = sha256_file(transcript_path)
+    source_sha256 = sha256_file(source_path)
+    if (
+        project.analysis_sha256 != analysis_sha256
+        or project.transcript_sha256 != transcript_sha256
+        or project.source_sha256 != source_sha256
+        or analysis.source.sha256 != source_sha256
+    ):
+        _atomic_write_text(
+            project_path, project.mark_variants_requires_review().model_dump_json(indent=2)
+        )
+
+
 def _reject_symlinks(path: Path) -> None:
     """Reject links from state created under Studio's controlled project root.
 
@@ -352,3 +726,34 @@ def _is_backup_for_project(name: str, *, prefix: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _duration_ms(duration_s: float | None) -> int:
+    """Round a finite positive ffprobe duration into a positive millisecond bound.
+
+    Returns:
+        The nearest positive integer millisecond duration.
+
+    Raises:
+        ProjectStoreError: If the duration cannot define a positive millisecond
+            range for editable Studio state.
+    """
+    if duration_s is None or not math.isfinite(duration_s) or duration_s <= 0:
+        msg = "Measured source duration is unusable."
+        raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+    duration_ms = round(duration_s * 1000)
+    if duration_ms <= 0:
+        msg = "Measured source duration rounds to zero milliseconds."
+        raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+    return duration_ms
+
+
+def _has_same_evidence(previous: ProjectDocument, current: ProjectDocument) -> bool:
+    """Return whether normal persistence preserves the measured evidence snapshot."""
+    return (
+        previous.project_id == current.project_id
+        and previous.analysis_sha256 == current.analysis_sha256
+        and previous.transcript_sha256 == current.transcript_sha256
+        and previous.source_sha256 == current.source_sha256
+        and previous.source_duration_ms == current.source_duration_ms
+    )
