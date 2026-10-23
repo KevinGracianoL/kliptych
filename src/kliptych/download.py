@@ -143,6 +143,9 @@ class SubprocessDownloadRunner:
         except subprocess.TimeoutExpired:
             _terminate_process_tree(process)
             raise
+        except BaseException:
+            _terminate_process_tree(process)
+            raise
         return CommandResult(
             ok=process.returncode == 0,
             stdout=stdout or "",
@@ -186,10 +189,14 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     else:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGTERM)
-        if not _wait_briefly(process):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-            _reap(process)
+        _ = _wait_briefly(process)
+        # El padre puede terminar tras SIGTERM mientras un nieto que lo ignora
+        # conserva vivo el grupo. SIGKILL se manda al GRUPO incluso si `wait`
+        # ya observó al padre salir, para que una cancelación no deje yt-dlp o
+        # ffmpeg descargando en segundo plano sobre un staging ya eliminado.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        _reap(process)
 
 
 def _wait_briefly(process: subprocess.Popen[str]) -> bool:

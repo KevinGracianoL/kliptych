@@ -6,6 +6,7 @@ SubprocessDownloadRunner real ejecutando subprocesos locales.
 
 import io
 import math
+import signal
 import subprocess
 import sys
 import urllib.error
@@ -527,6 +528,72 @@ def test_subprocess_download_runner_lets_timeout_propagate() -> None:
             [sys.executable, "-c", "import time; time.sleep(5)"],
             timeout_s=0.2,
         )
+
+
+def test_subprocess_download_runner_terminates_tree_when_communicate_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Cancelled(BaseException):
+        """Simulate a cooperative cancellation interrupting communicate."""
+
+    class _FakeProcess:
+        pid: int = 4242
+        returncode: int = 0
+
+        @staticmethod
+        def communicate(timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            raise _Cancelled
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            _ = timeout
+            return 0
+
+    process = _FakeProcess()
+    terminated: list[object] = []
+
+    def fake_spawn(_argv: list[str]) -> _FakeProcess:
+        return process
+
+    monkeypatch.setattr("kliptych.download._spawn", fake_spawn)
+    monkeypatch.setattr("kliptych.download._terminate_process_tree", terminated.append)
+
+    with pytest.raises(_Cancelled):
+        _ = SubprocessDownloadRunner().run([_YTDLP, "--version"], timeout_s=1.0)
+
+    assert terminated == [process]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="usa señales y grupos POSIX")
+def test_terminate_process_tree_escalates_group_after_parent_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeProcess:
+        pid: int = 4242
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            _ = timeout
+            return 0
+
+    signals: list[int] = []
+    process = _FakeProcess()
+
+    def fake_killpg(_pid: int, sig: int) -> None:
+        signals.append(sig)
+
+    def fake_reap(_process: subprocess.Popen[str]) -> None:
+        return None
+
+    monkeypatch.setattr("kliptych.download.os.killpg", fake_killpg)
+    monkeypatch.setattr("kliptych.download._reap", fake_reap)
+    terminate = cast("Callable[[subprocess.Popen[str]], None]", _private("_terminate_process_tree"))
+    fake_process = cast("subprocess.Popen[str]", cast("object", process))
+
+    terminate(fake_process)
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
 def test_subprocess_download_runner_isolates_process_group(
