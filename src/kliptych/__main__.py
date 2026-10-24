@@ -26,7 +26,8 @@ from kliptych.campaign_manager import CampaignManager, CampaignManagerError, Cam
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
-from kliptych.contract.enums import Aspect
+from kliptych.contract.enums import Aspect, CaptionCapitalization, WatermarkPosition
+from kliptych.contract.schema import LayoutSpec
 from kliptych.download import MediaDownloader
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport, SubprocessRunner, detect_environment
@@ -62,7 +63,7 @@ from kliptych.studio.analyzer import (
 )
 from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION, AnalysisDocument
 from kliptych.studio.preview import PreviewError, PreviewRequest, generate_preview
-from kliptych.studio.project_models import ProjectDocument
+from kliptych.studio.project_models import AbsorbNeighbor, ProjectDocument
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
 from kliptych.transcribe import FasterWhisperTranscriber
 
@@ -106,6 +107,63 @@ class _StudioStore(Protocol):
 
     def create_variant(self, *, candidate_id: str, name: str) -> ProjectDocument:
         """Create an initial editable variant from a B1 candidate."""
+        ...
+
+    def update_position(
+        self, *, variant_id: uuid.UUID, position_id: uuid.UUID, layout_spec: LayoutSpec
+    ) -> ProjectDocument:
+        """Persist a validated layout update for one variant position."""
+        ...
+
+    def split_position(
+        self, *, variant_id: uuid.UUID, position_id: uuid.UUID, at_ms: int
+    ) -> ProjectDocument:
+        """Split one timeline position at the requested timestamp."""
+        ...
+
+    def delete_position(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        position_id: uuid.UUID,
+        absorb_neighbor: AbsorbNeighbor | None,
+    ) -> ProjectDocument:
+        """Delete one timeline position while preserving continuous coverage."""
+        ...
+
+    def duplicate_variant(self, *, variant_id: uuid.UUID, name: str) -> ProjectDocument:
+        """Duplicate a variant with fresh IDs."""
+        ...
+
+    def import_watermark(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        source_path: Path,
+        position: WatermarkPosition | None = None,
+    ) -> ProjectDocument:
+        """Import a local PNG watermark into controlled project storage."""
+        ...
+
+    def set_watermark(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        enabled: bool | None = None,
+        position: WatermarkPosition | None = None,
+    ) -> ProjectDocument:
+        """Update watermark enabled state or zone for one variant."""
+        ...
+
+    def set_captions(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        enabled: bool | None = None,
+        highlight_color: str | None = None,
+        capitalization: CaptionCapitalization | None = None,
+    ) -> ProjectDocument:
+        """Update caption controls for one variant."""
         ...
 
 
@@ -665,6 +723,65 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
     _add_studio_project_argument(studio_variant)
     _ = studio_variant.add_argument("--candidate-id", required=True, help="ID del candidato B1")
     _ = studio_variant.add_argument("--name", required=True, help="nombre visible de la variante")
+    studio_update = studio_subcommands.add_parser(
+        "update-position", help="persiste un layout validado para una posicion"
+    )
+    _add_studio_project_argument(studio_update)
+    _ = studio_update.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_update.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = studio_update.add_argument("--layout-json", required=True, help="LayoutSpec JSON validado")
+    studio_split = studio_subcommands.add_parser(
+        "split-position", help="divide una posicion en el playhead"
+    )
+    _add_studio_project_argument(studio_split)
+    _ = studio_split.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_split.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = studio_split.add_argument("--at-ms", required=True, type=int, help="marca de corte en ms")
+    studio_delete = studio_subcommands.add_parser(
+        "delete-position", help="elimina una posicion preservando cobertura"
+    )
+    _add_studio_project_argument(studio_delete)
+    _ = studio_delete.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_delete.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = studio_delete.add_argument(
+        "--absorb", choices=["previous", "next"], help="vecino que absorbe (interior)"
+    )
+    studio_duplicate = studio_subcommands.add_parser(
+        "duplicate-variant", help="duplica una variante con nuevos IDs"
+    )
+    _add_studio_project_argument(studio_duplicate)
+    _ = studio_duplicate.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_duplicate.add_argument("--name", required=True, help="nombre de la copia")
+    studio_import_wm = studio_subcommands.add_parser(
+        "import-watermark", help="importa un PNG local como watermark"
+    )
+    _add_studio_project_argument(studio_import_wm)
+    _ = studio_import_wm.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_import_wm.add_argument("--source", required=True, help="ruta del PNG local")
+    _ = studio_import_wm.add_argument(
+        "--position", default="bottom_right", help="zona del enum WatermarkPosition"
+    )
+    studio_set_wm = studio_subcommands.add_parser(
+        "set-watermark", help="activa/desactiva o cambia la zona del watermark"
+    )
+    _add_studio_project_argument(studio_set_wm)
+    _ = studio_set_wm.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_set_wm.add_argument(
+        "--enabled", choices=["true", "false"], help="activar o desactivar"
+    )
+    _ = studio_set_wm.add_argument("--position", help="zona del enum WatermarkPosition")
+    studio_set_cap = studio_subcommands.add_parser(
+        "set-captions", help="actualiza controles de captions de una variante"
+    )
+    _add_studio_project_argument(studio_set_cap)
+    _ = studio_set_cap.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_set_cap.add_argument(
+        "--enabled", choices=["true", "false"], help="activar o desactivar"
+    )
+    _ = studio_set_cap.add_argument("--highlight-color", help="color de highlight ASS")
+    _ = studio_set_cap.add_argument(
+        "--capitalization", choices=["original", "uppercase", "lowercase"], help="capitalizacion"
+    )
 
 
 def _dispatch_command(
@@ -828,18 +945,62 @@ def _cmd_studio(args: argparse.Namespace) -> int:
 
 def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str, object]:
     command = cast("str", args.studio_command)
-    if command == "inspect":
-        return _studio_inspect_event(store)
-    if command == "initialize":
-        return _studio_initialize_event(store)
-    if command == "create-variant":
-        return _studio_create_variant_event(
+    dispatch = {
+        "inspect": lambda: _studio_inspect_event(store),
+        "initialize": lambda: _studio_initialize_event(store),
+        "create-variant": lambda: _studio_create_variant_event(
             store,
             candidate_id=cast("str", args.candidate_id),
             name=cast("str", args.name),
-        )
-    msg = f"Unknown Studio command: {command}"
-    raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+        ),
+        "update-position": lambda: _studio_update_position_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            position_id=cast("str", args.position_id),
+            layout_json=cast("str", args.layout_json),
+        ),
+        "split-position": lambda: _studio_split_position_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            position_id=cast("str", args.position_id),
+            at_ms=cast("int", args.at_ms),
+        ),
+        "delete-position": lambda: _studio_delete_position_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            position_id=cast("str", args.position_id),
+            absorb=cast("str | None", getattr(args, "absorb", None)),
+        ),
+        "duplicate-variant": lambda: _studio_duplicate_variant_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            name=cast("str", args.name),
+        ),
+        "import-watermark": lambda: _studio_import_watermark_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            source=cast("str", args.source),
+            position=cast("str", args.position),
+        ),
+        "set-watermark": lambda: _studio_set_watermark_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            enabled=cast("str | None", getattr(args, "enabled", None)),
+            position=cast("str | None", getattr(args, "position", None)),
+        ),
+        "set-captions": lambda: _studio_set_captions_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            enabled=cast("str | None", getattr(args, "enabled", None)),
+            highlight_color=cast("str | None", getattr(args, "highlight_color", None)),
+            capitalization=cast("str | None", getattr(args, "capitalization", None)),
+        ),
+    }
+    handler = dispatch.get(command)
+    if handler is None:
+        msg = f"Unknown Studio command: {command}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return handler()
 
 
 def _studio_inspect_event(store: _StudioStore) -> dict[str, object]:
@@ -879,6 +1040,176 @@ def _studio_create_variant_event(
         "type": "variant_created",
         "variant": variant.model_dump(mode="json"),
     }
+
+
+def _studio_update_position_event(
+    store: _StudioStore, *, variant_id: str, position_id: str, layout_json: str
+) -> dict[str, object]:
+    """Persist a validated layout update for one Studio position.
+
+    Returns:
+        A JSON event describing the updated variant.
+
+    Raises:
+        ProjectStoreError: If the layout or project boundary rejects the update.
+        ValueError: If an identifier is not a valid UUID.
+    """
+    try:
+        layout_spec = LayoutSpec.model_validate(json.loads(layout_json))
+    except Exception as error:  # boundary validation
+        msg = f"Invalid layout JSON: {error}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    try:
+        project = store.update_position(
+            variant_id=uuid.UUID(variant_id),
+            position_id=uuid.UUID(position_id),
+            layout_spec=layout_spec,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Updated variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {
+        "type": "position_updated",
+        "variant": variant.model_dump(mode="json"),
+    }
+
+
+def _studio_split_position_event(
+    store: _StudioStore, *, variant_id: str, position_id: str, at_ms: int
+) -> dict[str, object]:
+    try:
+        project = store.split_position(
+            variant_id=uuid.UUID(variant_id),
+            position_id=uuid.UUID(position_id),
+            at_ms=at_ms,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Split variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "position_split", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_delete_position_event(
+    store: _StudioStore, *, variant_id: str, position_id: str, absorb: str | None
+) -> dict[str, object]:
+    try:
+        neighbor = None if absorb is None else AbsorbNeighbor(absorb)
+        project = store.delete_position(
+            variant_id=uuid.UUID(variant_id),
+            position_id=uuid.UUID(position_id),
+            absorb_neighbor=neighbor,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Deleted position variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "position_deleted", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_duplicate_variant_event(
+    store: _StudioStore, *, variant_id: str, name: str
+) -> dict[str, object]:
+    try:
+        project = store.duplicate_variant(variant_id=uuid.UUID(variant_id), name=name)
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = project.variants[-1]
+    return {"type": "variant_duplicated", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_import_watermark_event(
+    store: _StudioStore, *, variant_id: str, source: str, position: str
+) -> dict[str, object]:
+    try:
+        project = store.import_watermark(
+            variant_id=uuid.UUID(variant_id),
+            source_path=Path(source),
+            position=WatermarkPosition(position),
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Watermark variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "watermark_imported", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_set_watermark_event(
+    store: _StudioStore, *, variant_id: str, enabled: str | None, position: str | None
+) -> dict[str, object]:
+    try:
+        enabled_value = None if enabled is None else enabled == "true"
+        position_value = None if position is None else WatermarkPosition(position)
+        project = store.set_watermark(
+            variant_id=uuid.UUID(variant_id),
+            enabled=enabled_value,
+            position=position_value,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Watermark variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "watermark_updated", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_set_captions_event(
+    store: _StudioStore,
+    *,
+    variant_id: str,
+    enabled: str | None,
+    highlight_color: str | None,
+    capitalization: str | None,
+) -> dict[str, object]:
+    try:
+        enabled_value = None if enabled is None else enabled == "true"
+        capitalization_value = (
+            None if capitalization is None else CaptionCapitalization(capitalization)
+        )
+        project = store.set_captions(
+            variant_id=uuid.UUID(variant_id),
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
+    if variant is None:
+        msg = "Caption variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "captions_updated", "variant": variant.model_dump(mode="json")}
 
 
 def _write_preview_event(event: dict[str, object]) -> None:

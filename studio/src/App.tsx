@@ -30,6 +30,10 @@ type Variant = {
   name: string;
   status: "active" | "requires_review";
   layout_timeline: Position[];
+  watermark?: { enabled: boolean; asset_id: string | null; asset_sha256: string | null; source_name: string | null; position: string };
+  captions_enabled?: boolean;
+  caption_highlight_color?: string;
+  caption_capitalization?: string;
 };
 
 type ProjectEvent = {
@@ -66,6 +70,13 @@ function App() {
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [composedUrl, setComposedUrl] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [watermarkEnabled, setWatermarkEnabled] = useState(false);
+  const [watermarkPosition, setWatermarkPosition] = useState("bottom_right");
+  const [captionsEnabled, setCaptionsEnabled] = useState(false);
+  const [captionHighlightColor, setCaptionHighlightColor] = useState("&H000000FF");
+  const [captionCapitalization, setCaptionCapitalization] = useState("original");
+  const [splitAtMs, setSplitAtMs] = useState(0);
+  const [absorbChoice, setAbsorbChoice] = useState<"previous" | "next">("previous");
   const [message, setMessage] = useState("Abre un proyecto B1 para empezar.");
   const [isBusy, setBusy] = useState(false);
 
@@ -73,7 +84,16 @@ function App() {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
     setDrag(null);
     setPending(false);
+    if (selectedPosition) setSplitAtMs(Math.floor((selectedPosition.start_ms + selectedPosition.end_ms) / 2));
   }, [selectedPosition]);
+
+  useEffect(() => {
+    setWatermarkEnabled(selectedVariant?.watermark?.enabled ?? false);
+    setWatermarkPosition(selectedVariant?.watermark?.position ?? "bottom_right");
+    setCaptionsEnabled(selectedVariant?.captions_enabled ?? false);
+    setCaptionHighlightColor(selectedVariant?.caption_highlight_color ?? "&H000000FF");
+    setCaptionCapitalization(selectedVariant?.caption_capitalization ?? "original");
+  }, [selectedVariant]);
 
   async function configureBackend(path = backendPath) {
     await invoke("set_backend_path", { executable: path });
@@ -176,6 +196,221 @@ function App() {
     }
   }
 
+  async function applyLayout() {
+    if (!projectDir || !selectedVariant || !selectedPosition || !pending) return;
+    setBusy(true);
+    try {
+      const layout = {
+        layout: selectedPosition.layout_spec.layout,
+        bands: localBands.map((rect) => ({ source: "source.mp4", source_rect: rect })),
+      };
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "update-position",
+        variantId: selectedVariant.variant_id,
+        positionId: selectedPosition.position_id,
+        layoutJson: JSON.stringify(layout),
+      });
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((position) => position.position_id === selectedPosition.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
+      setPending(false);
+      setMessage("Cambios aplicados. Genera preview para verificar.");
+    } catch (error) {
+      setMessage(`No se pudo aplicar: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function replaceVariant(updatedVariant: Variant) {
+    setSelectedVariant(updatedVariant);
+    setSelectedPosition(updatedVariant.layout_timeline[0] ?? null);
+    setProject((current) =>
+      current
+        ? {
+            ...current,
+            variants: current.variants.map((variant) =>
+              variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+            ),
+          }
+        : current
+    );
+  }
+
+  async function splitPosition() {
+    if (!projectDir || !selectedVariant || !selectedPosition || isBusy) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "split-position",
+        variantId: selectedVariant.variant_id,
+        positionId: selectedPosition.position_id,
+        atMs: splitAtMs,
+      });
+      replaceVariant(event.variant);
+      setMessage("Posición dividida.");
+    } catch (error) {
+      setMessage(`No se pudo dividir: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deletePosition() {
+    if (!projectDir || !selectedVariant || !selectedPosition || isBusy) return;
+    if (selectedVariant.layout_timeline.length <= 1) {
+      setMessage("No se puede eliminar la única posición.");
+      return;
+    }
+    const isInterior =
+      selectedPosition !== selectedVariant.layout_timeline[0] &&
+      selectedPosition !== selectedVariant.layout_timeline[selectedVariant.layout_timeline.length - 1];
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "delete-position",
+        variantId: selectedVariant.variant_id,
+        positionId: selectedPosition.position_id,
+        absorb: isInterior ? absorbChoice : null,
+      });
+      replaceVariant(event.variant);
+      setMessage("Posición eliminada.");
+    } catch (error) {
+      setMessage(`No se pudo eliminar: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function duplicateVariant() {
+    if (!projectDir || !selectedVariant || isBusy) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "duplicate-variant",
+        variantId: selectedVariant.variant_id,
+        name: `${selectedVariant.name} copia`,
+      });
+      const next = { ...project!, variants: [...project!.variants, event.variant] };
+      setProject(next);
+      setSelectedVariant(event.variant);
+      setSelectedPosition(event.variant.layout_timeline[0]);
+      setMessage("Variante duplicada.");
+    } catch (error) {
+      setMessage(`No se pudo duplicar: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importWatermark() {
+    if (!projectDir || !selectedVariant || isBusy) return;
+    const selected = await open({ multiple: false, directory: false, filters: [{ name: "PNG", extensions: ["png"] }], title: "Importar watermark PNG" });
+    if (typeof selected !== "string") return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "import-watermark",
+        variantId: selectedVariant.variant_id,
+        source: selected,
+        wmPosition: watermarkPosition,
+      });
+      replaceVariant(event.variant);
+      setMessage("Watermark importado.");
+    } catch (error) {
+      setMessage(`No se pudo importar watermark: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateWatermark(enabled: boolean, position: string) {
+    if (!projectDir || !selectedVariant || isBusy) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "set-watermark",
+        variantId: selectedVariant.variant_id,
+        enabled: enabled ? "true" : "false",
+        wmPosition: position,
+      });
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((p) => p.position_id === selectedPosition?.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
+    } catch (error) {
+      setMessage(`No se pudo actualizar watermark: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateCaptions(enabled: boolean, highlightColor: string, capitalization: string) {
+    if (!projectDir || !selectedVariant || isBusy) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "set-captions",
+        variantId: selectedVariant.variant_id,
+        enabled: enabled ? "true" : "false",
+        highlightColor,
+        capitalization,
+      });
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((p) => p.position_id === selectedPosition?.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
+    } catch (error) {
+      setMessage(`No se pudo actualizar captions: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -249,6 +484,12 @@ function App() {
             <div className="editor-toolbar">
               <div><p className="eyebrow">{selectedPosition ? `${formatTime(selectedPosition.start_ms)} — ${formatTime(selectedPosition.end_ms)}` : "SELECCIONA UNA VARIANTE"}</p><h2>{selectedVariant?.name ?? "Sin variante activa"}</h2></div>
               <button className="primary" onClick={requestPreview} disabled={!selectedPosition || isBusy}>Generar preview</button>
+              <button className="ghost" onClick={applyLayout} disabled={!pending || isBusy}>Aplicar cambios</button>
+              <label className="split-control">Corte (ms) <input type="number" value={splitAtMs} onChange={(event) => setSplitAtMs(Number(event.target.value))} disabled={isBusy} /></label>
+              <button className="ghost" onClick={splitPosition} disabled={selectedVariant?.layout_timeline.length === 1 || isBusy}>Dividir</button>
+              <button className="ghost" onClick={deletePosition} disabled={(selectedVariant?.layout_timeline.length ?? 0) <= 1 || isBusy}>Eliminar posición</button>
+              <select value={absorbChoice} onChange={(event) => setAbsorbChoice(event.target.value as "previous" | "next")} disabled={isBusy}><option value="previous">Absorber anterior</option><option value="next">Absorber siguiente</option></select>
+              <button className="ghost" onClick={duplicateVariant} disabled={!selectedVariant || isBusy}>Duplicar variante</button>
             </div>
             <div className="canvas-grid">
               <article className="source-panel">
@@ -265,6 +506,31 @@ function App() {
               </article>
             </div>
             <div className="timeline"><div className="timeline-label">Timeline de composición</div><div className="timeline-track">{selectedPosition && <button className="timeline-segment">{selectedPosition.layout_spec.layout}</button>}</div></div>
+            <div className="watermark-panel">
+              <span className="eyebrow">Watermark</span>
+              <button className="ghost" onClick={importWatermark} disabled={!selectedVariant || isBusy}>Importar PNG</button>
+              <label><input type="checkbox" checked={watermarkEnabled} onChange={(event) => { setWatermarkEnabled(event.target.checked); updateWatermark(event.target.checked, watermarkPosition); }} disabled={!selectedVariant || isBusy} /> Activar</label>
+              <select value={watermarkPosition} onChange={(event) => { setWatermarkPosition(event.target.value); updateWatermark(watermarkEnabled, event.target.value); }} disabled={!selectedVariant || isBusy}>
+                <option value="center_top">center_top</option>
+                <option value="center">center</option>
+                <option value="center_bottom">center_bottom</option>
+                <option value="top_left">top_left</option>
+                <option value="top_right">top_right</option>
+                <option value="bottom_left">bottom_left</option>
+                <option value="bottom_right">bottom_right</option>
+              </select>
+              {selectedVariant?.watermark?.source_name && <small>{selectedVariant.watermark.source_name}</small>}
+            </div>
+            <div className="caption-panel">
+              <span className="eyebrow">Captions</span>
+              <label><input type="checkbox" checked={captionsEnabled} onChange={(event) => { setCaptionsEnabled(event.target.checked); updateCaptions(event.target.checked, captionHighlightColor, captionCapitalization); }} disabled={!selectedVariant || isBusy} /> Activar</label>
+              <label>Highlight <input type="text" value={captionHighlightColor} onChange={(event) => setCaptionHighlightColor(event.target.value)} onBlur={() => updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization)} disabled={!captionsEnabled || isBusy} /></label>
+              <select value={captionCapitalization} onChange={(event) => { setCaptionCapitalization(event.target.value); updateCaptions(captionsEnabled, captionHighlightColor, event.target.value); }} disabled={!captionsEnabled || isBusy}>
+                <option value="original">original (Aa)</option>
+                <option value="uppercase">uppercase (AA)</option>
+                <option value="lowercase">lowercase (aa)</option>
+              </select>
+            </div>
           </section>
         </div>
       )}

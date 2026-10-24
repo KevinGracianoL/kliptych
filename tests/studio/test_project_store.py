@@ -5,6 +5,8 @@ from typing import Protocol, cast
 
 import pytest
 
+from kliptych.contract.enums import Layout
+from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.gate.models import MediaInfo
 from kliptych.hashing import sha256_bytes, sha256_file
 from kliptych.studio import project_store as _project_store
@@ -15,7 +17,9 @@ from kliptych.studio.models import (
     AnalysisSource,
 )
 from kliptych.studio.project_models import (
+    LayoutPosition,
     ProjectDocument,
+    Variant,
     VariantOrigin,
     VariantRange,
     create_initial_variant,
@@ -1012,3 +1016,151 @@ def test_reanalysis_interrupt_during_editable_state_copy_restores_project(
     assert (project_dir / "assets" / "watermark" / "asset.png").read_bytes() == b"png"
     assert not list(tmp_path.glob(".analysis-backup-*"))
     assert not list(tmp_path.glob(".analysis-staging-*"))
+
+
+def test_store_update_position_persists_validated_layout(
+    tmp_path: Path,
+) -> None:
+    """A validated crop update persists to project.json without changing evidence."""
+    candidate = _candidate()
+    analysis = _analysis().model_copy(update={"candidates": (candidate,)})
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(analysis)
+        stage.write_text("source.mp4", "source")
+        stage.write_text("transcript.json", "transcript")
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    _ = store.initialize_project(probe=_Probe(60.0))
+    created = store.create_variant(candidate_id=candidate.candidate_id, name="Variant 1")
+    variant = created.variants[0]
+    position = variant.layout_timeline[0]
+
+    updated_spec = LayoutSpec(
+        layout=Layout.VERTICAL,
+        bands=(
+            Band(
+                source="source.mp4",
+                source_rect=NormalizedRect(x=0.1, y=0.2, width=0.5, height=0.6),
+            ),
+        ),
+    )
+    updated = store.update_position(
+        variant_id=variant.variant_id,
+        position_id=position.position_id,
+        layout_spec=updated_spec,
+    )
+
+    persisted = open_project_store(project_dir).read_project()
+    assert persisted is not None
+    persisted_position = persisted.variants[0].layout_timeline[0]
+    assert persisted_position.layout_spec == updated_spec
+    assert persisted.variants[0].variant_id == variant.variant_id
+    assert updated.variants[0].layout_timeline[0].layout_spec == updated_spec
+
+
+def _setup_project_with_variant(
+    tmp_path: Path,
+) -> tuple[Path, ProjectStore, Variant, LayoutPosition]:
+    candidate = _candidate()
+    analysis = _analysis().model_copy(update={"candidates": (candidate,)})
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(analysis)
+        stage.write_text("source.mp4", "source")
+        stage.write_text("transcript.json", "transcript")
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    _ = store.initialize_project(probe=_Probe(60.0))
+    created = store.create_variant(candidate_id=candidate.candidate_id, name="Variant 1")
+    variant = created.variants[0]
+    position = variant.layout_timeline[0]
+    return project_dir, store, variant, position
+
+
+def test_store_split_position_persists(tmp_path: Path) -> None:
+    _, store, variant, position = _setup_project_with_variant(tmp_path)
+    at_ms = (position.start_ms + position.end_ms) // 2
+    updated = store.split_position(
+        variant_id=variant.variant_id, position_id=position.position_id, at_ms=at_ms
+    )
+    assert len(updated.variants[0].layout_timeline) == 2
+
+
+def test_store_split_position_rejects_boundary(tmp_path: Path) -> None:
+    _, store, variant, position = _setup_project_with_variant(tmp_path)
+    with pytest.raises(ProjectStoreError):
+        _ = store.split_position(
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms,
+        )
+
+
+def test_store_delete_position_persists(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup_project_with_variant(tmp_path)
+    at_ms = (position.start_ms + position.end_ms) // 2
+    _ = store.split_position(
+        variant_id=variant.variant_id, position_id=position.position_id, at_ms=at_ms
+    )
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    pos_to_delete = variant.layout_timeline[1]
+    updated = store.delete_position(
+        variant_id=variant.variant_id,
+        position_id=pos_to_delete.position_id,
+        absorb_neighbor=None,
+    )
+    assert len(updated.variants[0].layout_timeline) == 1
+
+
+def test_store_duplicate_variant_persists(tmp_path: Path) -> None:
+    _project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    updated = store.duplicate_variant(variant_id=variant.variant_id, name="Copy")
+    assert len(updated.variants) == 2
+    assert updated.variants[1].name == "Copy"
+
+
+def test_store_import_watermark_persists(tmp_path: Path) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    png_path = tmp_path / "logo.png"
+    _ = png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    updated = store.import_watermark(
+        variant_id=variant.variant_id, source_path=png_path, position=None
+    )
+    wm = updated.variants[0].watermark
+    assert wm.enabled is True
+    assert wm.asset_id is not None
+    assert (project_dir / "assets" / "watermark" / f"{wm.asset_id}.png").is_file()
+
+
+def test_store_import_watermark_rejects_non_png(tmp_path: Path) -> None:
+    _, store, variant, _ = _setup_project_with_variant(tmp_path)
+    bad = tmp_path / "logo.txt"
+    _ = bad.write_text("not png")
+    with pytest.raises(ProjectStoreError):
+        _ = store.import_watermark(variant_id=variant.variant_id, source_path=bad, position=None)
+
+
+def test_store_set_watermark_persists(tmp_path: Path) -> None:
+    _project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    png_path = tmp_path / "logo.png"
+    _ = png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    _ = store.import_watermark(variant_id=variant.variant_id, source_path=png_path, position=None)
+    updated = store.set_watermark(variant_id=variant.variant_id, enabled=False, position=None)
+    assert updated.variants[0].watermark.enabled is False
+
+
+def test_store_set_captions_persists(tmp_path: Path) -> None:
+    _project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    updated = store.set_captions(
+        variant_id=variant.variant_id,
+        enabled=True,
+        highlight_color="&H00FF0000",
+        capitalization=None,
+    )
+    assert updated.variants[0].captions_enabled is True
+    assert updated.variants[0].caption_highlight_color == "&H00FF0000"
