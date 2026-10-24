@@ -1060,7 +1060,9 @@ def test_store_update_position_persists_validated_layout(
     assert updated.variants[0].layout_timeline[0].layout_spec == updated_spec
 
 
-def _setup_project_with_variant(tmp_path: Path) -> tuple[Path, ProjectStore, Variant, LayoutPosition]:
+def _setup_project_with_variant(
+    tmp_path: Path,
+) -> tuple[Path, ProjectStore, Variant, LayoutPosition]:
     candidate = _candidate()
     analysis = _analysis().model_copy(update={"candidates": (candidate,)})
     project_dir = tmp_path / "project"
@@ -1148,9 +1150,7 @@ def test_store_set_watermark_persists(tmp_path: Path) -> None:
     png_path = tmp_path / "logo.png"
     _ = png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
     _ = store.import_watermark(variant_id=variant.variant_id, source_path=png_path, position=None)
-    updated = store.set_watermark(
-        variant_id=variant.variant_id, enabled=False, position=None
-    )
+    updated = store.set_watermark(variant_id=variant.variant_id, enabled=False, position=None)
     assert updated.variants[0].watermark.enabled is False
 
 
