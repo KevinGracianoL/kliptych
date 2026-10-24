@@ -1,0 +1,224 @@
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+    sync::Mutex,
+};
+
+use serde_json::Value;
+
+struct BackendPath(Mutex<String>);
+
+fn run_backend(executable: &str, args: &[String]) -> Result<Value, String> {
+    let output = Command::new(executable)
+        .args(args)
+        .output()
+        .map_err(|error| format!("No se pudo ejecutar Kliptych: {error}"))?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("Kliptych emitió salida no UTF-8: {error}"))?;
+    let event = stdout
+        .lines()
+        .last()
+        .ok_or_else(|| "Kliptych no emitió JSON para Studio.".to_owned())?;
+    let value = serde_json::from_str::<Value>(event)
+        .map_err(|error| format!("Kliptych emitió JSON inválido: {error}"))?;
+    if output.status.success() {
+        Ok(value)
+    } else {
+        Err(value["message"]
+            .as_str()
+            .unwrap_or("Kliptych rechazó la operación.")
+            .to_owned())
+    }
+}
+
+#[tauri::command]
+fn set_backend_path(
+    state: tauri::State<'_, BackendPath>,
+    executable: String,
+) -> Result<(), String> {
+    if executable.trim().is_empty() {
+        return Err("Selecciona un ejecutable Kliptych válido.".to_owned());
+    }
+    *state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo guardar el backend.".to_owned())? = executable;
+    Ok(())
+}
+
+#[tauri::command]
+fn backend_status(state: tauri::State<'_, BackendPath>) -> Result<String, String> {
+    let executable = state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el backend.".to_owned())?
+        .clone();
+    let output = Command::new(&executable)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("No se pudo ejecutar Kliptych: {error}"))?;
+    if !output.status.success() {
+        return Err("El ejecutable Kliptych no respondió correctamente.".to_owned());
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("Salida no UTF-8: {error}"))
+}
+
+#[tauri::command]
+fn studio_project(
+    state: tauri::State<'_, BackendPath>,
+    project_dir: String,
+    operation: String,
+    candidate_id: Option<String>,
+    name: Option<String>,
+) -> Result<Value, String> {
+    if !Path::new(&project_dir).is_dir() {
+        return Err("Selecciona una carpeta de proyecto válida.".to_owned());
+    }
+    if !["inspect", "initialize", "create-variant"].contains(&operation.as_str()) {
+        return Err("Operación Studio no admitida.".to_owned());
+    }
+    let executable = state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el backend.".to_owned())?
+        .clone();
+    let mut args = vec![
+        "--quiet".to_owned(),
+        "studio".to_owned(),
+        operation.clone(),
+        "--project-dir".to_owned(),
+        project_dir,
+    ];
+    if operation == "create-variant" {
+        args.push("--candidate-id".to_owned());
+        args.push(candidate_id.ok_or_else(|| "Falta candidateId.".to_owned())?);
+        args.push("--name".to_owned());
+        args.push(name.ok_or_else(|| "Falta nombre de variante.".to_owned())?);
+    }
+    run_backend(&executable, &args)
+}
+
+#[tauri::command]
+fn preview_position(
+    state: tauri::State<'_, BackendPath>,
+    project_dir: String,
+    variant_id: String,
+    position_id: String,
+    at_ms: i64,
+) -> Result<Value, String> {
+    if !Path::new(&project_dir).is_dir() || at_ms < 0 {
+        return Err("Solicitud de preview inválida.".to_owned());
+    }
+    let executable = state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el backend.".to_owned())?
+        .clone();
+    run_backend(
+        &executable,
+        &[
+            "--quiet".to_owned(),
+            "preview".to_owned(),
+            "--project-dir".to_owned(),
+            project_dir,
+            "--variant-id".to_owned(),
+            variant_id,
+            "--position-id".to_owned(),
+            position_id,
+            "--at-ms".to_owned(),
+            at_ms.to_string(),
+        ],
+    )
+}
+
+fn preview_image_path(project_dir: &str, relative_path: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("jpg")
+    {
+        return Err("Ruta de preview inválida.".to_owned());
+    }
+    let project = fs::canonicalize(project_dir)
+        .map_err(|error| format!("No se pudo abrir el proyecto: {error}"))?;
+    let preview_root = fs::canonicalize(project.join("previews"))
+        .map_err(|error| format!("No se pudo abrir el caché de previews: {error}"))?;
+    let image = fs::canonicalize(project.join(relative))
+        .map_err(|error| format!("No se pudo abrir el preview: {error}"))?;
+    if !image.starts_with(&preview_root) {
+        return Err("La imagen no pertenece al caché de previews.".to_owned());
+    }
+    Ok(image)
+}
+
+#[tauri::command]
+fn preview_image_data(project_dir: String, relative_path: String) -> Result<String, String> {
+    let path = preview_image_path(&project_dir, &relative_path)?;
+    let bytes = fs::read(path).map_err(|error| format!("No se pudo leer el preview: {error}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    ))
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(BackendPath(Mutex::new("kliptych".to_owned())))
+        .invoke_handler(tauri::generate_handler![
+            set_backend_path,
+            backend_status,
+            studio_project,
+            preview_position,
+            preview_image_data
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use super::preview_image_path;
+
+    fn write_preview(project: &Path) -> String {
+        let preview_dir = project.join("previews").join("variant");
+        fs::create_dir_all(&preview_dir).expect("create preview directory");
+        let image = preview_dir.join("frame.jpg");
+        fs::write(&image, [0xff, 0xd8, 0xff, 0xd9]).expect("write preview");
+        "previews/variant/frame.jpg".to_owned()
+    }
+
+    #[test]
+    fn preview_path_accepts_regular_preview_inside_project() {
+        let temp = tempfile::tempdir().expect("create temporary project");
+        let relative = write_preview(temp.path());
+
+        let path = preview_image_path(temp.path().to_str().expect("utf8 path"), &relative)
+            .expect("preview path");
+
+        assert!(path.ends_with("previews/variant/frame.jpg"));
+    }
+
+    #[test]
+    fn preview_path_rejects_path_traversal() {
+        let temp = tempfile::tempdir().expect("create temporary project");
+        let _ = write_preview(temp.path());
+
+        let error = preview_image_path(
+            temp.path().to_str().expect("utf8 path"),
+            "previews/variant/../../outside.jpg",
+        )
+        .expect_err("path traversal must be rejected");
+
+        assert_eq!(error, "Ruta de preview inválida.");
+    }
+}
