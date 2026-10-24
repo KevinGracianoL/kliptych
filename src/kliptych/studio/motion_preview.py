@@ -89,7 +89,7 @@ def generate_motion_preview(
     if project is None:
         msg = "Motion preview requires initialized editable project state."
         raise PreviewError(msg)
-    _validate_evidence(request.project_dir)
+    _validate_evidence(request.project_dir, project)
     variant = _find_variant(project, request.variant_id)
     position = _find_position(variant, request.position_id)
     if not (position.start_ms <= request.at_ms < position.end_ms):
@@ -136,9 +136,9 @@ def generate_motion_preview(
     )
 
 
-def _validate_evidence(project_dir: Path) -> None:
+def _validate_evidence(project_dir: Path, _project: ProjectDocument) -> None:
     transcript = project_dir / "transcript.json"
-    if not transcript.is_file():
+    if not transcript.is_file() or transcript.is_symlink() or transcript.is_junction():
         msg = "Preview requires a regular transcript artifact."
         raise PreviewError(msg)
 
@@ -406,7 +406,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
         x_expr, y_expr = _watermark_xy(variant.watermark.position)
         target_w = int(720 * 0.15 / 2) * 2
         filter_parts.append(
-            f"{final_label}[1:v]format=rgba,scale={target_w}:-2[wm];{final_label}[wm]overlay={x_expr}:{y_expr}[outv_wm]"
+            f"[1:v]format=rgba,scale={target_w}:-2[wm];{final_label}[wm]overlay={x_expr}:{y_expr}[outv_wm]"
         )
         final_label = "[outv_wm]"
 
