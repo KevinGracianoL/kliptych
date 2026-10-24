@@ -1,6 +1,7 @@
 """Behavioral tests for the Track B1 Studio project store."""
 
 from pathlib import Path
+import uuid
 from typing import Protocol, cast
 
 import pytest
@@ -1206,3 +1207,39 @@ def test_store_clear_caption_correction_persists(tmp_path: Path) -> None:
         variant_id=variant.variant_id, correction_id=correction_id
     )
     assert cleared.variants[0].caption_corrections == ()
+
+
+def test_store_set_caption_correction_requires_project(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(_analysis())
+        stage.write_text("source.mp4", "source")
+        stage.write_text("transcript.json", "transcript")
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    _ = store.initialize_project(probe=_Probe(60.0))
+    with pytest.raises(ProjectStoreError):
+        _ = store.set_caption_correction(
+            variant_id=uuid.uuid4(),
+            interval=(0, 1000),
+            corrected_text="Texto",
+            author="user",
+            created_at_ms=1,
+        )
+
+
+def test_store_clear_caption_correction_requires_project(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(_analysis())
+        stage.write_text("source.mp4", "source")
+        stage.write_text("transcript.json", "transcript")
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    _ = store.initialize_project(probe=_Probe(60.0))
+    with pytest.raises(ProjectStoreError):
+        _ = store.clear_caption_correction(
+            variant_id=uuid.uuid4(), correction_id=uuid.uuid4()
+        )
