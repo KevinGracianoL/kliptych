@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import signal
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
@@ -62,6 +63,10 @@ from kliptych.studio.analyzer import (
     analyze_project,
 )
 from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION, AnalysisDocument
+from kliptych.studio.motion_preview import (
+    MotionPreviewRequest,
+    generate_motion_preview,
+)
 from kliptych.studio.preview import PreviewError, PreviewRequest, generate_preview
 from kliptych.studio.project_models import AbsorbNeighbor, ProjectDocument
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
@@ -818,6 +823,14 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
     _add_studio_project_argument(studio_clear_corr)
     _ = studio_clear_corr.add_argument("--variant-id", required=True, help="ID de la variante")
     _ = studio_clear_corr.add_argument("--correction-id", required=True, help="ID de la correccion")
+    studio_motion = studio_subcommands.add_parser(
+        "preview-motion", help="genera un preview temporal (MP4 corto)"
+    )
+    _add_studio_project_argument(studio_motion)
+    _ = studio_motion.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_motion.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = studio_motion.add_argument("--at-ms", required=True, type=int, help="marca de inicio en ms")
+    _ = studio_motion.add_argument("--duration-ms", type=int, default=3000, help="duracion en ms")
 
 
 def _dispatch_command(
@@ -1044,6 +1057,10 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             store,
             variant_id=cast("str", args.variant_id),
             correction_id=cast("str", args.correction_id),
+        ),
+        "preview-motion": lambda: _studio_preview_motion_event(
+            args=args,
+            project_dir=Path(cast("str", args.project_dir)),
         ),
     }
     handler = dispatch.get(command)
@@ -1310,6 +1327,47 @@ def _studio_clear_caption_correction_event(
         msg = "Caption correction variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
     return {"type": "caption_correction_cleared", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_preview_motion_event(
+    *, args: argparse.Namespace, project_dir: Path
+) -> dict[str, object]:
+    probe = FFprobeProbe()
+    runner = _SubprocessMotionRunner()
+    try:
+        result = generate_motion_preview(
+            MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=uuid.UUID(cast("str", args.variant_id)),
+                position_id=uuid.UUID(cast("str", args.position_id)),
+                at_ms=cast("int", args.at_ms),
+                duration_ms=cast("int", getattr(args, "duration_ms", 3000)),
+            ),
+            probe=probe,
+            runner=runner,
+        )
+    except Exception as error:
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    return {
+        "type": "motion_preview",
+        "preview_path": str(result.preview_path.relative_to(project_dir)),
+        "fingerprint": result.fingerprint,
+        "start_ms": result.frame_start_ms,
+        "end_ms": result.frame_end_ms,
+    }
+
+
+class _SubprocessMotionRunner:
+    def run(self, argv: tuple[str, ...], *, timeout_s: float) -> object:  # ruff: ignore[no-self-use]
+
+        completed = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+            list(argv), capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+        if completed.returncode != 0:
+            msg = completed.stderr.strip() or "motion preview failed"
+            raise RuntimeError(msg)
+        return completed
 
 
 def _write_preview_event(event: dict[str, object]) -> None:

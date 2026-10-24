@@ -87,6 +87,7 @@ fn studio_project(
     author: Option<String>,
     created_at_ms: Option<i64>,
     correction_id: Option<String>,
+    duration_ms: Option<i64>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -289,6 +290,26 @@ fn studio_project(
                 .ok_or_else(|| "Falta correctionId.".to_owned())?,
         );
     }
+    if operation == "preview-motion" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--position-id".to_owned());
+        args.push(
+            position_id
+                .clone()
+                .ok_or_else(|| "Falta positionId.".to_owned())?,
+        );
+        args.push("--at-ms".to_owned());
+        args.push(at_ms.ok_or_else(|| "Falta atMs.".to_owned())?.to_string());
+        if let Some(value) = duration_ms {
+            args.push("--duration-ms".to_owned());
+            args.push(value.to_string());
+        }
+    }
     run_backend(&executable, &args)
 }
 
@@ -350,12 +371,47 @@ fn preview_image_path(project_dir: &str, relative_path: &str) -> Result<PathBuf,
     Ok(image)
 }
 
+fn preview_video_path(project_dir: &str, relative_path: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("mp4")
+    {
+        return Err("Ruta de video inválida.".to_owned());
+    }
+    let project = fs::canonicalize(project_dir)
+        .map_err(|error| format!("No se pudo abrir el proyecto: {error}"))?;
+    let preview_root = fs::canonicalize(project.join("previews"))
+        .map_err(|error| format!("No se pudo abrir el caché de previews: {error}"))?;
+    let video = fs::canonicalize(project.join(relative))
+        .map_err(|error| format!("No se pudo abrir el preview: {error}"))?;
+    if !video.starts_with(&preview_root) {
+        return Err("El video no pertenece al caché de previews.".to_owned());
+    }
+    Ok(video)
+}
+
 #[tauri::command]
 fn preview_image_data(project_dir: String, relative_path: String) -> Result<String, String> {
     let path = preview_image_path(&project_dir, &relative_path)?;
     let bytes = fs::read(path).map_err(|error| format!("No se pudo leer el preview: {error}"))?;
     Ok(format!(
         "data:image/jpeg;base64,{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    ))
+}
+
+#[tauri::command]
+fn preview_video_data(project_dir: String, relative_path: String) -> Result<String, String> {
+    let path = preview_video_path(&project_dir, &relative_path)?;
+    let bytes = fs::read(path).map_err(|error| format!("No se pudo leer el video: {error}"))?;
+    Ok(format!(
+        "data:video/mp4;base64,{}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
     ))
 }
@@ -370,7 +426,8 @@ pub fn run() {
             backend_status,
             studio_project,
             preview_position,
-            preview_image_data
+            preview_image_data,
+            preview_video_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

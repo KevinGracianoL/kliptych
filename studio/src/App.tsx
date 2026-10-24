@@ -70,6 +70,7 @@ function App() {
   const [drag, setDrag] = useState<DragState | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [composedUrl, setComposedUrl] = useState<string | null>(null);
+  const [motionPreviewUrl, setMotionPreviewUrl] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState(false);
   const [watermarkPosition, setWatermarkPosition] = useState("bottom_right");
@@ -453,6 +454,28 @@ function App() {
     }
   }
 
+  async function generateMotionPreview() {
+    if (!projectDir || !selectedVariant || !selectedPosition) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ preview_path: string }>("studio_project", {
+        projectDir,
+        operation: "preview-motion",
+        variantId: selectedVariant.variant_id,
+        positionId: selectedPosition.position_id,
+        atMs: selectedPosition.start_ms,
+        durationMs: 3000,
+      });
+      const data = await invoke<string>("preview_video_data", { projectDir, relativePath: event.preview_path });
+      setMotionPreviewUrl(data);
+      setMessage("Preview temporal generado.");
+    } catch (error) {
+      setMessage(`No se pudo generar preview temporal: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -532,6 +555,7 @@ function App() {
               <button className="ghost" onClick={deletePosition} disabled={(selectedVariant?.layout_timeline.length ?? 0) <= 1 || isBusy}>Eliminar posición</button>
               <select value={absorbChoice} onChange={(event) => setAbsorbChoice(event.target.value as "previous" | "next")} disabled={isBusy}><option value="previous">Absorber anterior</option><option value="next">Absorber siguiente</option></select>
               <button className="ghost" onClick={duplicateVariant} disabled={!selectedVariant || isBusy}>Duplicar variante</button>
+              <button className="primary" onClick={generateMotionPreview} disabled={!selectedPosition || isBusy}>Preview temporal</button>
             </div>
             <div className="canvas-grid">
               <article className="source-panel">
@@ -545,6 +569,7 @@ function App() {
               <article className="composed-panel">
                 <div className="panel-heading"><span>Composición</span>{pending ? <small className="pending">Cambios sin aplicar</small> : <small>720 × 1280</small>}</div>
                 <div className="phone-frame">{composedUrl ? <img src={composedUrl} alt="Preview compuesto" /> : <div className="canvas-empty">El preview compuesto aparecerá aquí.</div>}</div>
+                {motionPreviewUrl && <video className="motion-preview" src={motionPreviewUrl} controls autoPlay loop />}
               </article>
             </div>
             <div className="timeline"><div className="timeline-label">Timeline de composición</div><div className="timeline-track">{selectedPosition && <button className="timeline-segment">{selectedPosition.layout_spec.layout}</button>}</div></div>
