@@ -496,6 +496,8 @@ def test_main_studio_create_variant_emits_variant(
     _disable_logging_setup(monkeypatch)
 
     class _Variant:
+        variant_id = "11111111-1111-1111-1111-111111111111"
+
         @staticmethod
         def model_dump(**_kwargs: object) -> dict[str, str]:
             return {"variant_id": "id"}
@@ -538,3 +540,54 @@ def test_main_studio_create_variant_emits_variant(
         "type": "variant_created",
         "variant": {"variant_id": "id"},
     }
+
+
+def test_main_studio_update_position_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id = "11111111-1111-1111-1111-111111111111"
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def update_position(*, variant_id: object, position_id: object, layout_spec: object) -> object:
+            assert str(variant_id) != ""
+            assert str(position_id) != ""
+            assert layout_spec is not None
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    layout = '{"layout":"vertical","bands":[{"source":"source.mp4","source_rect":{"x":0,"y":0,"width":1,"height":1}}]}'
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "update-position",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--position-id",
+                "22222222-2222-2222-2222-222222222222",
+                "--layout-json",
+                layout,
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "position_updated"

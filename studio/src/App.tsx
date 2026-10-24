@@ -176,6 +176,46 @@ function App() {
     }
   }
 
+  async function applyLayout() {
+    if (!projectDir || !selectedVariant || !selectedPosition || !pending) return;
+    setBusy(true);
+    try {
+      const layout = {
+        layout: selectedPosition.layout_spec.layout,
+        bands: localBands.map((rect) => ({ source: "source.mp4", source_rect: rect })),
+      };
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "update-position",
+        variantId: selectedVariant.variant_id,
+        positionId: selectedPosition.position_id,
+        layoutJson: JSON.stringify(layout),
+      });
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((position) => position.position_id === selectedPosition.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
+      setPending(false);
+      setMessage("Cambios aplicados. Genera preview para verificar.");
+    } catch (error) {
+      setMessage(`No se pudo aplicar: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -249,6 +289,7 @@ function App() {
             <div className="editor-toolbar">
               <div><p className="eyebrow">{selectedPosition ? `${formatTime(selectedPosition.start_ms)} — ${formatTime(selectedPosition.end_ms)}` : "SELECCIONA UNA VARIANTE"}</p><h2>{selectedVariant?.name ?? "Sin variante activa"}</h2></div>
               <button className="primary" onClick={requestPreview} disabled={!selectedPosition || isBusy}>Generar preview</button>
+              <button className="ghost" onClick={applyLayout} disabled={!pending || isBusy}>Aplicar cambios</button>
             </div>
             <div className="canvas-grid">
               <article className="source-panel">

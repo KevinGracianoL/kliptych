@@ -22,6 +22,7 @@ from pydantic_core import PydanticSerializationError
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_file
 from kliptych.studio.models import AnalysisDocument
+from kliptych.contract.schema import LayoutSpec
 from kliptych.studio.project_models import (
     ProjectDocument,
     ProjectStatus,
@@ -219,6 +220,64 @@ class ProjectStore:
             msg = "Candidate range does not fit measured source duration."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
         updated = project.model_copy(update={"variants": (*project.variants, variant)})
+        self.write_project(updated)
+        return updated
+
+    def update_position(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        position_id: uuid.UUID,
+        layout_spec: LayoutSpec,
+    ) -> ProjectDocument:
+        """Persist a validated layout update for one position.
+
+        Returns:
+            The project document containing the updated position.
+
+        Raises:
+            ProjectStoreError: If editable state, variant, or position is absent,
+                or the supplied layout is invalid.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Updating a position requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        position_index = next(
+            (i for i, item in enumerate(variant.layout_timeline) if item.position_id == position_id),
+            None,
+        )
+        if position_index is None:
+            msg = "Position is not part of the variant timeline."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if not layout_spec.bands:
+            msg = "Layout position requires explicit bands."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        if any(band.source != _SOURCE_NAME for band in layout_spec.bands):
+            msg = "B2 layout bands must reference source.mp4."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        for band in layout_spec.bands:
+            rect = band.source_rect
+            if rect.width < 0.05 or rect.height < 0.05:
+                msg = "Layout crop must be at least 0.05 in each dimension."
+                raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        positions = list(variant.layout_timeline)
+        positions[position_index] = positions[position_index].model_copy(
+            update={"layout_spec": layout_spec}
+        )
+        updated_variant = variant.model_copy(update={"layout_timeline": tuple(positions)})
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
         self.write_project(updated)
         return updated
 

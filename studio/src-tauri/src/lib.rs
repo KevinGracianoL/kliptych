@@ -71,11 +71,15 @@ fn studio_project(
     operation: String,
     candidate_id: Option<String>,
     name: Option<String>,
+    variant_id: Option<String>,
+    position_id: Option<String>,
+    layout_json: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
     }
-    if !["inspect", "initialize", "create-variant"].contains(&operation.as_str()) {
+    if !["inspect", "initialize", "create-variant", "update-position"].contains(&operation.as_str())
+    {
         return Err("Operación Studio no admitida.".to_owned());
     }
     let executable = state
@@ -95,6 +99,14 @@ fn studio_project(
         args.push(candidate_id.ok_or_else(|| "Falta candidateId.".to_owned())?);
         args.push("--name".to_owned());
         args.push(name.ok_or_else(|| "Falta nombre de variante.".to_owned())?);
+    }
+    if operation == "update-position" {
+        args.push("--variant-id".to_owned());
+        args.push(variant_id.ok_or_else(|| "Falta variantId.".to_owned())?);
+        args.push("--position-id".to_owned());
+        args.push(position_id.ok_or_else(|| "Falta positionId.".to_owned())?);
+        args.push("--layout-json".to_owned());
+        args.push(layout_json.ok_or_else(|| "Falta layoutJson.".to_owned())?);
     }
     run_backend(&executable, &args)
 }

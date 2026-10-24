@@ -27,6 +27,7 @@ from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
 from kliptych.contract.enums import Aspect
+from kliptych.contract.schema import LayoutSpec
 from kliptych.download import MediaDownloader
 from kliptych.encoding import RenderConfig
 from kliptych.environment import EnvironmentReport, SubprocessRunner, detect_environment
@@ -106,6 +107,12 @@ class _StudioStore(Protocol):
 
     def create_variant(self, *, candidate_id: str, name: str) -> ProjectDocument:
         """Create an initial editable variant from a B1 candidate."""
+        ...
+
+    def update_position(
+        self, *, variant_id: uuid.UUID, position_id: uuid.UUID, layout_spec: LayoutSpec
+    ) -> ProjectDocument:
+        """Persist a validated layout update for one variant position."""
         ...
 
 
@@ -665,6 +672,13 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
     _add_studio_project_argument(studio_variant)
     _ = studio_variant.add_argument("--candidate-id", required=True, help="ID del candidato B1")
     _ = studio_variant.add_argument("--name", required=True, help="nombre visible de la variante")
+    studio_update = studio_subcommands.add_parser(
+        "update-position", help="persiste un layout validado para una posicion"
+    )
+    _add_studio_project_argument(studio_update)
+    _ = studio_update.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_update.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = studio_update.add_argument("--layout-json", required=True, help="LayoutSpec JSON validado")
 
 
 def _dispatch_command(
@@ -838,6 +852,13 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             candidate_id=cast("str", args.candidate_id),
             name=cast("str", args.name),
         )
+    if command == "update-position":
+        return _studio_update_position_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            position_id=cast("str", args.position_id),
+            layout_json=cast("str", args.layout_json),
+        )
     msg = f"Unknown Studio command: {command}"
     raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
 
@@ -877,6 +898,46 @@ def _studio_create_variant_event(
     variant = project.variants[-1]
     return {
         "type": "variant_created",
+        "variant": variant.model_dump(mode="json"),
+    }
+
+
+def _studio_update_position_event(
+    store: _StudioStore, *, variant_id: str, position_id: str, layout_json: str
+) -> dict[str, object]:
+    """Persist a validated layout update for one Studio position.
+
+    Returns:
+        A JSON event describing the updated variant.
+
+    Raises:
+        ProjectStoreError: If the layout or project boundary rejects the update.
+        ValueError: If an identifier is not a valid UUID.
+    """
+    try:
+        layout_spec = LayoutSpec.model_validate(json.loads(layout_json))
+    except Exception as error:  # boundary validation
+        msg = f"Invalid layout JSON: {error}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    try:
+        project = store.update_position(
+            variant_id=uuid.UUID(variant_id),
+            position_id=uuid.UUID(position_id),
+            layout_spec=layout_spec,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next(
+        (item for item in project.variants if str(item.variant_id) == variant_id), None
+    )
+    if variant is None:
+        msg = "Updated variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {
+        "type": "position_updated",
         "variant": variant.model_dump(mode="json"),
     }
 

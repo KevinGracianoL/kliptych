@@ -14,6 +14,8 @@ from kliptych.studio.models import (
     AnalysisProvenance,
     AnalysisSource,
 )
+from kliptych.contract.enums import Layout
+from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.studio.project_models import (
     ProjectDocument,
     VariantOrigin,
@@ -1012,3 +1014,45 @@ def test_reanalysis_interrupt_during_editable_state_copy_restores_project(
     assert (project_dir / "assets" / "watermark" / "asset.png").read_bytes() == b"png"
     assert not list(tmp_path.glob(".analysis-backup-*"))
     assert not list(tmp_path.glob(".analysis-staging-*"))
+
+
+def test_store_update_position_persists_validated_layout(
+    tmp_path: Path,
+) -> None:
+    """A validated crop update persists to project.json without changing evidence."""
+    candidate = _candidate()
+    analysis = _analysis().model_copy(update={"candidates": (candidate,)})
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(analysis)
+        stage.write_text("source.mp4", "source")
+        stage.write_text("transcript.json", "transcript")
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    store.initialize_project(probe=_Probe(60.0))
+    created = store.create_variant(candidate_id=candidate.candidate_id, name="Variant 1")
+    variant = created.variants[0]
+    position = variant.layout_timeline[0]
+
+    updated_spec = LayoutSpec(
+        layout=Layout.VERTICAL,
+        bands=(
+            Band(
+                source="source.mp4",
+                source_rect=NormalizedRect(x=0.1, y=0.2, width=0.5, height=0.6),
+            ),
+        ),
+    )
+    updated = store.update_position(
+        variant_id=variant.variant_id,
+        position_id=position.position_id,
+        layout_spec=updated_spec,
+    )
+
+    persisted = open_project_store(project_dir).read_project()
+    assert persisted is not None
+    persisted_position = persisted.variants[0].layout_timeline[0]
+    assert persisted_position.layout_spec == updated_spec
+    assert persisted.variants[0].variant_id == variant.variant_id
+    assert updated.variants[0].layout_timeline[0].layout_spec == updated_spec
