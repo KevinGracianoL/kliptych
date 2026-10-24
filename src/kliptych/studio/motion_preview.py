@@ -22,7 +22,7 @@ from kliptych.studio.project_models import (
     VariantCaptionCorrection,
 )
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
-from kliptych.subtitles import SubtitleRenderer, SubtitleStyle
+from kliptych.subtitles import SubtitleError, SubtitleRenderer, SubtitleStyle
 from kliptych.transcribe import Transcript, Word
 
 _MOTION_PREVIEW_IMPLEMENTATION_VERSION = "1"
@@ -31,6 +31,7 @@ _MOTION_CANVAS_WIDTH = 720
 _MOTION_CANVAS_HEIGHT = 1280
 _DEFAULT_DURATION_MS = 3000
 _MIN_DURATION_MS = 500
+_MIN_SOURCE_DIMENSION = 2
 _MAX_DURATION_MS = 10000
 
 
@@ -104,7 +105,7 @@ def generate_motion_preview(
     dimensions = _probe_dimensions(probe, source)
     fingerprint = _motion_fingerprint(project.source_sha256, variant, position, start_ms, end_ms)
     destination = _motion_preview_path(request.project_dir, request.variant_id, fingerprint)
-    if destination.is_file():
+    if destination.is_file() and not destination.is_symlink() and not destination.is_junction():
         return MotionPreviewResult(
             preview_path=destination,
             fingerprint=fingerprint,
@@ -162,9 +163,21 @@ def _find_position(variant: Variant, position_id: uuid.UUID) -> LayoutPosition:
 
 
 def _probe_dimensions(probe: MediaProbe, source: Path) -> tuple[int, int]:
-    info = probe.probe(source)
-    width = info.width if info.width is not None else 0
-    height = info.height if info.height is not None else 0
+    try:
+        info = probe.probe(source)
+    except Exception as error:
+        msg = "Source dimensions could not be measured."
+        raise PreviewError(msg) from error
+    width = info.width
+    height = info.height
+    if (
+        width is None
+        or height is None
+        or width < _MIN_SOURCE_DIMENSION
+        or height < _MIN_SOURCE_DIMENSION
+    ):
+        msg = "Source dimensions are unusable."
+        raise PreviewError(msg)
     return int(width), int(height)
 
 
@@ -226,7 +239,11 @@ def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[
 
 
 def _apply_caption_corrections(
-    words: list[Word], corrections: Sequence[VariantCaptionCorrection]
+    words: list[Word],
+    corrections: Sequence[VariantCaptionCorrection],
+    *,
+    start_ms: int,
+    end_ms: int,
 ) -> list[Word]:
     if not corrections:
         return words
@@ -239,16 +256,18 @@ def _apply_caption_corrections(
                 break
         if not skip:
             result.append(w)
-    result.extend(
-        Word(
-            start_s=c.start_ms / 1000.0,
-            end_s=c.end_ms / 1000.0,
-            text=c.corrected_text,
-            confidence=1.0,
-            token_id=0,
+    for c in corrections:
+        if c.end_ms <= start_ms or c.start_ms >= end_ms:
+            continue
+        result.append(
+            Word(
+                start_s=max(c.start_ms, start_ms) / 1000.0,
+                end_s=min(c.end_ms, end_ms) / 1000.0,
+                text=c.corrected_text,
+                confidence=1.0,
+                token_id=0,
+            )
         )
-        for c in corrections
-    )
     result.sort(key=lambda w: w.start_s)
     return result
 
@@ -264,11 +283,13 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
 ) -> tuple[Path | None, str]:
     try:
         transcript = _read_transcript(project_dir)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SubtitleError) as error:
         _ = error
         return None, "[outv]"
     words = _words_in_range(transcript, start_ms, end_ms)
-    words = _apply_caption_corrections(words, variant.caption_corrections)
+    words = _apply_caption_corrections(
+        words, variant.caption_corrections, start_ms=start_ms, end_ms=end_ms
+    )
     if not words:
         return None, final_label
     try:
@@ -280,7 +301,7 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
         )
         renderer = SubtitleRenderer(style=style)
         ass_content = renderer.build(words)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SubtitleError) as error:
         _ = error
         return None, "[outv]"
     try:
@@ -288,14 +309,29 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
         _ = os.close(fd)
         ass_path = Path(tmp)
         _ = ass_path.write_text(ass_content, encoding="utf-8")
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SubtitleError) as error:
         _ = error
         return None, "[outv]"
     filter_parts.append(f"[outv]subtitles=filename='{ass_path}'[outv_sub]")
     return ass_path, "[outv_sub]"
 
 
-def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals]
+def _watermark_xy(position: object) -> tuple[str, str]:
+    margin = 20
+    name = getattr(position, "value", str(position))
+    table = {
+        "top_left": (str(margin), str(margin)),
+        "top_right": (f"W-w-{margin}", str(margin)),
+        "bottom_left": (str(margin), f"H-h-{margin}"),
+        "bottom_right": (f"W-w-{margin}", f"H-h-{margin}"),
+        "center": ("(W-w)/2", "(H-h)/2"),
+        "center_top": ("(W-w)/2", str(margin)),
+        "center_bottom": ("(W-w)/2", f"H-h-{margin}"),
+    }
+    return table.get(name, (f"W-w-{margin}", f"H-h-{margin}"))
+
+
+def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,too-many-branches,too-many-statements,complex-structure]
     *,
     source: Path,
     project_dir: Path,
@@ -367,7 +403,11 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals]
 
     # Watermark overlay filter.
     if wm_asset_path is not None:
-        filter_parts.append(f"{final_label}[1:v]overlay=W-w-10:H-h-10[outv_wm]")
+        x_expr, y_expr = _watermark_xy(variant.watermark.position)
+        target_w = int(720 * 0.15 / 2) * 2
+        filter_parts.append(
+            f"{final_label}[1:v]format=rgba,scale={target_w}:-2[wm];{final_label}[wm]overlay={x_expr}:{y_expr}[outv_wm]"
+        )
         final_label = "[outv_wm]"
 
     filter_complex = ";".join(filter_parts)
@@ -378,10 +418,6 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals]
         "-v",
         "error",
         "-y",
-        "-ss",
-        str(start_s),
-        "-t",
-        str(dur_s),
         "-i",
         str(source),
     ]
@@ -404,10 +440,28 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals]
         "-an",
         str(destination),
     ]
-    _ = runner.run(tuple(argv), timeout_s=120.0)
-    if ass_path is not None:
+    temp_destination = destination.with_suffix(".tmp.mp4")
+    argv = [a if a != str(destination) else str(temp_destination) for a in argv]
+    try:
+        _ = runner.run(tuple(argv), timeout_s=120.0)
+    finally:
+        if ass_path is not None:
+            with contextlib.suppress(OSError):
+                ass_path.unlink()
+    if not temp_destination.is_file():
         with contextlib.suppress(OSError):
-            ass_path.unlink()
-    if not destination.is_file():
+            temp_destination.unlink()
         msg = "Motion preview render failed."
+        raise PreviewError(msg)
+    try:
+        _ = temp_destination.replace(destination)
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            temp_destination.unlink()
+        msg = "Motion preview could not be published."
+        raise PreviewError(msg) from error
+    if destination.is_symlink() or destination.is_junction():
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        msg = "Motion preview destination is not a regular file."
         raise PreviewError(msg)

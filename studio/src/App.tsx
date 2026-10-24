@@ -89,6 +89,7 @@ function App() {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
     setDrag(null);
     setPending(false);
+    setMotionPreviewUrl(null);
     if (selectedPosition) setSplitAtMs(Math.floor((selectedPosition.start_ms + selectedPosition.end_ms) / 2));
   }, [selectedPosition]);
 
@@ -133,6 +134,7 @@ function App() {
       });
       setProjectDir(selected);
       setProject(event);
+      setMotionPreviewUrl(null);
       setSelectedVariant(event.variants[0] ?? null);
       setSelectedPosition(event.variants[0]?.layout_timeline[0] ?? null);
       setPending(false);
