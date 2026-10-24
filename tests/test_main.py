@@ -597,3 +597,314 @@ def test_main_studio_update_position_emits_variant(
 
     event = _parse(capsys.readouterr().out)
     assert event["type"] == "position_updated"
+
+
+def test_main_studio_split_position_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def split_position(*, variant_id: object, position_id: object, at_ms: int) -> object:
+            assert variant_id is not None
+            assert position_id is not None
+            assert at_ms >= 0
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "split-position",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--position-id",
+                "22222222-2222-2222-2222-222222222222",
+                "--at-ms",
+                "15000",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "position_split"
+
+
+def test_main_studio_delete_position_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def delete_position(
+            *, variant_id: object, position_id: object, absorb_neighbor: object
+        ) -> object:
+            assert variant_id is not None
+            assert position_id is not None
+            _ = absorb_neighbor
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "delete-position",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--position-id",
+                "22222222-2222-2222-2222-222222222222",
+                "--absorb",
+                "previous",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "position_deleted"
+
+
+def test_main_studio_duplicate_variant_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def duplicate_variant(*, variant_id: object, name: str) -> object:
+            assert variant_id is not None
+            assert name
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "duplicate-variant",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--name",
+                "Copia",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "variant_duplicated"
+
+
+def test_main_studio_import_watermark_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def import_watermark(
+            *, variant_id: object, source_path: object, position: object
+        ) -> object:
+            assert variant_id is not None
+            assert source_path is not None
+            _ = position
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    png = tmp_path / "logo.png"
+    _ = png.write_bytes(b"x")
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "import-watermark",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--source",
+                str(png),
+                "--position",
+                "bottom_right",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "watermark_imported"
+
+
+def test_main_studio_set_watermark_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_watermark(
+            *, variant_id: object, enabled: object = None, position: object = None
+        ) -> object:
+            assert variant_id is not None
+            _ = (enabled, position)
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-watermark",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--enabled",
+                "true",
+                "--position",
+                "top_left",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "watermark_updated"
+
+
+def test_main_studio_set_captions_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_captions(
+            *,
+            variant_id: object,
+            enabled: object = None,
+            highlight_color: object = None,
+            capitalization: object = None,
+        ) -> object:
+            assert variant_id is not None
+            _ = (enabled, highlight_color, capitalization)
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-captions",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--enabled",
+                "true",
+                "--highlight-color",
+                "&H00FF0000",
+                "--capitalization",
+                "uppercase",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "captions_updated"
