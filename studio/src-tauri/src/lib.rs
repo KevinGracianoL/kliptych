@@ -85,7 +85,19 @@ fn studio_project(
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
     }
-    if !["inspect", "initialize", "create-variant", "update-position"].contains(&operation.as_str())
+    if ![
+        "inspect",
+        "initialize",
+        "create-variant",
+        "update-position",
+        "split-position",
+        "delete-position",
+        "duplicate-variant",
+        "import-watermark",
+        "set-watermark",
+        "set-captions",
+    ]
+    .contains(&operation.as_str())
     {
         return Err("Operación Studio no admitida.".to_owned());
     }
