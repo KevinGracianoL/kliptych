@@ -433,25 +433,31 @@ class ProjectStore:
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         asset_id = uuid.uuid4()
         asset_dir = self.project_dir / "assets" / "watermark"
+        if _is_link_like(self.project_dir / "assets") or _is_link_like(asset_dir):
+            msg = "Watermark asset directory must not be a symbolic link."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         try:
+            (self.project_dir / "assets").mkdir(parents=True, exist_ok=True)
             asset_dir.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             msg = "Watermark asset directory could not be created."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
         destination = asset_dir / f"{asset_id}.png"
+        if _is_link_like(destination):
+            msg = "Watermark destination must not be a symbolic link."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         try:
             _ = destination.write_bytes(data)
         except OSError as error:
             msg = "Watermark asset could not be stored."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
         asset_sha = sha256_file(destination)
-        resolved_position = position if position is not None else WatermarkPosition.BOTTOM_RIGHT
         watermark = VariantWatermark(
             enabled=True,
             asset_id=asset_id,
             asset_sha256=asset_sha,
             source_name=source_path.name,
-            position=resolved_position,
+            position=position if position is not None else WatermarkPosition.BOTTOM_RIGHT,
         )
         variant = project.variants[variant_index]
         updated_variant = variant.model_copy(update={"watermark": watermark})

@@ -88,7 +88,7 @@ class VariantWatermark(BaseModel):
 
     enabled: bool = False
     asset_id: uuid.UUID | None = None
-    asset_sha256: str | None = None
+    asset_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     source_name: str | None = None
     position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT
 
