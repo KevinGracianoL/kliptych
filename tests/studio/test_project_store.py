@@ -1,7 +1,7 @@
 """Behavioral tests for the Track B1 Studio project store."""
 
-from pathlib import Path
 import uuid
+from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
