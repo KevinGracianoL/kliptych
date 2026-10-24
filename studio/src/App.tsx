@@ -31,6 +31,9 @@ type Variant = {
   status: "active" | "requires_review";
   layout_timeline: Position[];
   watermark?: { enabled: boolean; asset_id: string | null; asset_sha256: string | null; source_name: string | null; position: string };
+  captions_enabled?: boolean;
+  caption_highlight_color?: string;
+  caption_capitalization?: string;
 };
 
 type ProjectEvent = {
@@ -69,6 +72,9 @@ function App() {
   const [pending, setPending] = useState(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState(false);
   const [watermarkPosition, setWatermarkPosition] = useState("bottom_right");
+  const [captionsEnabled, setCaptionsEnabled] = useState(false);
+  const [captionHighlightColor, setCaptionHighlightColor] = useState("&H000000FF");
+  const [captionCapitalization, setCaptionCapitalization] = useState("original");
   const [splitAtMs, setSplitAtMs] = useState(0);
   const [absorbChoice, setAbsorbChoice] = useState<"previous" | "next">("previous");
   const [message, setMessage] = useState("Abre un proyecto B1 para empezar.");
@@ -84,6 +90,9 @@ function App() {
   useEffect(() => {
     setWatermarkEnabled(selectedVariant?.watermark?.enabled ?? false);
     setWatermarkPosition(selectedVariant?.watermark?.position ?? "bottom_right");
+    setCaptionsEnabled(selectedVariant?.captions_enabled ?? false);
+    setCaptionHighlightColor(selectedVariant?.caption_highlight_color ?? "&H000000FF");
+    setCaptionCapitalization(selectedVariant?.caption_capitalization ?? "original");
   }, [selectedVariant]);
 
   async function configureBackend(path = backendPath) {
@@ -352,6 +361,26 @@ function App() {
     }
   }
 
+  async function updateCaptions(enabled: boolean, highlightColor: string, capitalization: string) {
+    if (!projectDir || !selectedVariant || isBusy) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "set-captions",
+        variantId: selectedVariant.variant_id,
+        enabled: enabled ? "true" : "false",
+        highlightColor,
+        capitalization,
+      });
+      replaceVariant(event.variant);
+    } catch (error) {
+      setMessage(`No se pudo actualizar captions: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -461,6 +490,16 @@ function App() {
                 <option value="bottom_right">bottom_right</option>
               </select>
               {selectedVariant?.watermark?.source_name && <small>{selectedVariant.watermark.source_name}</small>}
+            </div>
+            <div className="caption-panel">
+              <span className="eyebrow">Captions</span>
+              <label><input type="checkbox" checked={captionsEnabled} onChange={(event) => { setCaptionsEnabled(event.target.checked); updateCaptions(event.target.checked, captionHighlightColor, captionCapitalization); }} disabled={!selectedVariant || isBusy} /> Activar</label>
+              <label>Highlight <input type="text" value={captionHighlightColor} onChange={(event) => setCaptionHighlightColor(event.target.value)} onBlur={() => updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization)} disabled={!captionsEnabled || isBusy} /></label>
+              <select value={captionCapitalization} onChange={(event) => { setCaptionCapitalization(event.target.value); updateCaptions(captionsEnabled, captionHighlightColor, event.target.value); }} disabled={!captionsEnabled || isBusy}>
+                <option value="original">original (Aa)</option>
+                <option value="uppercase">uppercase (AA)</option>
+                <option value="lowercase">lowercase (aa)</option>
+              </select>
             </div>
           </section>
         </div>

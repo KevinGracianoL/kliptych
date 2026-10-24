@@ -6,7 +6,7 @@ from typing import ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kliptych.contract.enums import Layout, WatermarkPosition
+from kliptych.contract.enums import CaptionCapitalization, Layout, WatermarkPosition
 from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 
 PROJECT_SCHEMA_VERSION = "1"
@@ -105,6 +105,9 @@ class Variant(BaseModel):
     end_ms: int = Field(gt=0)
     status: ProjectStatus = ProjectStatus.ACTIVE
     watermark: VariantWatermark = Field(default_factory=VariantWatermark)
+    captions_enabled: bool = False
+    caption_highlight_color: str = "&H000000FF"
+    caption_capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
     layout_timeline: tuple[LayoutPosition, ...]
 
     @model_validator(mode="after")
@@ -289,6 +292,9 @@ def duplicate_variant(variant: Variant, *, name: str) -> Variant:
         end_ms=variant.end_ms,
         status=variant.status,
         watermark=variant.watermark,
+        captions_enabled=variant.captions_enabled,
+        caption_highlight_color=variant.caption_highlight_color,
+        caption_capitalization=variant.caption_capitalization,
         layout_timeline=positions,
     )
 

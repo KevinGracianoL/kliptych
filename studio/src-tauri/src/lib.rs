@@ -79,6 +79,8 @@ fn studio_project(
     source: Option<String>,
     enabled: Option<String>,
     wm_position: Option<String>,
+    highlight_color: Option<String>,
+    capitalization: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -204,6 +206,26 @@ fn studio_project(
         }
         if let Some(value) = wm_position.clone() {
             args.push("--position".to_owned());
+            args.push(value);
+        }
+    }
+    if operation == "set-captions" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        if let Some(value) = enabled.clone() {
+            args.push("--enabled".to_owned());
+            args.push(value);
+        }
+        if let Some(value) = highlight_color.clone() {
+            args.push("--highlight-color".to_owned());
+            args.push(value);
+        }
+        if let Some(value) = capitalization.clone() {
+            args.push("--capitalization".to_owned());
             args.push(value);
         }
     }

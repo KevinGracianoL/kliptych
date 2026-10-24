@@ -26,7 +26,7 @@ from kliptych.campaign_manager import CampaignManager, CampaignManagerError, Cam
 from kliptych.campaign_types import Campaign, CampaignStatus
 from kliptych.config import Settings
 from kliptych.contract import Contract, ContractDraft, vanilla_contract
-from kliptych.contract.enums import Aspect, WatermarkPosition
+from kliptych.contract.enums import Aspect, CaptionCapitalization, WatermarkPosition
 from kliptych.contract.schema import LayoutSpec
 from kliptych.download import MediaDownloader
 from kliptych.encoding import RenderConfig
@@ -153,6 +153,17 @@ class _StudioStore(Protocol):
         position: WatermarkPosition | None = None,
     ) -> ProjectDocument:
         """Update watermark enabled state or zone for one variant."""
+        ...
+
+    def set_captions(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        enabled: bool | None = None,
+        highlight_color: str | None = None,
+        capitalization: CaptionCapitalization | None = None,
+    ) -> ProjectDocument:
+        """Update caption controls for one variant."""
         ...
 
 
@@ -759,6 +770,18 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
         "--enabled", choices=["true", "false"], help="activar o desactivar"
     )
     _ = studio_set_wm.add_argument("--position", help="zona del enum WatermarkPosition")
+    studio_set_cap = studio_subcommands.add_parser(
+        "set-captions", help="actualiza controles de captions de una variante"
+    )
+    _add_studio_project_argument(studio_set_cap)
+    _ = studio_set_cap.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_set_cap.add_argument(
+        "--enabled", choices=["true", "false"], help="activar o desactivar"
+    )
+    _ = studio_set_cap.add_argument("--highlight-color", help="color de highlight ASS")
+    _ = studio_set_cap.add_argument(
+        "--capitalization", choices=["original", "uppercase", "lowercase"], help="capitalizacion"
+    )
 
 
 def _dispatch_command(
@@ -965,6 +988,13 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             enabled=cast("str | None", getattr(args, "enabled", None)),
             position=cast("str | None", getattr(args, "position", None)),
         ),
+        "set-captions": lambda: _studio_set_captions_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            enabled=cast("str | None", getattr(args, "enabled", None)),
+            highlight_color=cast("str | None", getattr(args, "highlight_color", None)),
+            capitalization=cast("str | None", getattr(args, "capitalization", None)),
+        ),
     }
     handler = dispatch.get(command)
     if handler is None:
@@ -1149,6 +1179,37 @@ def _studio_set_watermark_event(
         msg = "Watermark variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
     return {"type": "watermark_updated", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_set_captions_event(
+    store: _StudioStore,
+    *,
+    variant_id: str,
+    enabled: str | None,
+    highlight_color: str | None,
+    capitalization: str | None,
+) -> dict[str, object]:
+    enabled_value = None if enabled is None else enabled == "true"
+    capitalization_value = None if capitalization is None else CaptionCapitalization(capitalization)
+    try:
+        project = store.set_captions(
+            variant_id=uuid.UUID(variant_id),
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next(
+        (item for item in project.variants if str(item.variant_id) == variant_id), None
+    )
+    if variant is None:
+        msg = "Caption variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "captions_updated", "variant": variant.model_dump(mode="json")}
 
 
 def _write_preview_event(event: dict[str, object]) -> None:

@@ -19,7 +19,7 @@ from typing import Literal, Self
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
-from kliptych.contract.enums import WatermarkPosition
+from kliptych.contract.enums import CaptionCapitalization, WatermarkPosition
 from kliptych.contract.schema import LayoutSpec
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_file
@@ -495,6 +495,49 @@ class ProjectStore:
         if position is not None:
             watermark = watermark.model_copy(update={"position": position})
         updated_variant = variant.model_copy(update={"watermark": watermark})
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def set_captions(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        enabled: bool | None = None,
+        highlight_color: str | None = None,
+        capitalization: CaptionCapitalization | None = None,
+    ) -> ProjectDocument:
+        """Update caption controls for one variant.
+
+        Returns:
+            The project document with updated caption settings.
+
+        Raises:
+            ProjectStoreError: If the variant is absent.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Updating captions requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        update: dict[str, object] = {}
+        if enabled is not None:
+            update["captions_enabled"] = enabled
+        if highlight_color is not None:
+            update["caption_highlight_color"] = highlight_color
+        if capitalization is not None:
+            update["caption_capitalization"] = capitalization
+        updated_variant = variant.model_copy(update=update)
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
