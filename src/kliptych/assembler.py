@@ -36,6 +36,7 @@ from kliptych.encoding import (
     run_ffmpeg_with_fallback,
     video_encoder_arguments,
 )
+from kliptych.layout_geometry import build_layout_filter_chains
 
 logger = logging.getLogger(__name__)
 
@@ -755,19 +756,18 @@ class FFmpegAssembler:
         clips = [spec.band_clips[i] if i < len(spec.band_clips) else spec.clip for i in range(n)]
         argv, target_str = self._layout_spec_base_argv(clips, spec, target)
         gap = layout_spec.gap if n > 1 else 0
-        filter_chains = [
-            _band_filter(
-                i,
-                b,
-                band_h=h,
-                clip_path=c,
+        source_dimensions = tuple(
+            _probe_clip_dimensions(clip, ffprobe=self._ffprobe, timeout_s=self._timeout_s)
+            for clip in clips
+        )
+        filter_chains = list(
+            build_layout_filter_chains(
+                layout_spec=LayoutSpec(layout=layout_spec.layout, bands=bands, gap=gap),
                 canvas_width=spec.width,
-                ffprobe=self._ffprobe,
-                timeout_s=self._timeout_s,
-                gap=gap,
+                canvas_height=spec.height,
+                source_dimensions=source_dimensions,
             )
-            for i, (b, h, c) in enumerate(zip(bands, band_heights, clips, strict=True))
-        ]
+        )
         video_label = self._layout_spec_overlay_tail(filter_chains, argv, spec, n, target)
         argv += ["-filter_complex", ";".join(filter_chains), "-map", video_label, "-map", "0:a?"]
         if spec.mute_audio:
@@ -834,53 +834,6 @@ def _default_layout_spec_for(layout: Layout) -> LayoutSpec:
     if layout is Layout.TRIO:
         return LayoutSpec(layout=layout, bands=(Band(), Band(), Band()))
     return LayoutSpec(layout=layout, bands=(Band(),))
-
-
-def _band_filter(
-    i: int,
-    band: Band,
-    *,
-    band_h: int,
-    clip_path: Path,
-    canvas_width: int,
-    ffprobe: str,
-    timeout_s: float,
-    gap: int = 0,
-) -> str:
-    """Construye el filtro de una franja: recorte normalizado, escala y SAR.
-
-    Args:
-        i: Índice de la franja, usado para etiquetar la salida ``[b{i}]``.
-        band: Definición de la franja con su rectángulo normalizado.
-        band_h: Alto útil de vídeo de la franja (sin franja negra de separación).
-        clip_path: Ruta del clip que alimenta la franja.
-        canvas_width: Ancho del lienzo emitido.
-        ffprobe: Binario para leer las dimensiones reales del clip.
-        timeout_s: Tiempo máximo de la inspección.
-        gap: Franja negra a añadir por debajo de la imagen, en píxeles.
-
-    Returns:
-        El filtro completo que termina en ``...,setsar=1[b{i}]``.
-    """
-    source_w, source_h = _probe_clip_dimensions(clip_path, ffprobe=ffprobe, timeout_s=timeout_s)
-    rect = band.source_rect
-    crop_w = round(rect.width * source_w / 2) * 2
-    crop_h = round(rect.height * source_h / 2) * 2
-
-    crop_w = max(2, min(crop_w, source_w))
-    crop_h = max(2, min(crop_h, source_h))
-    crop_x = max(0, min(round(rect.x * source_w / 2) * 2, source_w - crop_w))
-    crop_y = max(0, min(round(rect.y * source_h / 2) * 2, source_h - crop_h))
-
-    content_h = band_h - gap
-    chain = (
-        f"[{i}:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
-        f"scale={canvas_width}:{content_h}:force_original_aspect_ratio=increase,"
-        f"crop={canvas_width}:{content_h},setsar=1"
-    )
-    if gap > 0:
-        chain += f",pad={canvas_width}:{band_h}:0:0:color=black"
-    return f"{chain}[b{i}]"
 
 
 def _probe_clip_dimensions(clip: Path, *, ffprobe: str, timeout_s: float) -> tuple[int, int]:

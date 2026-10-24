@@ -216,6 +216,25 @@ def test_build_layout_spec_argv_gap_pads_bands(tmp_path: Path) -> None:
     assert "scale=1080:940:force_original_aspect_ratio=increase" in graph
 
 
+def test_build_layout_spec_argv_horizontal_uses_centered_16_by_9_letterbox(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    _ = clip.write_bytes(b"dummy clip")
+    spec = RenderSpec(
+        clip=clip,
+        destination=tmp_path / "out.mp4",
+        layout=Layout.HORIZONTAL,
+        layout_spec=LayoutSpec(layout=Layout.HORIZONTAL, bands=(Band(),)),
+    )
+
+    argv = FFmpegAssembler().render_arguments(spec)
+    graph = argv[argv.index("-filter_complex") + 1]
+
+    assert "scale=1080:606:force_original_aspect_ratio=decrease" in graph
+    assert "pad=1080:1920:0:657:color=black" in graph
+
+
 def test_resolver_accepts_raw_dict_layout_spec(tmp_path: Path) -> None:
     """El resolutor acepta layout_spec como diccionario crudo, igual que caption_style."""
     draft = make_draft(
