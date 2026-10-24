@@ -61,6 +61,7 @@ from kliptych.studio.analyzer import (
     analyze_project,
 )
 from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION
+from kliptych.studio.preview import PreviewError, PreviewRequest, generate_preview
 from kliptych.studio.project_store import ProjectStoreError
 from kliptych.transcribe import FasterWhisperTranscriber
 
@@ -430,6 +431,10 @@ def main(
     _ = subcommands.add_parser("env", help="detecta el entorno local y lo imprime como JSON")
     analyze_parser = subcommands.add_parser("analyze", help="analiza una URL para Kliptych Studio")
     _add_analyze_arguments(analyze_parser)
+    preview_parser = subcommands.add_parser(
+        "preview", help="genera un JPEG de composición para Kliptych Studio"
+    )
+    _add_preview_arguments(preview_parser)
     ingest_parser = subcommands.add_parser(
         "ingest", help="ingiere un brief local y lo imprime como JSON"
     )
@@ -604,6 +609,16 @@ def _add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
     _ = parser.add_argument("--project-name", required=True, help="nombre visible del proyecto")
 
 
+def _add_preview_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the exact-frame B2.2 preview command arguments."""
+    _ = parser.add_argument("--project-dir", required=True, help="directorio local del proyecto")
+    _ = parser.add_argument("--variant-id", required=True, help="UUID de la variante activa")
+    _ = parser.add_argument("--position-id", required=True, help="UUID de la posición activa")
+    _ = parser.add_argument(
+        "--at-ms", required=True, type=int, help="timestamp absoluto del source"
+    )
+
+
 def _dispatch_command(
     *,
     args: argparse.Namespace,
@@ -621,6 +636,8 @@ def _dispatch_command(
             status = _cmd_env()
         case "analyze":
             status = _cmd_analyze(args)
+        case "preview":
+            status = _cmd_preview(args)
         case "ingest":
             status = _cmd_ingest(args)
         case "run":
@@ -696,6 +713,56 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         candidate_count=len(document.candidates),
     )
     return 0
+
+
+def _cmd_preview(args: argparse.Namespace) -> int:
+    """Generate one structured B2.2 JPEG preview result.
+
+    Returns:
+        Zero on success or one for invalid request/project/preview errors.
+    """
+    project_dir = Path(cast("str", args.project_dir))
+    try:
+        request = PreviewRequest(
+            project_dir=project_dir,
+            variant_id=uuid.UUID(cast("str", args.variant_id)),
+            position_id=uuid.UUID(cast("str", args.position_id)),
+            at_ms=cast("int", args.at_ms),
+        )
+    except ValueError as error:
+        _write_preview_event(
+            {
+                "type": "error",
+                "error_code": "preview_request_invalid",
+                "message": str(error),
+            }
+        )
+        return 1
+    try:
+        result = generate_preview(request, probe=FFprobeProbe(), runner=SubprocessRunner())
+    except PreviewError as error:
+        _write_preview_event(
+            {"type": "error", "error_code": "preview_failed", "message": error.message}
+        )
+        return 1
+    _write_preview_event(
+        {
+            "type": "completed",
+            "preview_path": result.preview_path.relative_to(project_dir).as_posix(),
+            "preview_fingerprint": result.preview_fingerprint,
+            "frame_time_ms": result.frame_time_ms,
+            "width": result.width,
+            "height": result.height,
+        }
+    )
+    return 0
+
+
+def _write_preview_event(event: dict[str, object]) -> None:
+    """Write one JSON preview result to stdout without human log text."""
+    payload = {"schema_version": ANALYSIS_SCHEMA_VERSION, **event}
+    _ = sys.stdout.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
+    _ = sys.stdout.flush()
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
