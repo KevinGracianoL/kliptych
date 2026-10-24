@@ -749,6 +749,7 @@ def _cmd_preview(args: argparse.Namespace) -> int:
         {
             "type": "completed",
             "preview_path": result.preview_path.relative_to(project_dir).as_posix(),
+            "source_frame_path": result.source_frame_path.relative_to(project_dir).as_posix(),
             "preview_fingerprint": result.preview_fingerprint,
             "frame_time_ms": result.frame_time_ms,
             "width": result.width,
