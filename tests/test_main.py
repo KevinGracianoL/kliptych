@@ -361,6 +361,7 @@ def test_main_preview_emits_structured_completed_event(
         assert request.at_ms == 15_000
         return PreviewResult(
             preview_path=tmp_path / "previews" / variant_id / f"{'a' * 64}.jpg",
+            source_frame_path=tmp_path / "previews" / variant_id / f"{'a' * 64}-source.jpg",
             preview_fingerprint="a" * 64,
             frame_time_ms=15_000,
             width=720,
@@ -396,6 +397,7 @@ def test_main_preview_emits_structured_completed_event(
     event = _parse(capsys.readouterr().out)
     assert event["type"] == "completed"
     assert event["preview_path"] == f"previews/{variant_id}/{'a' * 64}.jpg"
+    assert event["source_frame_path"] == f"previews/{variant_id}/{'a' * 64}-source.jpg"
     assert event["width"] == 720
     assert event["height"] == 1280
 
