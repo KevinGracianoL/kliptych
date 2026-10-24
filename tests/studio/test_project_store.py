@@ -1164,3 +1164,45 @@ def test_store_set_captions_persists(tmp_path: Path) -> None:
     )
     assert updated.variants[0].captions_enabled is True
     assert updated.variants[0].caption_highlight_color == "&H00FF0000"
+
+
+def test_store_set_caption_correction_persists(tmp_path: Path) -> None:
+    _, store, variant, position = _setup_project_with_variant(tmp_path)
+    updated = store.set_caption_correction(
+        variant_id=variant.variant_id,
+        interval=(position.start_ms, position.end_ms),
+        corrected_text="Texto corregido",
+        author="user",
+        created_at_ms=1000,
+    )
+    corrections = updated.variants[0].caption_corrections
+    assert len(corrections) == 1
+    assert corrections[0].corrected_text == "Texto corregido"
+
+
+def test_store_set_caption_correction_rejects_invalid_range(tmp_path: Path) -> None:
+    _, store, variant, position = _setup_project_with_variant(tmp_path)
+    with pytest.raises(ProjectStoreError):
+        _ = store.set_caption_correction(
+            variant_id=variant.variant_id,
+            interval=(position.end_ms, position.start_ms),
+            corrected_text="Texto",
+            author="user",
+            created_at_ms=1000,
+        )
+
+
+def test_store_clear_caption_correction_persists(tmp_path: Path) -> None:
+    _, store, variant, position = _setup_project_with_variant(tmp_path)
+    updated = store.set_caption_correction(
+        variant_id=variant.variant_id,
+        interval=(position.start_ms, position.end_ms),
+        corrected_text="Texto corregido",
+        author="user",
+        created_at_ms=1000,
+    )
+    correction_id = updated.variants[0].caption_corrections[0].correction_id
+    cleared = store.clear_caption_correction(
+        variant_id=variant.variant_id, correction_id=correction_id
+    )
+    assert cleared.variants[0].caption_corrections == ()
