@@ -6,11 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Protocol, cast, override
+from uuid import UUID
 
 import pytest
 
 from kliptych import __version__
 from kliptych.__main__ import main
+from kliptych.contract import Band, Layout, LayoutSpec
 from kliptych.environment import EnvironmentReport
 from kliptych.studio.analyzer import AnalysisCancelled, AnalysisEngineError, AnalysisRequest
 from kliptych.studio.models import (
@@ -19,6 +21,8 @@ from kliptych.studio.models import (
     AnalysisProvenance,
     AnalysisSource,
 )
+from kliptych.studio.preview import PreviewRequest, PreviewResult
+from kliptych.studio.project_models import LayoutPosition
 from kliptych.studio.project_store import ProjectStoreError
 
 
@@ -342,3 +346,82 @@ def test_analyze_console_invocation_error_uses_status_one() -> None:
     assert completed.returncode == 1
     assert not completed.stdout
     assert "--project-dir" in completed.stderr
+
+
+def test_main_preview_emits_structured_completed_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+    variant_id = "11111111-1111-1111-1111-111111111111"
+    position_id = "22222222-2222-2222-2222-222222222222"
+
+    def fake_preview(request: PreviewRequest, *, probe: object, runner: object) -> PreviewResult:
+        _ = probe
+        _ = runner
+        assert request.at_ms == 15_000
+        return PreviewResult(
+            preview_path=tmp_path / "previews" / variant_id / f"{'a' * 64}.jpg",
+            preview_fingerprint="a" * 64,
+            frame_time_ms=15_000,
+            width=720,
+            height=1280,
+            layout_position=LayoutPosition(
+                position_id=UUID(position_id),
+                start_ms=10_000,
+                end_ms=20_000,
+                layout_spec=LayoutSpec(layout=Layout.VERTICAL, bands=(Band(source="source.mp4"),)),
+            ),
+        )
+
+    monkeypatch.setattr("kliptych.__main__.generate_preview", fake_preview)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "preview",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                variant_id,
+                "--position-id",
+                position_id,
+                "--at-ms",
+                "15000",
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "completed"
+    assert event["preview_path"] == f"previews/{variant_id}/{'a' * 64}.jpg"
+    assert event["width"] == 720
+    assert event["height"] == 1280
+
+
+def test_main_preview_returns_error_for_invalid_uuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "preview",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "not-a-uuid",
+                "--position-id",
+                "22222222-2222-2222-2222-222222222222",
+                "--at-ms",
+                "15000",
+            ]
+        )
+        == 1
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "error"
+    assert event["error_code"] == "preview_request_invalid"

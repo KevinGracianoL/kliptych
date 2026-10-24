@@ -64,7 +64,6 @@ def test_multi_band_layout_uses_even_band_heights_and_black_gaps() -> None:
         ),
         gap=20,
     )
-
     chains = build_layout_filter_chains(
         layout_spec=layout,
         canvas_width=720,
@@ -84,6 +83,27 @@ def test_multi_band_layout_uses_even_band_heights_and_black_gaps() -> None:
             "crop=720:620,setsar=1,pad=720:640:0:0:color=black[b1]"
         ),
     )
+
+
+def test_geometry_accepts_explicit_input_labels_for_one_source_split_frame() -> None:
+    layout = LayoutSpec(
+        layout=Layout.DIVIDIDO,
+        bands=(
+            Band(source="source.mp4", source_rect=NormalizedRect()),
+            Band(source="source.mp4", source_rect=NormalizedRect()),
+        ),
+    )
+
+    chains = build_layout_filter_chains(
+        layout_spec=layout,
+        canvas_width=720,
+        canvas_height=1280,
+        source_dimensions=((1920, 1080), (1920, 1080)),
+        input_labels=("[frame0]", "[frame1]"),
+    )
+
+    assert chains[0].startswith("[frame0]crop=")
+    assert chains[1].startswith("[frame1]crop=")
 
 
 @pytest.mark.parametrize("dimensions", [((1, 1080),), ((1920, 1),)])

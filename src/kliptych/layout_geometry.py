@@ -19,6 +19,7 @@ class BandGeometry:
     band_height: int
     source_dimensions: tuple[int, int]
     gap: int
+    input_label: str
 
 
 def build_layout_filter_chains(
@@ -27,6 +28,7 @@ def build_layout_filter_chains(
     canvas_width: int,
     canvas_height: int,
     source_dimensions: Sequence[tuple[int, int]],
+    input_labels: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """Build per-band FFmpeg chains from declared geometry and measured sources.
 
@@ -35,6 +37,8 @@ def build_layout_filter_chains(
         canvas_width: Even output canvas width.
         canvas_height: Even output canvas height.
         source_dimensions: One measured width/height pair per declared band.
+        input_labels: Optional FFmpeg labels corresponding to each band. Defaults
+            to numbered input-stream labels.
 
     Returns:
         Filter chains labeled `[b0]`, `[b1]`, and so on.
@@ -52,8 +56,20 @@ def build_layout_filter_chains(
     if not bands:
         msg = "shared layout geometry requires explicit bands"
         raise ValueError(msg)
+    labels = (
+        tuple(f"[{index}:v]" for index in range(len(bands)))
+        if input_labels is None
+        else tuple(input_labels)
+    )
+    if len(labels) != len(bands):
+        msg = "input_labels must have one entry per explicit layout band"
+        raise ValueError(msg)
     if layout_spec.layout is Layout.HORIZONTAL:
-        return (_horizontal_filter(bands[0], source_dimensions[0], canvas_width, canvas_height),)
+        return (
+            _horizontal_filter(
+                bands[0], source_dimensions[0], canvas_width, canvas_height, labels[0]
+            ),
+        )
     band_heights = layout_spec.band_heights(canvas_height)
     gap = layout_spec.gap if len(bands) > 1 else 0
     return tuple(
@@ -64,11 +80,12 @@ def build_layout_filter_chains(
                 band_height=band_height,
                 source_dimensions=dimensions,
                 gap=gap,
+                input_label=label,
             ),
             canvas_width=canvas_width,
         )
-        for index, (band, band_height, dimensions) in enumerate(
-            zip(bands, band_heights, source_dimensions, strict=True)
+        for index, (band, band_height, dimensions, label) in enumerate(
+            zip(bands, band_heights, source_dimensions, labels, strict=True)
         )
     )
 
@@ -83,7 +100,7 @@ def _band_filter(geometry: BandGeometry, *, canvas_width: int) -> str:
         msg = "band content height must be positive after gap"
         raise ValueError(msg)
     chain = (
-        f"[{geometry.index}:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+        f"{geometry.input_label}crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
         f"scale={canvas_width}:{content_h}:force_original_aspect_ratio=increase,"
         f"crop={canvas_width}:{content_h},setsar=1"
     )
@@ -97,6 +114,7 @@ def _horizontal_filter(
     source_dimensions: tuple[int, int],
     canvas_width: int,
     canvas_height: int,
+    input_label: str,
 ) -> str:
     source_w, source_h = source_dimensions
     _require_source_dimension(source_w, name="source_width")
@@ -109,7 +127,7 @@ def _horizontal_filter(
         msg = "horizontal padding must be symmetric"
         raise ValueError(msg)
     return (
-        f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+        f"{input_label}crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
         f"scale={canvas_width}:{content_h}:force_original_aspect_ratio=decrease,"
         f"pad={canvas_width}:{canvas_height}:0:{top_padding}:color=black,setsar=1[b0]"
     )
