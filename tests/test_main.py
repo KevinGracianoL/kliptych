@@ -908,3 +908,112 @@ def test_main_studio_set_captions_emits_variant(
     )
     event = _parse(capsys.readouterr().out)
     assert event["type"] == "captions_updated"
+
+
+def test_main_studio_set_caption_correction_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_caption_correction(
+            *,
+            variant_id: object,
+            interval: object,
+            corrected_text: str,
+            author: str,
+            created_at_ms: int,
+        ) -> object:
+            assert variant_id is not None
+            _ = (interval, corrected_text, author, created_at_ms)
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-caption-correction",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--start-ms",
+                "1000",
+                "--end-ms",
+                "2000",
+                "--text",
+                "Texto corregido",
+                "--author",
+                "user",
+                "--created-at-ms",
+                "5000",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "caption_correction_set"
+
+
+def test_main_studio_clear_caption_correction_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def clear_caption_correction(*, variant_id: object, correction_id: object) -> object:
+            assert variant_id is not None
+            assert correction_id is not None
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "clear-caption-correction",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--correction-id",
+                "22222222-2222-2222-2222-222222222222",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "caption_correction_cleared"
