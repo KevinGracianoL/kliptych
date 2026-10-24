@@ -585,14 +585,18 @@ class ProjectStore:
         if start_ms < variant.start_ms or end_ms > variant.end_ms:
             msg = "Caption correction must fit the variant range."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
-        correction = VariantCaptionCorrection(
-            correction_id=uuid.uuid4(),
-            start_ms=start_ms,
-            end_ms=end_ms,
-            corrected_text=corrected_text,
-            author=author,
-            created_at_ms=created_at_ms,
-        )
+        try:
+            correction = VariantCaptionCorrection(
+                correction_id=uuid.uuid4(),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                corrected_text=corrected_text,
+                author=author,
+                created_at_ms=created_at_ms,
+            )
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
         # Replace any existing correction with the same interval.
         corrections = (
             *(

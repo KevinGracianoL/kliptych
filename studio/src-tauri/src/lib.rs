@@ -81,6 +81,12 @@ fn studio_project(
     wm_position: Option<String>,
     highlight_color: Option<String>,
     capitalization: Option<String>,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    text: Option<String>,
+    author: Option<String>,
+    created_at_ms: Option<i64>,
+    correction_id: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -240,6 +246,48 @@ fn studio_project(
             args.push("--capitalization".to_owned());
             args.push(value);
         }
+    }
+    if operation == "set-caption-correction" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--start-ms".to_owned());
+        args.push(
+            start_ms
+                .ok_or_else(|| "Falta startMs.".to_owned())?
+                .to_string(),
+        );
+        args.push("--end-ms".to_owned());
+        args.push(end_ms.ok_or_else(|| "Falta endMs.".to_owned())?.to_string());
+        args.push("--text".to_owned());
+        args.push(text.clone().ok_or_else(|| "Falta text.".to_owned())?);
+        if let Some(value) = author.clone() {
+            args.push("--author".to_owned());
+            args.push(value);
+        }
+        args.push("--created-at-ms".to_owned());
+        args.push(
+            created_at_ms
+                .ok_or_else(|| "Falta createdAtMs.".to_owned())?
+                .to_string(),
+        );
+    }
+    if operation == "clear-caption-correction" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--correction-id".to_owned());
+        args.push(
+            correction_id
+                .clone()
+                .ok_or_else(|| "Falta correctionId.".to_owned())?,
+        );
     }
     run_backend(&executable, &args)
 }
