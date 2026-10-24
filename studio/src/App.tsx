@@ -353,7 +353,22 @@ function App() {
         enabled: enabled ? "true" : "false",
         wmPosition: position,
       });
-      replaceVariant(event.variant);
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((p) => p.position_id === selectedPosition?.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
     } catch (error) {
       setMessage(`No se pudo actualizar watermark: ${String(error)}`);
     } finally {
@@ -373,7 +388,22 @@ function App() {
         highlightColor,
         capitalization,
       });
-      replaceVariant(event.variant);
+      const updatedVariant = event.variant;
+      const updatedPosition =
+        updatedVariant.layout_timeline.find((p) => p.position_id === selectedPosition?.position_id) ??
+        updatedVariant.layout_timeline[0];
+      setSelectedVariant(updatedVariant);
+      setSelectedPosition(updatedPosition);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
     } catch (error) {
       setMessage(`No se pudo actualizar captions: ${String(error)}`);
     } finally {

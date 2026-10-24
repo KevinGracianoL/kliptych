@@ -1104,8 +1104,8 @@ def _studio_split_position_event(
 def _studio_delete_position_event(
     store: _StudioStore, *, variant_id: str, position_id: str, absorb: str | None
 ) -> dict[str, object]:
-    neighbor = None if absorb is None else AbsorbNeighbor(absorb)
     try:
+        neighbor = None if absorb is None else AbsorbNeighbor(absorb)
         project = store.delete_position(
             variant_id=uuid.UUID(variant_id),
             position_id=uuid.UUID(position_id),
@@ -1161,9 +1161,9 @@ def _studio_import_watermark_event(
 def _studio_set_watermark_event(
     store: _StudioStore, *, variant_id: str, enabled: str | None, position: str | None
 ) -> dict[str, object]:
-    enabled_value = None if enabled is None else enabled == "true"
-    position_value = None if position is None else WatermarkPosition(position)
     try:
+        enabled_value = None if enabled is None else enabled == "true"
+        position_value = None if position is None else WatermarkPosition(position)
         project = store.set_watermark(
             variant_id=uuid.UUID(variant_id),
             enabled=enabled_value,
@@ -1189,9 +1189,11 @@ def _studio_set_captions_event(
     highlight_color: str | None,
     capitalization: str | None,
 ) -> dict[str, object]:
-    enabled_value = None if enabled is None else enabled == "true"
-    capitalization_value = None if capitalization is None else CaptionCapitalization(capitalization)
     try:
+        enabled_value = None if enabled is None else enabled == "true"
+        capitalization_value = (
+            None if capitalization is None else CaptionCapitalization(capitalization)
+        )
         project = store.set_captions(
             variant_id=uuid.UUID(variant_id),
             enabled=enabled_value,
