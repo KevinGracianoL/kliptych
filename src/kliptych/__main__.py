@@ -1285,9 +1285,7 @@ def _studio_set_caption_correction_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Caption correction variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
@@ -1307,9 +1305,7 @@ def _studio_clear_caption_correction_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Caption correction variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
