@@ -33,7 +33,7 @@ canonical `transcript.json`, and the source content that it was created against:
 ```json
 {
   "schema_version": "1",
-  "project_id": "<uuid from analysis.json>",
+  "project_id": "<opaque stable identifier from analysis.json>",
   "analysis_sha256": "<canonical analysis.json hash>",
   "transcript_sha256": "<canonical transcript.json hash>",
   "source_sha256": "<source.mp4 hash>",
@@ -45,6 +45,9 @@ The analysis digest detects candidate and segmenter-result changes. The
 transcript digest detects ASR evidence changes even when the source, analysis
 provenance, and candidate list are otherwise identical. The source digest
 detects a changed VOD even when its URL is the same.
+
+`project_id` remains the opaque stable identifier emitted by B1. It is not
+required to be a UUID. User-created `variant_id` and `position_id` are UUIDs.
 
 ### Variants
 
@@ -118,11 +121,12 @@ no gaps and no overlaps
 
 Opening a candidate creates one initial Vertical position covering the complete
 variant range. A user may split the active position at the playhead only when
-both resulting positions meet a validated minimum-duration policy. Splitting
-copies the existing `LayoutSpec` and crops to both positions and assigns a fresh
-`position_id` to the latter position. Invalid cuts are rejected without changing
-the timeline. The policy's numeric value requires a reproducible editing and
-render measurement before it becomes permanent.
+the cut is strictly inside the active position. Splitting copies the existing
+`LayoutSpec` and crops to both positions and assigns a fresh `position_id` to
+the latter position. Invalid boundary cuts are rejected without changing the
+timeline. B2.1 intentionally does not impose a numeric minimum position
+duration: a permanent threshold requires reproducible preview/render measurement
+on target hardware before it becomes policy.
 
 The only position cannot be deleted. Deleting the first position extends the
 next backward; deleting the last extends the previous forward. Deleting an
@@ -178,7 +182,9 @@ an analysis replacement, or to atomically migrate that state to the replacement
 directory. B2 must not write `project.json` until that invariant is implemented.
 
 - If `source_sha256` changes, Studio never migrates automatically. The user must
-  consciously create or migrate work over the changed source.
+  consciously create or migrate work over the changed source. If editable state
+  exists and the active source is changed, missing, or link-like, B1 reanalysis
+  aborts before migrating `project.json`, assets, or previews.
 - If `transcript_sha256` changes, Studio marks variants `requires_review` even
   when the candidate list did not change, because captions and their previews
   derive from ASR evidence.
