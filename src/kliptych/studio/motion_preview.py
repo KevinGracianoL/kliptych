@@ -12,7 +12,7 @@ from typing import Protocol
 from kliptych.contract import CaptionStyleConfig
 from kliptych.contract.enums import CaptionCapitalization
 from kliptych.gate.probe import MediaProbe
-from kliptych.hashing import sha256_canonical_json
+from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.layout_geometry import build_layout_filter_chains
 from kliptych.studio.preview import PreviewError  # type: ignore[attr-defined]
 from kliptych.studio.project_models import (
@@ -103,7 +103,9 @@ def generate_motion_preview(
     source = request.project_dir / "source.mp4"
 
     dimensions = _probe_dimensions(probe, source)
-    fingerprint = _motion_fingerprint(project.source_sha256, variant, position, start_ms, end_ms)
+    fingerprint = _motion_fingerprint(
+        project.source_sha256, project.transcript_sha256, variant, position, start_ms, end_ms
+    )
     destination = _motion_preview_path(request.project_dir, request.variant_id, fingerprint)
     if destination.is_file() and not destination.is_symlink() and not destination.is_junction():
         return MotionPreviewResult(
@@ -138,8 +140,16 @@ def generate_motion_preview(
 
 def _validate_evidence(project_dir: Path, _project: ProjectDocument) -> None:
     transcript = project_dir / "transcript.json"
+    source = project_dir / "source.mp4"
+    analysis_path = project_dir / "analysis.json"
+    if not analysis_path.is_file() or analysis_path.is_symlink() or analysis_path.is_junction():
+        msg = "Preview requires a regular analysis artifact."
+        raise PreviewError(msg)
     if not transcript.is_file() or transcript.is_symlink() or transcript.is_junction():
         msg = "Preview requires a regular transcript artifact."
+        raise PreviewError(msg)
+    if not source.is_file() or source.is_symlink() or source.is_junction():
+        msg = "Preview requires a regular source artifact."
         raise PreviewError(msg)
 
 
@@ -181,13 +191,19 @@ def _probe_dimensions(probe: MediaProbe, source: Path) -> tuple[int, int]:
     return int(width), int(height)
 
 
-def _motion_fingerprint(
-    source_sha256: str, variant: Variant, position: LayoutPosition, start_ms: int, end_ms: int
+def _motion_fingerprint(  # ruff: ignore[too-many-arguments,too-many-positional-arguments]
+    source_sha256: str,
+    transcript_sha256: str,
+    variant: Variant,
+    position: LayoutPosition,
+    start_ms: int,
+    end_ms: int,
 ) -> str:
     return sha256_canonical_json(
         {
             "implementation_version": _MOTION_PREVIEW_IMPLEMENTATION_VERSION,
             "source_sha256": source_sha256,
+            "transcript_sha256": transcript_sha256,
             "variant_id": str(variant.variant_id),
             "position_id": str(position.position_id),
             "start_ms": start_ms,
@@ -250,8 +266,10 @@ def _apply_caption_corrections(
     result: list[Word] = []
     for w in words:
         skip = False
+        ws = int(w.start_s * 1000)
+        we = int(w.end_s * 1000)
         for c in corrections:
-            if c.start_ms <= int(w.start_s * 1000) < c.end_ms:
+            if ws < c.end_ms and we > c.start_ms:
                 skip = True
                 break
         if not skip:
@@ -384,7 +402,13 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
     wm_asset_path: Path | None = None
     if wm_enabled:
         candidate = project_dir / "assets" / "watermark" / f"{variant.watermark.asset_id}.png"
-        if candidate.is_file():
+        if (
+            candidate.is_file()
+            and not candidate.is_symlink()
+            and not candidate.is_junction()
+            and variant.watermark.asset_sha256 is not None
+            and sha256_file(candidate) == variant.watermark.asset_sha256
+        ):
             wm_asset_path = candidate
             extra_inputs.extend(["-i", str(candidate)])
 
@@ -448,6 +472,9 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
         if ass_path is not None:
             with contextlib.suppress(OSError):
                 ass_path.unlink()
+        with contextlib.suppress(OSError):
+            if temp_destination.exists() and not destination.is_file():
+                temp_destination.unlink()
     if not temp_destination.is_file():
         with contextlib.suppress(OSError):
             temp_destination.unlink()
