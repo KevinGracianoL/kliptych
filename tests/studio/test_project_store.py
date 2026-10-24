@@ -1240,6 +1240,4 @@ def test_store_clear_caption_correction_requires_project(tmp_path: Path) -> None
     store = open_project_store(project_dir)
     _ = store.initialize_project(probe=_Probe(60.0))
     with pytest.raises(ProjectStoreError):
-        _ = store.clear_caption_correction(
-            variant_id=uuid.uuid4(), correction_id=uuid.uuid4()
-        )
+        _ = store.clear_caption_correction(variant_id=uuid.uuid4(), correction_id=uuid.uuid4())
