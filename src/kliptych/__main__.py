@@ -1203,9 +1203,7 @@ def _studio_set_captions_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Caption variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
