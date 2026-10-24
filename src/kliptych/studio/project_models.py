@@ -93,6 +93,30 @@ class VariantWatermark(BaseModel):
     position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT
 
 
+class VariantCaptionCorrection(BaseModel):
+    """An attributed human override for a caption interval.
+
+    The original ASR transcript remains immutable; this record is the
+    human-authored replacement for the given time range.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+    correction_id: uuid.UUID
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    corrected_text: str = Field(min_length=1)
+    author: str = Field(min_length=1, default="user")
+    created_at_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _valid_range(self) -> Self:
+        if self.end_ms <= self.start_ms:
+            msg = "caption correction end_ms must be greater than start_ms"
+            raise ValueError(msg)
+        return self
+
+
 class Variant(BaseModel):
     """An editable human variant derived from an immutable source candidate."""
 
@@ -108,6 +132,7 @@ class Variant(BaseModel):
     captions_enabled: bool = False
     caption_highlight_color: str = "&H000000FF"
     caption_capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
+    caption_corrections: tuple[VariantCaptionCorrection, ...] = ()
     layout_timeline: tuple[LayoutPosition, ...]
 
     @model_validator(mode="after")
@@ -295,6 +320,7 @@ def duplicate_variant(variant: Variant, *, name: str) -> Variant:
         captions_enabled=variant.captions_enabled,
         caption_highlight_color=variant.caption_highlight_color,
         caption_capitalization=variant.caption_capitalization,
+        caption_corrections=variant.caption_corrections,
         layout_timeline=positions,
     )
 

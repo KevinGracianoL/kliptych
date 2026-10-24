@@ -166,6 +166,24 @@ class _StudioStore(Protocol):
         """Update caption controls for one variant."""
         ...
 
+    def set_caption_correction(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        interval: tuple[int, int],
+        corrected_text: str,
+        author: str = "user",
+        created_at_ms: int,
+    ) -> ProjectDocument:
+        """Add or replace an attributed human caption correction."""
+        ...
+
+    def clear_caption_correction(
+        self, *, variant_id: uuid.UUID, correction_id: uuid.UUID
+    ) -> ProjectDocument:
+        """Remove one attributed caption correction."""
+        ...
+
 
 _SEGMENT_SYSTEM_PROMPT = (
     "Eres el selector de segmentos de Kliptych. Recibes un JSON con la "
@@ -708,7 +726,7 @@ def _add_studio_project_argument(parser: argparse.ArgumentParser) -> None:
     _ = parser.add_argument("--project-dir", required=True, help="directorio local del proyecto")
 
 
-def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
+def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: ignore[too-many-statements]
     """Register the narrow project operations consumed by the desktop shell."""
     studio_subcommands = parser.add_subparsers(dest="studio_command", required=True)
     studio_inspect = studio_subcommands.add_parser("inspect", help="inspecciona un proyecto Studio")
@@ -782,6 +800,24 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
     _ = studio_set_cap.add_argument(
         "--capitalization", choices=["original", "uppercase", "lowercase"], help="capitalizacion"
     )
+    studio_set_corr = studio_subcommands.add_parser(
+        "set-caption-correction", help="registra una correccion humana de caption"
+    )
+    _add_studio_project_argument(studio_set_corr)
+    _ = studio_set_corr.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_set_corr.add_argument("--start-ms", required=True, type=int, help="inicio en ms")
+    _ = studio_set_corr.add_argument("--end-ms", required=True, type=int, help="fin en ms")
+    _ = studio_set_corr.add_argument("--text", required=True, help="texto corregido")
+    _ = studio_set_corr.add_argument("--author", default="user", help="autor de la correccion")
+    _ = studio_set_corr.add_argument(
+        "--created-at-ms", required=True, type=int, help="timestamp ms"
+    )
+    studio_clear_corr = studio_subcommands.add_parser(
+        "clear-caption-correction", help="elimina una correccion humana de caption"
+    )
+    _add_studio_project_argument(studio_clear_corr)
+    _ = studio_clear_corr.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = studio_clear_corr.add_argument("--correction-id", required=True, help="ID de la correccion")
 
 
 def _dispatch_command(
@@ -994,6 +1030,20 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             enabled=cast("str | None", getattr(args, "enabled", None)),
             highlight_color=cast("str | None", getattr(args, "highlight_color", None)),
             capitalization=cast("str | None", getattr(args, "capitalization", None)),
+        ),
+        "set-caption-correction": lambda: _studio_set_caption_correction_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            start_ms=cast("int", args.start_ms),
+            end_ms=cast("int", args.end_ms),
+            text=cast("str", args.text),
+            author=cast("str", args.author),
+            created_at_ms=cast("int", args.created_at_ms),
+        ),
+        "clear-caption-correction": lambda: _studio_clear_caption_correction_event(
+            store,
+            variant_id=cast("str", args.variant_id),
+            correction_id=cast("str", args.correction_id),
         ),
     }
     handler = dispatch.get(command)
@@ -1210,6 +1260,60 @@ def _studio_set_captions_event(
         msg = "Caption variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
     return {"type": "captions_updated", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_set_caption_correction_event(
+    store: _StudioStore,
+    *,
+    variant_id: str,
+    start_ms: int,
+    end_ms: int,
+    text: str,
+    author: str,
+    created_at_ms: int,
+) -> dict[str, object]:
+    try:
+        project = store.set_caption_correction(
+            variant_id=uuid.UUID(variant_id),
+            interval=(start_ms, end_ms),
+            corrected_text=text,
+            author=author,
+            created_at_ms=created_at_ms,
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next(
+        (item for item in project.variants if str(item.variant_id) == variant_id), None
+    )
+    if variant is None:
+        msg = "Caption correction variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "caption_correction_set", "variant": variant.model_dump(mode="json")}
+
+
+def _studio_clear_caption_correction_event(
+    store: _StudioStore, *, variant_id: str, correction_id: str
+) -> dict[str, object]:
+    try:
+        project = store.clear_caption_correction(
+            variant_id=uuid.UUID(variant_id),
+            correction_id=uuid.UUID(correction_id),
+        )
+    except (ProjectStoreError, ValueError) as error:
+        if isinstance(error, ProjectStoreError):
+            raise
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    variant = next(
+        (item for item in project.variants if str(item.variant_id) == variant_id), None
+    )
+    if variant is None:
+        msg = "Caption correction variant is missing from project."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return {"type": "caption_correction_cleared", "variant": variant.model_dump(mode="json")}
 
 
 def _write_preview_event(event: dict[str, object]) -> None:
