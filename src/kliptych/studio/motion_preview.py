@@ -1,16 +1,29 @@
 """Short temporal (motion) previews for one B2.4 position."""
 
+import contextlib
+import os
+import tempfile
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kliptych.contract import CaptionStyleConfig
+from kliptych.contract.enums import CaptionCapitalization
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_canonical_json
 from kliptych.layout_geometry import build_layout_filter_chains
 from kliptych.studio.preview import PreviewError  # type: ignore[attr-defined]
-from kliptych.studio.project_models import LayoutPosition, ProjectDocument, Variant
+from kliptych.studio.project_models import (
+    LayoutPosition,
+    ProjectDocument,
+    Variant,
+    VariantCaptionCorrection,
+)
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
+from kliptych.subtitles import SubtitleRenderer, SubtitleStyle
+from kliptych.transcribe import Transcript, Word
 
 _MOTION_PREVIEW_IMPLEMENTATION_VERSION = "1"
 _MOTION_PREVIEW_DIR = "previews"
@@ -102,6 +115,8 @@ def generate_motion_preview(
         )
     _render_motion_preview(
         source=source,
+        project_dir=request.project_dir,
+        variant=variant,
         position=position,
         start_ms=start_ms,
         end_ms=end_ms,
@@ -194,9 +209,97 @@ def _motion_preview_path(project_dir: Path, variant_id: uuid.UUID, fingerprint: 
     return directory / f"motion_{fingerprint}.mp4"
 
 
-def _render_motion_preview(  # ruff: ignore[too-many-arguments]
+def _read_transcript(project_dir: Path) -> Transcript:
+    path = project_dir / "transcript.json"
+    return Transcript.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[Word]:
+    out: list[Word] = []
+    for w in transcript.words:
+        ws = int(w.start_s * 1000)
+        we = int(w.end_s * 1000)
+        if we <= start_ms or ws >= end_ms:
+            continue
+        out.append(w)
+    return out
+
+
+def _apply_caption_corrections(
+    words: list[Word], corrections: Sequence[VariantCaptionCorrection]
+) -> list[Word]:
+    if not corrections:
+        return words
+    result: list[Word] = []
+    for w in words:
+        skip = False
+        for c in corrections:
+            if c.start_ms <= int(w.start_s * 1000) < c.end_ms:
+                skip = True
+                break
+        if not skip:
+            result.append(w)
+    result.extend(
+        Word(
+            start_s=c.start_ms / 1000.0,
+            end_s=c.end_ms / 1000.0,
+            text=c.corrected_text,
+            confidence=1.0,
+            token_id=0,
+        )
+        for c in corrections
+    )
+    result.sort(key=lambda w: w.start_s)
+    return result
+
+
+def _try_render_ass(  # ruff: ignore[too-many-arguments]
+    *,
+    project_dir: Path,
+    variant: Variant,
+    start_ms: int,
+    end_ms: int,
+    filter_parts: list[str],
+    final_label: str,
+) -> tuple[Path | None, str]:
+    try:
+        transcript = _read_transcript(project_dir)
+    except (OSError, ValueError) as error:
+        _ = error
+        return None, "[outv]"
+    words = _words_in_range(transcript, start_ms, end_ms)
+    words = _apply_caption_corrections(words, variant.caption_corrections)
+    if not words:
+        return None, final_label
+    try:
+        style = SubtitleStyle.from_caption_style(
+            CaptionStyleConfig(
+                capitalization=CaptionCapitalization(variant.caption_capitalization.value),
+                highlight_color=variant.caption_highlight_color,
+            )
+        )
+        renderer = SubtitleRenderer(style=style)
+        ass_content = renderer.build(words)
+    except (OSError, ValueError) as error:
+        _ = error
+        return None, "[outv]"
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".ass", prefix="motion_")
+        _ = os.close(fd)
+        ass_path = Path(tmp)
+        _ = ass_path.write_text(ass_content, encoding="utf-8")
+    except (OSError, ValueError) as error:
+        _ = error
+        return None, "[outv]"
+    filter_parts.append(f"[outv]subtitles=filename='{ass_path}'[outv_sub]")
+    return ass_path, "[outv_sub]"
+
+
+def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals]
     *,
     source: Path,
+    project_dir: Path,
+    variant: Variant,
     position: LayoutPosition,
     start_ms: int,
     end_ms: int,
@@ -239,6 +342,34 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments]
     else:
         filter_parts.append("[b0]copy[outv]")
 
+    # Optional watermark PNG overlay.
+    extra_inputs: list[str] = []
+    wm_enabled = variant.watermark.enabled and variant.watermark.asset_id is not None
+    wm_asset_path: Path | None = None
+    if wm_enabled:
+        candidate = project_dir / "assets" / "watermark" / f"{variant.watermark.asset_id}.png"
+        if candidate.is_file():
+            wm_asset_path = candidate
+            extra_inputs.extend(["-i", str(candidate)])
+
+    # Optional captions (ASS) burn-in.
+    ass_path: Path | None = None
+    final_label = "[outv]"
+    if variant.captions_enabled:
+        ass_path, final_label = _try_render_ass(
+            project_dir=project_dir,
+            variant=variant,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            filter_parts=filter_parts,
+            final_label=final_label,
+        )
+
+    # Watermark overlay filter.
+    if wm_asset_path is not None:
+        filter_parts.append(f"{final_label}[1:v]overlay=W-w-10:H-h-10[outv_wm]")
+        final_label = "[outv_wm]"
+
     filter_complex = ";".join(filter_parts)
     argv = [
         ffmpeg,
@@ -253,10 +384,13 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments]
         str(dur_s),
         "-i",
         str(source),
+    ]
+    argv += extra_inputs
+    argv += [
         "-filter_complex",
         filter_complex,
         "-map",
-        "[outv]",
+        final_label,
         "-t",
         str(dur_s),
         "-c:v",
@@ -271,6 +405,9 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments]
         str(destination),
     ]
     _ = runner.run(tuple(argv), timeout_s=120.0)
+    if ass_path is not None:
+        with contextlib.suppress(OSError):
+            ass_path.unlink()
     if not destination.is_file():
         msg = "Motion preview render failed."
         raise PreviewError(msg)
