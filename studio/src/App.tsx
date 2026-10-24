@@ -34,6 +34,7 @@ type Variant = {
   captions_enabled?: boolean;
   caption_highlight_color?: string;
   caption_capitalization?: string;
+  caption_corrections?: { correction_id: string; start_ms: number; end_ms: number; corrected_text: string; author: string; created_at_ms: number }[];
 };
 
 type ProjectEvent = {
@@ -75,6 +76,9 @@ function App() {
   const [captionsEnabled, setCaptionsEnabled] = useState(false);
   const [captionHighlightColor, setCaptionHighlightColor] = useState("&H000000FF");
   const [captionCapitalization, setCaptionCapitalization] = useState("original");
+  const [captionCorrectionText, setCaptionCorrectionText] = useState("");
+  const [captionCorrectionStart, setCaptionCorrectionStart] = useState(0);
+  const [captionCorrectionEnd, setCaptionCorrectionEnd] = useState(0);
   const [splitAtMs, setSplitAtMs] = useState(0);
   const [absorbChoice, setAbsorbChoice] = useState<"previous" | "next">("previous");
   const [message, setMessage] = useState("Abre un proyecto B1 para empezar.");
@@ -93,6 +97,10 @@ function App() {
     setCaptionsEnabled(selectedVariant?.captions_enabled ?? false);
     setCaptionHighlightColor(selectedVariant?.caption_highlight_color ?? "&H000000FF");
     setCaptionCapitalization(selectedVariant?.caption_capitalization ?? "original");
+    if (selectedVariant?.layout_timeline[0]) {
+      setCaptionCorrectionStart(selectedVariant.layout_timeline[0].start_ms);
+      setCaptionCorrectionEnd(selectedVariant.layout_timeline[0].end_ms);
+    }
   }, [selectedVariant]);
 
   async function configureBackend(path = backendPath) {
@@ -411,6 +419,40 @@ function App() {
     }
   }
 
+  async function applyCaptionCorrection() {
+    if (!projectDir || !selectedVariant || isBusy || !captionCorrectionText.trim()) return;
+    setBusy(true);
+    try {
+      const event = await invoke<{ variant: Variant }>("studio_project", {
+        projectDir,
+        operation: "set-caption-correction",
+        variantId: selectedVariant.variant_id,
+        startMs: captionCorrectionStart,
+        endMs: captionCorrectionEnd,
+        text: captionCorrectionText,
+        author: "user",
+        createdAtMs: Date.now(),
+      });
+      const updatedVariant = event.variant;
+      setSelectedVariant(updatedVariant);
+      setProject((current) =>
+        current
+          ? {
+              ...current,
+              variants: current.variants.map((variant) =>
+                variant.variant_id === updatedVariant.variant_id ? updatedVariant : variant
+              ),
+            }
+          : current
+      );
+      setMessage("Corrección de caption registrada.");
+    } catch (error) {
+      setMessage(`No se pudo registrar corrección: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -530,6 +572,16 @@ function App() {
                 <option value="uppercase">uppercase (AA)</option>
                 <option value="lowercase">lowercase (aa)</option>
               </select>
+              <div className="caption-correction">
+                <span className="eyebrow">Corrección humana</span>
+                <input type="number" value={captionCorrectionStart} onChange={(e) => setCaptionCorrectionStart(Number(e.target.value))} disabled={isBusy} />
+                <input type="number" value={captionCorrectionEnd} onChange={(e) => setCaptionCorrectionEnd(Number(e.target.value))} disabled={isBusy} />
+                <textarea value={captionCorrectionText} onChange={(e) => setCaptionCorrectionText(e.target.value)} disabled={isBusy} placeholder="Texto corregido" />
+                <button className="ghost" onClick={applyCaptionCorrection} disabled={isBusy || !captionCorrectionText.trim()}>Registrar corrección</button>
+                {selectedVariant?.caption_corrections?.map((c) => (
+                  <small key={c.correction_id}>{c.start_ms}–{c.end_ms}: {c.corrected_text} ({c.author})</small>
+                ))}
+              </div>
             </div>
           </section>
         </div>

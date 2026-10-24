@@ -28,6 +28,7 @@ from kliptych.studio.project_models import (
     AbsorbNeighbor,
     ProjectDocument,
     ProjectStatus,
+    VariantCaptionCorrection,
     VariantOrigin,
     VariantRange,
     VariantWatermark,
@@ -544,6 +545,102 @@ class ProjectStore:
         if capitalization is not None:
             update["caption_capitalization"] = capitalization
         updated_variant = variant.model_copy(update=update)
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def set_caption_correction(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        interval: tuple[int, int],
+        corrected_text: str,
+        author: str = "user",
+        created_at_ms: int,
+    ) -> ProjectDocument:
+        """Add or replace an attributed human caption correction.
+
+        Returns:
+            The project document with the updated correction list.
+
+        Raises:
+            ProjectStoreError: If the variant is absent or the range is invalid.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Caption corrections require editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        start_ms, end_ms = interval
+        if start_ms < variant.start_ms or end_ms > variant.end_ms:
+            msg = "Caption correction must fit the variant range."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        try:
+            correction = VariantCaptionCorrection(
+                correction_id=uuid.uuid4(),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                corrected_text=corrected_text,
+                author=author,
+                created_at_ms=created_at_ms,
+            )
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        # Replace any existing correction with the same interval.
+        corrections = (
+            *(
+                item
+                for item in variant.caption_corrections
+                if not (item.start_ms == start_ms and item.end_ms == end_ms)
+            ),
+            correction,
+        )
+        updated_variant = variant.model_copy(update={"caption_corrections": corrections})
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def clear_caption_correction(
+        self, *, variant_id: uuid.UUID, correction_id: uuid.UUID
+    ) -> ProjectDocument:
+        """Remove one attributed caption correction.
+
+        Returns:
+            The project document without the specified correction.
+
+        Raises:
+            ProjectStoreError: If the variant is absent.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Caption corrections require editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        corrections = tuple(
+            item for item in variant.caption_corrections if item.correction_id != correction_id
+        )
+        updated_variant = variant.model_copy(update={"caption_corrections": corrections})
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
