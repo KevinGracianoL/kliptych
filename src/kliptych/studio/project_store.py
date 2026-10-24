@@ -388,9 +388,7 @@ class ProjectStore:
             msg = "Duplicating a variant requires editable project state."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         self._validate_project_binding(project)
-        source = next(
-            (item for item in project.variants if item.variant_id == variant_id), None
-        )
+        source = next((item for item in project.variants if item.variant_id == variant_id), None)
         if source is None:
             msg = "Variant is not part of the editable project."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)

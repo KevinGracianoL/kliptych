@@ -5,6 +5,8 @@ from typing import Protocol, cast
 
 import pytest
 
+from kliptych.contract.enums import Layout
+from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.gate.models import MediaInfo
 from kliptych.hashing import sha256_bytes, sha256_file
 from kliptych.studio import project_store as _project_store
@@ -14,8 +16,6 @@ from kliptych.studio.models import (
     AnalysisProvenance,
     AnalysisSource,
 )
-from kliptych.contract.enums import Layout
-from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.studio.project_models import (
     ProjectDocument,
     VariantOrigin,
@@ -1030,7 +1030,7 @@ def test_store_update_position_persists_validated_layout(
         stage.write_text("transcript.json", "transcript")
         stage.write_text("candidates.json", "candidates")
     store = open_project_store(project_dir)
-    store.initialize_project(probe=_Probe(60.0))
+    _ = store.initialize_project(probe=_Probe(60.0))
     created = store.create_variant(candidate_id=candidate.candidate_id, name="Variant 1")
     variant = created.variants[0]
     position = variant.layout_timeline[0]

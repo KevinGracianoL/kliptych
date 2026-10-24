@@ -496,7 +496,7 @@ def test_main_studio_create_variant_emits_variant(
     _disable_logging_setup(monkeypatch)
 
     class _Variant:
-        variant_id = "11111111-1111-1111-1111-111111111111"
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
 
         @staticmethod
         def model_dump(**_kwargs: object) -> dict[str, str]:
@@ -548,7 +548,8 @@ def test_main_studio_update_position_emits_variant(
     _disable_logging_setup(monkeypatch)
 
     class _Variant:
-        variant_id = "11111111-1111-1111-1111-111111111111"
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
         @staticmethod
         def model_dump(**_kwargs: object) -> dict[str, str]:
             return {"variant_id": "id"}
@@ -558,9 +559,11 @@ def test_main_studio_update_position_emits_variant(
 
     class _Store:
         @staticmethod
-        def update_position(*, variant_id: object, position_id: object, layout_spec: object) -> object:
-            assert str(variant_id) != ""
-            assert str(position_id) != ""
+        def update_position(
+            *, variant_id: object, position_id: object, layout_spec: object
+        ) -> object:
+            assert str(variant_id)
+            assert str(position_id)
             assert layout_spec is not None
             return project
 
@@ -569,7 +572,10 @@ def test_main_studio_update_position_emits_variant(
 
     monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
 
-    layout = '{"layout":"vertical","bands":[{"source":"source.mp4","source_rect":{"x":0,"y":0,"width":1,"height":1}}]}'
+    layout = (
+        '{"layout":"vertical","bands":[{"source":"source.mp4",'
+        '"source_rect":{"x":0,"y":0,"width":1,"height":1}}]}'
+    )
     assert (
         main(
             [

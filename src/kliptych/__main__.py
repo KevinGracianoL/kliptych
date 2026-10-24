@@ -1040,9 +1040,7 @@ def _studio_update_position_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Updated variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
@@ -1066,9 +1064,7 @@ def _studio_split_position_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Split variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
@@ -1090,9 +1086,7 @@ def _studio_delete_position_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Deleted position variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
@@ -1127,9 +1121,7 @@ def _studio_import_watermark_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Watermark variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
@@ -1152,9 +1144,7 @@ def _studio_set_watermark_event(
             raise
         msg = str(error)
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
-    variant = next(
-        (item for item in project.variants if str(item.variant_id) == variant_id), None
-    )
+    variant = next((item for item in project.variants if str(item.variant_id) == variant_id), None)
     if variant is None:
         msg = "Watermark variant is missing from project."
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
