@@ -74,6 +74,11 @@ fn studio_project(
     variant_id: Option<String>,
     position_id: Option<String>,
     layout_json: Option<String>,
+    at_ms: Option<i64>,
+    absorb: Option<String>,
+    source: Option<String>,
+    enabled: Option<String>,
+    wm_position: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -98,15 +103,109 @@ fn studio_project(
         args.push("--candidate-id".to_owned());
         args.push(candidate_id.ok_or_else(|| "Falta candidateId.".to_owned())?);
         args.push("--name".to_owned());
-        args.push(name.ok_or_else(|| "Falta nombre de variante.".to_owned())?);
+        args.push(
+            name.clone()
+                .ok_or_else(|| "Falta nombre de variante.".to_owned())?,
+        );
     }
     if operation == "update-position" {
         args.push("--variant-id".to_owned());
-        args.push(variant_id.ok_or_else(|| "Falta variantId.".to_owned())?);
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
         args.push("--position-id".to_owned());
-        args.push(position_id.ok_or_else(|| "Falta positionId.".to_owned())?);
+        args.push(
+            position_id
+                .clone()
+                .ok_or_else(|| "Falta positionId.".to_owned())?,
+        );
         args.push("--layout-json".to_owned());
-        args.push(layout_json.ok_or_else(|| "Falta layoutJson.".to_owned())?);
+        args.push(
+            layout_json
+                .clone()
+                .ok_or_else(|| "Falta layoutJson.".to_owned())?,
+        );
+    }
+    if operation == "split-position" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--position-id".to_owned());
+        args.push(
+            position_id
+                .clone()
+                .ok_or_else(|| "Falta positionId.".to_owned())?,
+        );
+        args.push("--at-ms".to_owned());
+        args.push(
+            at_ms
+                .clone()
+                .ok_or_else(|| "Falta atMs.".to_owned())?
+                .to_string(),
+        );
+    }
+    if operation == "delete-position" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--position-id".to_owned());
+        args.push(
+            position_id
+                .clone()
+                .ok_or_else(|| "Falta positionId.".to_owned())?,
+        );
+        if let Some(value) = absorb {
+            args.push("--absorb".to_owned());
+            args.push(value);
+        }
+    }
+    if operation == "duplicate-variant" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--name".to_owned());
+        args.push(name.ok_or_else(|| "Falta nombre de variante.".to_owned())?);
+    }
+    if operation == "import-watermark" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        args.push("--source".to_owned());
+        args.push(source.clone().ok_or_else(|| "Falta source.".to_owned())?);
+        if let Some(value) = wm_position.clone() {
+            args.push("--position".to_owned());
+            args.push(value);
+        }
+    }
+    if operation == "set-watermark" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        if let Some(value) = enabled.clone() {
+            args.push("--enabled".to_owned());
+            args.push(value);
+        }
+        if let Some(value) = wm_position.clone() {
+            args.push("--position".to_owned());
+            args.push(value);
+        }
     }
     run_backend(&executable, &args)
 }

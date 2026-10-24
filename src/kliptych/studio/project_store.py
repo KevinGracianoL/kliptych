@@ -19,16 +19,28 @@ from typing import Literal, Self
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
+from kliptych.contract.enums import WatermarkPosition
+from kliptych.contract.schema import LayoutSpec
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_file
 from kliptych.studio.models import AnalysisDocument
-from kliptych.contract.schema import LayoutSpec
 from kliptych.studio.project_models import (
+    AbsorbNeighbor,
     ProjectDocument,
     ProjectStatus,
     VariantOrigin,
     VariantRange,
+    VariantWatermark,
     create_initial_variant,
+)
+from kliptych.studio.project_models import (
+    delete_position as _delete_position,
+)
+from kliptych.studio.project_models import (
+    duplicate_variant as _duplicate_variant,
+)
+from kliptych.studio.project_models import (
+    split_position as _split_position,
 )
 
 _ANALYSIS_NAME = "analysis.json"
@@ -44,6 +56,7 @@ _ARTIFACT_NAME_INVALID = "artifact_name_invalid"
 _ANALYSIS_PUBLISH_FAILED = "analysis_publish_failed"
 _ANALYSIS_STAGE_INVALID = "analysis_stage_invalid"
 _EDITABLE_STATE_NAMES = ("project.json", "assets", "previews")
+_MIN_CROP_SIZE = 0.05
 
 
 class ProjectStoreError(Exception):
@@ -253,7 +266,11 @@ class ProjectStore:
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         variant = project.variants[variant_index]
         position_index = next(
-            (i for i, item in enumerate(variant.layout_timeline) if item.position_id == position_id),
+            (
+                i
+                for i, item in enumerate(variant.layout_timeline)
+                if item.position_id == position_id
+            ),
             None,
         )
         if position_index is None:
@@ -267,7 +284,7 @@ class ProjectStore:
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         for band in layout_spec.bands:
             rect = band.source_rect
-            if rect.width < 0.05 or rect.height < 0.05:
+            if rect.width < _MIN_CROP_SIZE or rect.height < _MIN_CROP_SIZE:
                 msg = "Layout crop must be at least 0.05 in each dimension."
                 raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         positions = list(variant.layout_timeline)
@@ -275,6 +292,211 @@ class ProjectStore:
             update={"layout_spec": layout_spec}
         )
         updated_variant = variant.model_copy(update={"layout_timeline": tuple(positions)})
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def split_position(
+        self, *, variant_id: uuid.UUID, position_id: uuid.UUID, at_ms: int
+    ) -> ProjectDocument:
+        """Split one timeline position at the requested timestamp.
+
+        Returns:
+            The project document containing the split timeline.
+
+        Raises:
+            ProjectStoreError: If the variant, position, or cut is invalid.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Splitting a position requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        try:
+            updated_variant = _split_position(variant, position_id=position_id, at_ms=at_ms)
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def delete_position(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        position_id: uuid.UUID,
+        absorb_neighbor: AbsorbNeighbor | None,
+    ) -> ProjectDocument:
+        """Delete one timeline position while preserving continuous coverage.
+
+        Returns:
+            The project document containing the updated timeline.
+
+        Raises:
+            ProjectStoreError: If the variant or position is invalid.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Deleting a position requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        try:
+            updated_variant = _delete_position(
+                variant, position_id=position_id, absorb_neighbor=absorb_neighbor
+            )
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def duplicate_variant(self, *, variant_id: uuid.UUID, name: str) -> ProjectDocument:
+        """Duplicate a variant with fresh IDs.
+
+        Returns:
+            The project document containing the new variant.
+
+        Raises:
+            ProjectStoreError: If the source variant is absent.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Duplicating a variant requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        source = next(
+            (item for item in project.variants if item.variant_id == variant_id), None
+        )
+        if source is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        new_variant = _duplicate_variant(source, name=name)
+        updated = project.model_copy(update={"variants": (*project.variants, new_variant)})
+        self.write_project(updated)
+        return updated
+
+    def import_watermark(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        source_path: Path,
+        position: WatermarkPosition | None = None,
+    ) -> ProjectDocument:
+        """Import a local PNG watermark into controlled project storage.
+
+        Returns:
+            The project document with the updated watermark binding.
+
+        Raises:
+            ProjectStoreError: If the source is not a valid PNG or storage fails.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Importing a watermark requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        if not source_path.is_file() or _is_link_like(source_path):
+            msg = "Watermark source must be a regular file."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        data = source_path.read_bytes()
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            msg = "Watermark source must be a PNG image."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        asset_id = uuid.uuid4()
+        asset_dir = self.project_dir / "assets" / "watermark"
+        try:
+            asset_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            msg = "Watermark asset directory could not be created."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        destination = asset_dir / f"{asset_id}.png"
+        try:
+            _ = destination.write_bytes(data)
+        except OSError as error:
+            msg = "Watermark asset could not be stored."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        asset_sha = sha256_file(destination)
+        resolved_position = position if position is not None else WatermarkPosition.BOTTOM_RIGHT
+        watermark = VariantWatermark(
+            enabled=True,
+            asset_id=asset_id,
+            asset_sha256=asset_sha,
+            source_name=source_path.name,
+            position=resolved_position,
+        )
+        variant = project.variants[variant_index]
+        updated_variant = variant.model_copy(update={"watermark": watermark})
+        variants = list(project.variants)
+        variants[variant_index] = updated_variant
+        updated = project.model_copy(update={"variants": tuple(variants)})
+        self.write_project(updated)
+        return updated
+
+    def set_watermark(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        enabled: bool | None = None,
+        position: WatermarkPosition | None = None,
+    ) -> ProjectDocument:
+        """Update watermark enabled state or zone for one variant.
+
+        Returns:
+            The project document with the updated watermark settings.
+
+        Raises:
+            ProjectStoreError: If the variant is absent.
+        """
+        project = self.read_project()
+        if project is None:
+            msg = "Updating a watermark requires editable project state."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        self._validate_project_binding(project)
+        variant_index = next(
+            (i for i, item in enumerate(project.variants) if item.variant_id == variant_id),
+            None,
+        )
+        if variant_index is None:
+            msg = "Variant is not part of the editable project."
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
+        variant = project.variants[variant_index]
+        watermark = variant.watermark
+        if enabled is not None:
+            watermark = watermark.model_copy(update={"enabled": enabled})
+        if position is not None:
+            watermark = watermark.model_copy(update={"position": position})
+        updated_variant = variant.model_copy(update={"watermark": watermark})
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})

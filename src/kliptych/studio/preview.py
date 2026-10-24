@@ -312,6 +312,7 @@ def _fingerprint(
             "position_id": str(position.position_id),
             "at_ms": at_ms,
             "layout_spec": position.layout_spec.model_dump(mode="json"),
+            "watermark": variant.watermark.model_dump(mode="json"),
             "canvas_width": _CANVAS_WIDTH,
             "canvas_height": _CANVAS_HEIGHT,
             "jpeg_qscale": _JPEG_QSCALE,

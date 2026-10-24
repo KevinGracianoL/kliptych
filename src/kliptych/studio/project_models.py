@@ -6,7 +6,7 @@ from typing import ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kliptych.contract.enums import Layout
+from kliptych.contract.enums import Layout, WatermarkPosition
 from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 
 PROJECT_SCHEMA_VERSION = "1"
@@ -81,6 +81,18 @@ class LayoutPosition(BaseModel):
         return self
 
 
+class VariantWatermark(BaseModel):
+    """Local watermark asset binding for one editable variant."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    asset_id: uuid.UUID | None = None
+    asset_sha256: str | None = None
+    source_name: str | None = None
+    position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT
+
+
 class Variant(BaseModel):
     """An editable human variant derived from an immutable source candidate."""
 
@@ -92,6 +104,7 @@ class Variant(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
     status: ProjectStatus = ProjectStatus.ACTIVE
+    watermark: VariantWatermark = Field(default_factory=VariantWatermark)
     layout_timeline: tuple[LayoutPosition, ...]
 
     @model_validator(mode="after")
@@ -275,6 +288,7 @@ def duplicate_variant(variant: Variant, *, name: str) -> Variant:
         start_ms=variant.start_ms,
         end_ms=variant.end_ms,
         status=variant.status,
+        watermark=variant.watermark,
         layout_timeline=positions,
     )
 
