@@ -60,14 +60,17 @@ from kliptych.studio.analyzer import (
     AnalysisRequest,
     analyze_project,
 )
-from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION
+from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION, AnalysisDocument
 from kliptych.studio.preview import PreviewError, PreviewRequest, generate_preview
-from kliptych.studio.project_store import ProjectStoreError
+from kliptych.studio.project_models import ProjectDocument
+from kliptych.studio.project_store import ProjectStoreError, open_project_store
 from kliptych.transcribe import FasterWhisperTranscriber
 
 logger = logging.getLogger("kliptych.cli")
 _ARGPARSE_USAGE_ERROR_STATUS = 2
 _ANALYZE_INVOCATION_ERROR_STATUS = 1
+_STUDIO_COMMAND_INVALID = "studio_command_invalid"
+_PROJECT_ANALYSIS_MISSING = "project_analysis_missing"
 
 
 @runtime_checkable
@@ -85,6 +88,25 @@ class _CampaignManagerProtocol(Protocol):
         audio_track_url: str | None = None,
         output_format: str | None = None,
     ) -> CampaignOutcome: ...
+
+
+class _StudioStore(Protocol):
+    @property
+    def existing_analysis(self) -> AnalysisDocument | None:
+        """Optional published B1 analysis."""
+        ...
+
+    def read_project(self) -> ProjectDocument | None:
+        """Read optional editable Studio project state."""
+        ...
+
+    def initialize_project(self, *, probe: FFprobeProbe) -> ProjectDocument:
+        """Initialize measured editable state for the current B1 project."""
+        ...
+
+    def create_variant(self, *, candidate_id: str, name: str) -> ProjectDocument:
+        """Create an initial editable variant from a B1 candidate."""
+        ...
 
 
 _SEGMENT_SYSTEM_PROMPT = (
@@ -435,6 +457,10 @@ def main(
         "preview", help="genera un JPEG de composición para Kliptych Studio"
     )
     _add_preview_arguments(preview_parser)
+    studio_parser = subcommands.add_parser(
+        "studio", help="frontera de proyecto para Kliptych Studio"
+    )
+    _add_studio_subcommands(studio_parser)
     ingest_parser = subcommands.add_parser(
         "ingest", help="ingiere un brief local y lo imprime como JSON"
     )
@@ -619,6 +645,28 @@ def _add_preview_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_studio_project_argument(parser: argparse.ArgumentParser) -> None:
+    """Register the project directory argument shared by Studio operations."""
+    _ = parser.add_argument("--project-dir", required=True, help="directorio local del proyecto")
+
+
+def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:
+    """Register the narrow project operations consumed by the desktop shell."""
+    studio_subcommands = parser.add_subparsers(dest="studio_command", required=True)
+    studio_inspect = studio_subcommands.add_parser("inspect", help="inspecciona un proyecto Studio")
+    _add_studio_project_argument(studio_inspect)
+    studio_initialize = studio_subcommands.add_parser(
+        "initialize", help="crea estado editable medido para un proyecto Studio"
+    )
+    _add_studio_project_argument(studio_initialize)
+    studio_variant = studio_subcommands.add_parser(
+        "create-variant", help="crea una variante inicial desde un candidato B1"
+    )
+    _add_studio_project_argument(studio_variant)
+    _ = studio_variant.add_argument("--candidate-id", required=True, help="ID del candidato B1")
+    _ = studio_variant.add_argument("--name", required=True, help="nombre visible de la variante")
+
+
 def _dispatch_command(
     *,
     args: argparse.Namespace,
@@ -638,6 +686,8 @@ def _dispatch_command(
             status = _cmd_analyze(args)
         case "preview":
             status = _cmd_preview(args)
+        case "studio":
+            status = _cmd_studio(args)
         case "ingest":
             status = _cmd_ingest(args)
         case "run":
@@ -759,11 +809,88 @@ def _cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_studio(args: argparse.Namespace) -> int:
+    """Run an inspect or initialization operation for the desktop shell.
+
+    Returns:
+        Zero on success and one when the project boundary rejects the operation.
+    """
+    project_dir = Path(cast("str", args.project_dir))
+    try:
+        store = open_project_store(project_dir)
+        event = _studio_event(store, args=args)
+    except ProjectStoreError as error:
+        _write_studio_event({"type": "error", "error_code": error.code, "message": error.message})
+        return 1
+    _write_studio_event(event)
+    return 0
+
+
+def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str, object]:
+    command = cast("str", args.studio_command)
+    if command == "inspect":
+        return _studio_inspect_event(store)
+    if command == "initialize":
+        return _studio_initialize_event(store)
+    if command == "create-variant":
+        return _studio_create_variant_event(
+            store,
+            candidate_id=cast("str", args.candidate_id),
+            name=cast("str", args.name),
+        )
+    msg = f"Unknown Studio command: {command}"
+    raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+
+
+def _studio_inspect_event(store: _StudioStore) -> dict[str, object]:
+    analysis = store.existing_analysis
+    if analysis is None:
+        msg = "Studio inspect requires a completed B1 analysis."
+        raise ProjectStoreError(_PROJECT_ANALYSIS_MISSING, msg)
+    project = store.read_project()
+    return {
+        "type": "project",
+        "project_id": analysis.project_id,
+        "project_name": analysis.project_name,
+        "source_sha256": analysis.source.sha256,
+        "candidates": [candidate.model_dump(mode="json") for candidate in analysis.candidates],
+        "editable_state": "ready" if project is not None else "missing",
+        "variants": []
+        if project is None
+        else [variant.model_dump(mode="json") for variant in project.variants],
+    }
+
+
+def _studio_initialize_event(store: _StudioStore) -> dict[str, object]:
+    project = store.initialize_project(probe=FFprobeProbe())
+    return {
+        "type": "initialized",
+        "project_id": project.project_id,
+        "source_duration_ms": project.source_duration_ms,
+    }
+
+
+def _studio_create_variant_event(
+    store: _StudioStore, *, candidate_id: str, name: str
+) -> dict[str, object]:
+    project = store.create_variant(candidate_id=candidate_id, name=name)
+    variant = project.variants[-1]
+    return {
+        "type": "variant_created",
+        "variant": variant.model_dump(mode="json"),
+    }
+
+
 def _write_preview_event(event: dict[str, object]) -> None:
     """Write one JSON preview result to stdout without human log text."""
     payload = {"schema_version": ANALYSIS_SCHEMA_VERSION, **event}
     _ = sys.stdout.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
     _ = sys.stdout.flush()
+
+
+def _write_studio_event(event: dict[str, object]) -> None:
+    """Write one JSON Studio project operation event to stdout."""
+    _write_preview_event(event)
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
