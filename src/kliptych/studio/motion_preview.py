@@ -14,6 +14,7 @@ from kliptych.contract.enums import CaptionCapitalization
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.layout_geometry import build_layout_filter_chains
+from kliptych.studio.models import AnalysisDocument
 from kliptych.studio.preview import PreviewError  # type: ignore[attr-defined]
 from kliptych.studio.project_models import (
     LayoutPosition,
@@ -66,7 +67,7 @@ class MotionPreviewResult:
     height: int
 
 
-def generate_motion_preview(
+def generate_motion_preview(  # ruff: ignore[too-many-locals]
     request: MotionPreviewRequest,
     *,
     probe: MediaProbe,
@@ -90,7 +91,9 @@ def generate_motion_preview(
         msg = "Motion preview requires initialized editable project state."
         raise PreviewError(msg)
     _validate_evidence(request.project_dir, project)
-    variant = _find_variant(project, request.variant_id)
+    analysis_path = request.project_dir / "analysis.json"
+    analysis = AnalysisDocument.model_validate_json(analysis_path.read_text(encoding="utf-8"))
+    variant = _find_variant(project, analysis, request.variant_id)
     position = _find_position(variant, request.position_id)
     if not (position.start_ms <= request.at_ms < position.end_ms):
         msg = "Motion preview timestamp must be inside the selected position."
@@ -108,7 +111,10 @@ def generate_motion_preview(
     )
     destination = _motion_preview_path(request.project_dir, request.variant_id, fingerprint)
     if destination.is_file() and not destination.is_symlink() and not destination.is_junction():
-        return MotionPreviewResult(
+        try:
+            info = probe.probe(destination)
+            if info.width and info.height:
+                return MotionPreviewResult(
             preview_path=destination,
             fingerprint=fingerprint,
             frame_start_ms=start_ms,
@@ -116,6 +122,8 @@ def generate_motion_preview(
             width=_MOTION_CANVAS_WIDTH,
             height=_MOTION_CANVAS_HEIGHT,
         )
+        except (OSError, ValueError):
+            _ = None
     _render_motion_preview(
         source=source,
         project_dir=request.project_dir,
@@ -138,10 +146,10 @@ def generate_motion_preview(
     )
 
 
-def _validate_evidence(project_dir: Path, _project: ProjectDocument) -> None:
+def _validate_evidence(project_dir: Path, project: ProjectDocument) -> None:
+    analysis_path = project_dir / "analysis.json"
     transcript = project_dir / "transcript.json"
     source = project_dir / "source.mp4"
-    analysis_path = project_dir / "analysis.json"
     if not analysis_path.is_file() or analysis_path.is_symlink() or analysis_path.is_junction():
         msg = "Preview requires a regular analysis artifact."
         raise PreviewError(msg)
@@ -151,13 +159,33 @@ def _validate_evidence(project_dir: Path, _project: ProjectDocument) -> None:
     if not source.is_file() or source.is_symlink() or source.is_junction():
         msg = "Preview requires a regular source artifact."
         raise PreviewError(msg)
+    if sha256_file(analysis_path) != project.analysis_sha256:
+        msg = "Preview analysis evidence does not match editable project evidence."
+        raise PreviewError(msg)
+    if sha256_file(transcript) != project.transcript_sha256:
+        msg = "Preview transcript evidence does not match editable project evidence."
+        raise PreviewError(msg)
+    if sha256_file(source) != project.source_sha256:
+        msg = "Preview source evidence does not match editable project evidence."
+        raise PreviewError(msg)
 
 
-def _find_variant(project: ProjectDocument, variant_id: uuid.UUID) -> Variant:
+def _find_variant(
+    project: ProjectDocument, analysis: AnalysisDocument, variant_id: uuid.UUID
+) -> Variant:
+    candidate_ids = {c.candidate_id for c in analysis.candidates}
     for v in project.variants:
         if v.variant_id == variant_id:
             if v.status.value != "active":
                 msg = "Variant requires review before preview."
+                raise PreviewError(msg)
+            if (
+                v.origin.analysis_sha256 != project.analysis_sha256
+                or v.origin.transcript_sha256 != project.transcript_sha256
+                or v.origin.source_sha256 != project.source_sha256
+                or v.origin.source_candidate_id not in candidate_ids
+            ):
+                msg = "Variant origin does not match current B1 evidence."
                 raise PreviewError(msg)
             return v
     msg = "Variant not found."
@@ -468,16 +496,20 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
     argv = [a if a != str(destination) else str(temp_destination) for a in argv]
     try:
         _ = runner.run(tuple(argv), timeout_s=120.0)
-    finally:
+    except Exception as error:
+        with contextlib.suppress(OSError):
+            temp_destination.unlink()
         if ass_path is not None:
             with contextlib.suppress(OSError):
                 ass_path.unlink()
-        with contextlib.suppress(OSError):
-            if temp_destination.exists() and not destination.is_file():
-                temp_destination.unlink()
+        msg = str(error).strip() or "Motion preview render failed."
+        raise PreviewError(msg) from error
     if not temp_destination.is_file():
         with contextlib.suppress(OSError):
             temp_destination.unlink()
+        if ass_path is not None:
+            with contextlib.suppress(OSError):
+                ass_path.unlink()
         msg = "Motion preview render failed."
         raise PreviewError(msg)
     try:
@@ -487,6 +519,9 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
             temp_destination.unlink()
         msg = "Motion preview could not be published."
         raise PreviewError(msg) from error
+    if ass_path is not None:
+        with contextlib.suppress(OSError):
+            ass_path.unlink()
     if destination.is_symlink() or destination.is_junction():
         with contextlib.suppress(OSError):
             destination.unlink()
