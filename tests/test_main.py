@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol, cast, override
 from uuid import UUID
 
@@ -427,3 +428,113 @@ def test_main_preview_returns_error_for_invalid_uuid(
     event = _parse(capsys.readouterr().out)
     assert event["type"] == "error"
     assert event["error_code"] == "preview_request_invalid"
+
+
+def test_main_studio_inspect_emits_project_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+    analysis = AnalysisDocument(
+        schema_version=ANALYSIS_SCHEMA_VERSION,
+        project_id="opaque-project",
+        project_name="Mi clip",
+        source=AnalysisSource(url="https://example.com/video", sha256="a" * 64),
+        provenance=AnalysisProvenance(transcription_version="1", segmenter_version="1"),
+        candidates=(),
+    )
+
+    class _Store:
+        existing_analysis: AnalysisDocument = analysis
+
+        @staticmethod
+        def read_project() -> None:
+            return None
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert main(["--quiet", "studio", "inspect", "--project-dir", str(tmp_path)]) == 0
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "project"
+    assert event["project_name"] == "Mi clip"
+    assert event["editable_state"] == "missing"
+
+
+def test_main_studio_initialize_uses_project_store_and_ffprobe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+    project = cast(
+        "object", SimpleNamespace(project_id="opaque-project", source_duration_ms=60_000)
+    )
+
+    class _Store:
+        @staticmethod
+        def initialize_project(*, probe: object) -> object:
+            assert probe.__class__.__name__ == "FFprobeProbe"
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert main(["--quiet", "studio", "initialize", "--project-dir", str(tmp_path)]) == 0
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "initialized"
+    assert event["project_id"] == "opaque-project"
+    assert event["source_duration_ms"] == 60_000
+
+
+def test_main_studio_create_variant_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def create_variant(*, candidate_id: str, name: str) -> object:
+            assert candidate_id == "candidate"
+            assert name == "Variante 1"
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "create-variant",
+                "--project-dir",
+                str(tmp_path),
+                "--candidate-id",
+                "candidate",
+                "--name",
+                "Variante 1",
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event == {
+        "schema_version": ANALYSIS_SCHEMA_VERSION,
+        "type": "variant_created",
+        "variant": {"variant_id": "id"},
+    }
