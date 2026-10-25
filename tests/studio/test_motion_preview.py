@@ -412,3 +412,125 @@ def test_motion_preview_symlink_cache_rejected(tmp_path: Path) -> None:
         runner=runner2,
     )
     assert runner2.ran is True
+
+
+def test_motion_preview_analysis_hash_mismatch_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    # tamper analysis.json
+    _ = (project_dir / "analysis.json").write_text(
+        (project_dir / "analysis.json").read_text().replace("a" * 32, "b" * 32)
+    )
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+
+def test_motion_preview_variant_not_found_raises(tmp_path: Path) -> None:
+    project_dir, _store, _variant, position = _setup(tmp_path)
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=uuid4(),
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+
+def test_motion_preview_position_not_found_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=uuid4(),
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+
+def test_motion_preview_watermark_sha_mismatch_skips_watermark(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup(tmp_path)
+    png = tmp_path / "logo.png"
+    _ = png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    _ = store.import_watermark(variant_id=variant.variant_id, source_path=png, position=None)
+    # tamper the stored asset
+    wm_dir = project_dir / "assets" / "watermark"
+    for f in wm_dir.iterdir():
+        _ = f.write_bytes(b"tampered")
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    position = variant.layout_timeline[0]
+    probe = _Probe(60.0)
+    runner = _Runner()
+    result = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+    assert result.preview_path.is_file()
+
+
+def test_motion_preview_caption_correction_non_overlapping(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup(tmp_path)
+    _ = store.set_captions(
+        variant_id=variant.variant_id,
+        enabled=True,
+        highlight_color="&H00FF0000",
+        capitalization=None,
+    )
+    _ = store.set_caption_correction(
+        variant_id=variant.variant_id,
+        interval=(position.start_ms + 5000, position.start_ms + 6000),
+        corrected_text="Corregido",
+        author="user",
+        created_at_ms=1,
+    )
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    position = variant.layout_timeline[0]
+    probe = _Probe(60.0)
+    runner = _Runner()
+    result = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+    assert result.preview_path.is_file()
