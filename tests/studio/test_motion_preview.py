@@ -610,3 +610,37 @@ def test_motion_preview_probe_failure_raises2(tmp_path: Path) -> None:
             probe=_FailingProbe(),
             runner=_Runner(),
         )
+
+
+def test_motion_preview_symlink_cache_rejected2(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    probe = _Probe(60.0)
+    runner = _Runner()
+    result = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+    result.preview_path.unlink()
+    link = tmp_path / "evil.mp4"
+    _ = link.write_bytes(b"x")
+    result.preview_path.symlink_to(link)
+    runner2 = _Runner()
+    _ = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner2,
+    )
+    assert runner2.ran is True
