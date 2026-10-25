@@ -15,7 +15,7 @@ from kliptych.studio.models import (
     AnalysisSource,
 )
 from kliptych.studio.preview import PreviewError
-from kliptych.studio.project_models import LayoutPosition, Variant
+from kliptych.studio.project_models import LayoutPosition, ProjectStatus, Variant
 from kliptych.studio.project_store import ProjectStore, open_project_store
 
 _SOURCE_SHA = sha256_bytes(b"source")
@@ -288,3 +288,52 @@ def test_motion_preview_with_caption_correction(tmp_path: Path) -> None:
         runner=runner,
     )
     assert result.preview_path.is_file()
+
+
+class _FailingProbe:
+    def probe(self, path: object) -> MediaInfo:  # ruff: ignore[no-self-use]
+        _ = path
+        msg = "probe boom"
+        raise RuntimeError(msg)
+
+
+def test_motion_preview_probe_failure_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=_FailingProbe(),
+            runner=_Runner(),
+        )
+
+
+def test_motion_preview_variant_requires_review_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    # mark variant requires_review by changing source hash
+
+    project = open_project_store(project_dir).read_project()
+    assert project is not None
+    v = project.variants[0].model_copy(update={"status": ProjectStatus.REQUIRES_REVIEW})
+    project = project.model_copy(update={"variants": (v,)})
+    # write directly
+    _ = (project_dir / "project.json").write_text(project.model_dump_json(indent=2))
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
