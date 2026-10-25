@@ -168,6 +168,14 @@ def _validate_evidence(project_dir: Path, project: ProjectDocument) -> None:
     if sha256_file(source) != project.source_sha256:
         msg = "Preview source evidence does not match editable project evidence."
         raise PreviewError(msg)
+    try:
+        analysis = AnalysisDocument.model_validate_json(analysis_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        msg = "Preview analysis artifact is invalid."
+        raise PreviewError(msg) from error
+    if analysis.source.sha256 != project.source_sha256:
+        msg = "Preview analysis source hash does not match editable project evidence."
+        raise PreviewError(msg)
 
 
 def _find_variant(
