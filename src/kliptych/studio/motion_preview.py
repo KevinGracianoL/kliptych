@@ -113,7 +113,7 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
     if destination.is_file() and not destination.is_symlink() and not destination.is_junction():
         try:
             info = probe.probe(destination)
-            if info.width and info.height:
+            if info.width == _MOTION_CANVAS_WIDTH and info.height == _MOTION_CANVAS_HEIGHT:
                 return MotionPreviewResult(
             preview_path=destination,
             fingerprint=fingerprint,
@@ -278,7 +278,15 @@ def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[
         we = int(w.end_s * 1000)
         if we <= start_ms or ws >= end_ms:
             continue
-        out.append(w)
+        out.append(
+            Word(
+                start_s=(ws - start_ms) / 1000.0,
+                end_s=(we - start_ms) / 1000.0,
+                text=w.text,
+                confidence=w.confidence,
+                token_id=w.token_id,
+            )
+        )
     return out
 
 
@@ -305,10 +313,12 @@ def _apply_caption_corrections(
     for c in corrections:
         if c.end_ms <= start_ms or c.start_ms >= end_ms:
             continue
+        c_start = max(c.start_ms, start_ms) - start_ms
+        c_end = min(c.end_ms, end_ms) - start_ms
         result.append(
             Word(
-                start_s=max(c.start_ms, start_ms) / 1000.0,
-                end_s=min(c.end_ms, end_ms) / 1000.0,
+                start_s=c_start / 1000.0,
+                end_s=c_end / 1000.0,
                 text=c.corrected_text,
                 confidence=1.0,
                 token_id=0,
