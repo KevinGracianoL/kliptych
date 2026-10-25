@@ -265,7 +265,7 @@ def test_motion_preview_with_caption_correction(tmp_path: Path) -> None:
     )
     _ = store.set_caption_correction(
         variant_id=variant.variant_id,
-        interval=(position.start_ms + 1000, position.start_ms + 2000),
+        interval=(14500, 15500),
         corrected_text="Corregido",
         author="user",
         created_at_ms=1,
