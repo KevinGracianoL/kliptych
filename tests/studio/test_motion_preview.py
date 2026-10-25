@@ -5,6 +5,8 @@ from uuid import uuid4
 
 import pytest
 
+from kliptych.contract.enums import Layout
+from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.gate.models import MediaInfo
 from kliptych.hashing import sha256_bytes
 from kliptych.studio import motion_preview as mp
@@ -534,3 +536,77 @@ def test_motion_preview_caption_correction_non_overlapping(tmp_path: Path) -> No
         runner=runner,
     )
     assert result.preview_path.is_file()
+
+
+def test_motion_preview_multi_band_layout(tmp_path: Path) -> None:
+    candidate = _candidate()
+    analysis = _analysis().model_copy(update={"candidates": (candidate,)})
+    project_dir = tmp_path / "project"
+    store = open_project_store(project_dir)
+    with store.stage() as stage:
+        stage.write_analysis(analysis)
+        stage.write_text("source.mp4", "source")
+        stage.write_text(
+            "transcript.json",
+            '{"words":[{"start_s":15.0,"end_s":16.0,"text":"hello","confidence":0.9,"token_id":1}],"language":"en","duration_s":60.0,"text":"hello"}',
+        )
+        stage.write_text("candidates.json", "candidates")
+    store = open_project_store(project_dir)
+    _ = store.initialize_project(probe=_Probe(60.0))
+    created = store.create_variant(candidate_id=candidate.candidate_id, name="V1")
+    variant = created.variants[0]
+    position = variant.layout_timeline[0]
+    # change layout to dividido (2 bands)
+
+    spec = LayoutSpec(
+        layout=Layout.DIVIDIDO,
+        bands=(
+            Band(source="source.mp4", source_rect=NormalizedRect()),
+            Band(source="source.mp4", source_rect=NormalizedRect()),
+        ),
+    )
+    _ = store.update_position(
+        variant_id=variant.variant_id, position_id=position.position_id, layout_spec=spec
+    )
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    position = variant.layout_timeline[0]
+    probe = _Probe(60.0)
+    runner = _Runner()
+    result = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+    assert result.preview_path.is_file()
+    assert runner.ran is True
+
+
+def test_motion_preview_probe_failure_raises2(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+
+    class _FailingProbe:
+        def probe(self, path: object) -> MediaInfo:  # ruff: ignore[no-self-use]
+            _ = path
+            msg = "probe boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=_FailingProbe(),
+            runner=_Runner(),
+        )
