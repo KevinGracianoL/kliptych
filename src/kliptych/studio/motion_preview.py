@@ -11,7 +11,7 @@ from typing import Protocol
 
 from kliptych.contract import CaptionStyleConfig
 from kliptych.contract.enums import CaptionCapitalization
-from kliptych.gate.probe import MediaProbe
+from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.layout_geometry import build_layout_filter_chains
 from kliptych.studio.models import AnalysisDocument
@@ -122,7 +122,7 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
                     width=_MOTION_CANVAS_WIDTH,
                     height=_MOTION_CANVAS_HEIGHT,
                 )
-        except (OSError, ValueError):
+        except (OSError, ValueError, ProbeError):
             _ = None
     _render_motion_preview(
         source=source,
