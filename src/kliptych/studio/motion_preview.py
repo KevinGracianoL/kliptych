@@ -305,7 +305,9 @@ def _apply_caption_corrections(
         ws = int(w.start_s * 1000)
         we = int(w.end_s * 1000)
         for c in corrections:
-            if ws < c.end_ms and we > c.start_ms:
+            c_start_rel = c.start_ms - start_ms
+            c_end_rel = c.end_ms - start_ms
+            if ws < c_end_rel and we > c_start_rel:
                 skip = True
                 break
         if not skip:

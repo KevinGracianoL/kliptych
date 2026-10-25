@@ -103,6 +103,9 @@ fn studio_project(
         "import-watermark",
         "set-watermark",
         "set-captions",
+        "set-caption-correction",
+        "clear-caption-correction",
+        "preview-motion",
     ]
     .contains(&operation.as_str())
     {
