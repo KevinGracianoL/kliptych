@@ -115,13 +115,13 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
             info = probe.probe(destination)
             if info.width == _MOTION_CANVAS_WIDTH and info.height == _MOTION_CANVAS_HEIGHT:
                 return MotionPreviewResult(
-            preview_path=destination,
-            fingerprint=fingerprint,
-            frame_start_ms=start_ms,
-            frame_end_ms=end_ms,
-            width=_MOTION_CANVAS_WIDTH,
-            height=_MOTION_CANVAS_HEIGHT,
-        )
+                    preview_path=destination,
+                    fingerprint=fingerprint,
+                    frame_start_ms=start_ms,
+                    frame_end_ms=end_ms,
+                    width=_MOTION_CANVAS_WIDTH,
+                    height=_MOTION_CANVAS_HEIGHT,
+                )
         except (OSError, ValueError):
             _ = None
     _render_motion_preview(
