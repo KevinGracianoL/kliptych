@@ -337,3 +337,78 @@ def test_motion_preview_variant_requires_review_raises(tmp_path: Path) -> None:
             probe=probe,
             runner=runner,
         )
+
+
+def test_motion_preview_source_hash_mismatch_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    # corrupt source
+    _ = (project_dir / "source.mp4").write_text("tampered")
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+
+def test_motion_preview_transcript_hash_mismatch_raises(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    _ = (project_dir / "transcript.json").write_text(
+        '{"words":[],"language":"en","duration_s":60.0,"text":"x"}'
+    )
+    probe = _Probe(60.0)
+    runner = _Runner()
+    with pytest.raises(PreviewError):
+        _ = mp.generate_motion_preview(
+            mp.MotionPreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+                position_id=position.position_id,
+                at_ms=position.start_ms + 1000,
+                duration_ms=2000,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+
+def test_motion_preview_symlink_cache_rejected(tmp_path: Path) -> None:
+    project_dir, _store, variant, position = _setup(tmp_path)
+    probe = _Probe(60.0)
+    runner = _Runner()
+    result = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+    result.preview_path.unlink()
+    link = tmp_path / "evil.mp4"
+    _ = link.write_bytes(b"x")
+    result.preview_path.symlink_to(link)
+    runner2 = _Runner()
+    _ = mp.generate_motion_preview(
+        mp.MotionPreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            position_id=position.position_id,
+            at_ms=position.start_ms + 1000,
+            duration_ms=2000,
+        ),
+        probe=probe,
+        runner=runner2,
+    )
+    assert runner2.ran is True
