@@ -1351,7 +1351,7 @@ def _studio_preview_motion_event(
         raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
     return {
         "type": "motion_preview",
-        "preview_path": str(result.preview_path.relative_to(project_dir)),
+        "preview_path": result.preview_path.relative_to(project_dir).as_posix(),
         "fingerprint": result.fingerprint,
         "start_ms": result.frame_start_ms,
         "end_ms": result.frame_end_ms,
