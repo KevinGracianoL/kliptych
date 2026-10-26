@@ -238,6 +238,72 @@ The original ASR transcript remains immutable. Translation is out of scope for
 Kliptych Studio. Future caption correction must be attributed human override
 data, not a rewrite of ASR evidence.
 
+### B2.5 caption style presets and bounded overrides
+
+B2.5 replaces the B2 restriction above for variants that explicitly opt into a
+caption style. It does not turn Studio into a free-form typography editor. A
+variant persists one optional `caption_style` object:
+
+```json
+{
+  "preset": "clean",
+  "size": "medium",
+  "vertical_position": "bottom",
+  "horizontal_alignment": "center",
+  "outline": "thin",
+  "shadow": "none"
+}
+```
+
+`caption_style` is absent for a B2.4 project or variant. Absence preserves the
+existing inherited B2.4 rendering exactly; migration never silently changes a
+human's existing captions. Selecting a B2.5 preset writes the complete,
+validated object atomically to `project.json` and invalidates only derived
+previews of that variant.
+
+The permitted enum values are deliberately closed:
+
+```text
+preset:               clean | bold | boxed
+size:                 small | medium | large
+vertical_position:    top | middle | bottom
+horizontal_alignment: left | center | right
+outline:              none | thin | thick
+shadow:               none | soft | strong
+```
+
+The existing per-variant `captions_enabled`, `caption_highlight_color`, and
+`caption_capitalization` fields remain independent. `highlight_color` and
+capitalization therefore keep their B2.3 semantics after a B2.5 style is
+selected. No B2.5 control accepts a free font family, raw ASS field, arbitrary
+color, free coordinate, margin, box padding, or radius.
+
+The backend resolves the persisted enums into one full immutable ASS style;
+the renderer never accepts style fragments supplied by the UI. The mapping is
+versioned with the implementation and included in the preview fingerprint.
+The presets define the base typography and colors; size, alignment, outline,
+and shadow selections replace their corresponding preset values. Vertical and
+horizontal positions map to ASS's nine canonical alignment cells, never to
+numeric user coordinates. `boxed` uses ASS `BorderStyle=3`, an opaque box
+around each dialogue line; it is explicitly not a full-width, independently
+sized, or rounded box.
+
+All B2.5 presets use the one packaged family `Noto Sans Regular`. The project
+ships the unmodified official `NotoSans-Regular.ttf` under SIL Open Font
+License 1.1 together with its `OFL.txt`; the vendored artifact's source URL and
+SHA-256 are recorded beside the asset. The renderer passes the controlled font
+directory through the FFmpeg/libass `subtitles` filter's `fontsdir` option.
+This avoids host-font dependence on Linux, Windows, and macOS. A missing,
+modified, symlinked, or non-regular packaged font is a render error, never a
+fallback to a host font.
+
+The B2.5 implementation must validate all enum values at the project-store
+boundary, include the complete resolved B2.5 style and renderer implementation
+version in cache fingerprints, and cover these contracts with model,
+persistence, CLI, Tauri, ASS, and temporal-preview tests. The interface shows
+presets first and keeps the five bounded advanced controls secondary; it never
+claims that a static UI sample is a rendered karaoke preview.
+
 ### Watermark settings
 
 For a zero-contract project, watermark is disabled by default. A user may import
@@ -284,8 +350,9 @@ render.
 - Tauri application scaffolding;
 - final video render of the timeline;
 - transcript rewriting or translation;
-- subtitle font families, shadows, outlines, boxes, alignment, or free text
-  position;
+- free subtitle font families, raw ASS styles, arbitrary colors, free text
+  coordinates, full-width/rounded caption boxes, or unbounded typography
+  controls;
 - free watermark coordinates;
 - multiple independent source video files;
 - unbounded variants or layout positions; permanent numeric limits require
