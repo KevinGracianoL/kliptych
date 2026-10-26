@@ -39,7 +39,7 @@ _MAX_DURATION_MS = 10000
 class MotionPreviewRunner(Protocol):
     """Runs FFmpeg for a motion preview."""
 
-    def run(self, argv: tuple[str, ...], *, timeout_s: float) -> object:
+    def run(self, argv: tuple[str, ...], *, timeout_s: float, cwd: Path | None = None) -> object:
         """Run FFmpeg."""
         ...
 
@@ -344,6 +344,7 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
     variant: Variant,
     start_ms: int,
     end_ms: int,
+    destination: Path,
     filter_parts: list[str],
     final_label: str,
 ) -> tuple[Path | None, str]:
@@ -370,15 +371,25 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
     except (OSError, ValueError, SubtitleError) as error:
         _ = error
         return None, "[outv]"
+    output_dir = destination.parent.resolve()
+    ass_path: Path | None = None
     try:
-        fd, tmp = tempfile.mkstemp(suffix=".ass", prefix="motion_")
-        _ = os.close(fd)
-        ass_path = Path(tmp)
-        _ = ass_path.write_text(ass_content, encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(suffix=".ass", prefix="motion_", dir=output_dir)
     except (OSError, ValueError, SubtitleError) as error:
         _ = error
         return None, "[outv]"
-    filter_parts.append(f"[outv]subtitles=filename='{ass_path}'[outv_sub]")
+    ass_path = Path(tmp)
+    try:
+        _ = os.close(fd)
+        _ = ass_path.write_text(ass_content, encoding="utf-8")
+    except (OSError, ValueError, SubtitleError) as error:
+        _ = error
+        with contextlib.suppress(OSError):
+            ass_path.unlink()
+        return None, "[outv]"
+    filter_parts.append(
+        f"[outv]subtitles=filename='{ass_path.relative_to(output_dir).as_posix()}'[outv_sub]"
+    )
     return ass_path, "[outv_sub]"
 
 
@@ -458,7 +469,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
             and sha256_file(candidate) == variant.watermark.asset_sha256
         ):
             wm_asset_path = candidate
-            extra_inputs.extend(["-i", str(candidate)])
+            extra_inputs.extend(["-i", str(candidate.resolve())])
 
     # Optional captions (ASS) burn-in.
     ass_path: Path | None = None
@@ -469,6 +480,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
             variant=variant,
             start_ms=start_ms,
             end_ms=end_ms,
+            destination=destination,
             filter_parts=filter_parts,
             final_label=final_label,
         )
@@ -491,7 +503,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
         "error",
         "-y",
         "-i",
-        str(source),
+        str(source.resolve()),
     ]
     argv += extra_inputs
     argv += [
@@ -512,10 +524,12 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
         "-an",
         str(destination),
     ]
-    temp_destination = destination.with_suffix(".tmp.mp4")
-    argv = [a if a != str(destination) else str(temp_destination) for a in argv]
+    destination_path = destination.resolve()
+    temp_destination = destination.with_suffix(".tmp.mp4").resolve()
+    argv = [str(destination_path) if a == str(destination) else a for a in argv]
+    argv = [str(temp_destination) if a == str(destination_path) else a for a in argv]
     try:
-        _ = runner.run(tuple(argv), timeout_s=120.0)
+        _ = runner.run(tuple(argv), timeout_s=120.0, cwd=destination.parent.resolve())
     except Exception as error:
         with contextlib.suppress(OSError):
             temp_destination.unlink()
@@ -537,6 +551,9 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
     except OSError as error:
         with contextlib.suppress(OSError):
             temp_destination.unlink()
+        if ass_path is not None:
+            with contextlib.suppress(OSError):
+                ass_path.unlink()
         msg = "Motion preview could not be published."
         raise PreviewError(msg) from error
     if ass_path is not None:

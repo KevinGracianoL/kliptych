@@ -1359,10 +1359,10 @@ def _studio_preview_motion_event(
 
 
 class _SubprocessMotionRunner:
-    def run(self, argv: tuple[str, ...], *, timeout_s: float) -> object:  # ruff: ignore[no-self-use]
+    def run(self, argv: tuple[str, ...], *, timeout_s: float, cwd: Path | None = None) -> object:  # ruff: ignore[no-self-use]
 
         completed = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-            list(argv), capture_output=True, text=True, timeout=timeout_s, check=False
+            list(argv), capture_output=True, text=True, timeout=timeout_s, check=False, cwd=cwd
         )
         if completed.returncode != 0:
             msg = completed.stderr.strip() or "motion preview failed"

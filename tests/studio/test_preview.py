@@ -744,3 +744,271 @@ def test_preview_source_frame_does_not_upscale_small_source(tmp_path: Path) -> N
 
     assert dimensions.width == 100
     assert dimensions.height == 100
+
+
+class _RaisesSecondRunner(_Runner):
+    @override
+    def run(self, argv: Sequence[str], *, timeout_s: float = 30.0) -> CommandResult:
+        if len(self.invocations) == 0:
+            self.invocations.append(tuple(argv))
+            return super().run(argv, timeout_s=timeout_s)
+        msg = "source frame failed"
+        raise RuntimeError(msg)
+
+
+def test_preview_project_store_error_raises(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    _ = (project_dir / "project.json").write_text("{bad", encoding="utf-8")
+
+    with pytest.raises(PreviewError, match="project"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_requires_project(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+
+    with pytest.raises(PreviewError, match="initialized"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir, variant_id=UUID(int=1), position_id=UUID(int=2), at_ms=0
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_missing_variant(tmp_path: Path) -> None:
+    project_dir, _variant_id, position_id = _initialized_project(tmp_path)
+
+    with pytest.raises(PreviewError, match="variant is not part"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=UUID(int=9),
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_missing_position(tmp_path: Path) -> None:
+    project_dir, variant_id, _position_id = _initialized_project(tmp_path)
+
+    with pytest.raises(PreviewError, match="position is not part"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=UUID(int=9),
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_nonregular_source(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    source = project_dir / "source.mp4"
+    target = tmp_path / "source-copy.mp4"
+    _ = target.write_bytes(source.read_bytes())
+    source.unlink()
+    source.symlink_to(target)
+
+    with pytest.raises(PreviewError, match="regular source artifact"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_nonregular_analysis(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    analysis_path = project_dir / "analysis.json"
+    target = tmp_path / "analysis-copy.json"
+    _ = target.write_text(analysis_path.read_text(encoding="utf-8"), encoding="utf-8")
+    analysis_path.unlink()
+    analysis_path.symlink_to(target)
+
+    with pytest.raises(PreviewError, match="regular analysis artifact"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_nonregular_transcript(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    transcript_path = project_dir / "transcript.json"
+    target = tmp_path / "transcript-copy.json"
+    _ = target.write_text(transcript_path.read_text(encoding="utf-8"), encoding="utf-8")
+    transcript_path.unlink()
+    transcript_path.symlink_to(target)
+
+    with pytest.raises(PreviewError, match="regular transcript artifact"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_publish_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    original_replace = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if self.name.endswith(".tmp.jpg"):
+            msg = "blocked"
+            raise OSError(msg)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    with pytest.raises(PreviewError, match="could not be published"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_renderer_failure(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+
+    class _FailingRunner(_Runner):
+        @override
+        def run(self, argv: Sequence[str], *, timeout_s: float = 30.0) -> CommandResult:
+            _ = argv
+            _ = timeout_s
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(PreviewError, match="Preview renderer failed"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_FailingRunner(),
+        )
+
+
+def test_preview_source_frame_renderer_exception(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+
+    with pytest.raises(PreviewError, match="source frame renderer failed"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_RaisesSecondRunner(),
+        )
+
+
+def test_preview_rejects_probe_failures(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+
+    class _RaisingProbe(_Probe):
+        @override
+        def probe(self, path: Path) -> MediaInfo:
+            if path.name == "source.mp4":
+                msg = "probe failed"
+                raise RuntimeError(msg)
+            return super().probe(path)
+
+    class _NoneProbe(_Probe):
+        @override
+        def probe(self, path: Path) -> MediaInfo:
+            media = super().probe(path)
+            if path.name == "source.mp4":
+                return media.model_copy(update={"width": None})
+            return media
+
+    with pytest.raises(PreviewError, match="could not be measured"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_RaisingProbe(),
+            runner=_Runner(),
+        )
+
+    with pytest.raises(PreviewError, match="measured video dimensions"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_NoneProbe(),
+            runner=_Runner(),
+        )
+
+
+def test_preview_rejects_nonregular_preview_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    directory = project_dir / "previews" / str(variant_id)
+
+    def fake_link_like(path: Path) -> bool:
+        return path == directory
+
+    monkeypatch.setattr("kliptych.studio.preview.Path.is_symlink", fake_link_like)
+
+    with pytest.raises(PreviewError, match="Preview directory"):
+        _ = generate_preview(
+            PreviewRequest(
+                project_dir=project_dir,
+                variant_id=variant_id,
+                position_id=position_id,
+                at_ms=15_000,
+            ),
+            probe=_Probe(),
+            runner=_Runner(),
+        )

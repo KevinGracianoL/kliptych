@@ -1017,3 +1017,108 @@ def test_main_studio_clear_caption_correction_emits_variant(
     )
     event = _parse(capsys.readouterr().out)
     assert event["type"] == "caption_correction_cleared"
+
+
+def test_main_studio_preview_motion_emits_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def open_store(_path: Path) -> object:
+        return SimpleNamespace()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    variant_id = "11111111-1111-1111-1111-111111111111"
+    position_id = "22222222-2222-2222-2222-222222222222"
+    project_dir = tmp_path
+    preview_path = project_dir / "previews" / variant_id / "motion.mp4"
+
+    def fake_motion_preview(request: object, *, probe: object, runner: object) -> object:
+        _ = probe
+        _ = runner
+        assert getattr(request, "project_dir", None) == project_dir
+        assert getattr(request, "variant_id", None) == UUID(variant_id)
+        assert getattr(request, "position_id", None) == UUID(position_id)
+        assert getattr(request, "at_ms", None) == 14000
+        assert getattr(request, "duration_ms", None) == 2000
+        return SimpleNamespace(
+            preview_path=preview_path,
+            fingerprint="f" * 64,
+            frame_start_ms=14000,
+            frame_end_ms=16000,
+        )
+
+    monkeypatch.setattr("kliptych.__main__.generate_motion_preview", fake_motion_preview)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "preview-motion",
+                "--project-dir",
+                str(project_dir),
+                "--variant-id",
+                variant_id,
+                "--position-id",
+                position_id,
+                "--at-ms",
+                "14000",
+                "--duration-ms",
+                "2000",
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "motion_preview"
+    assert event["preview_path"] == f"previews/{variant_id}/motion.mp4"
+    assert event["fingerprint"] == "f" * 64
+    assert event["start_ms"] == 14000
+    assert event["end_ms"] == 16000
+
+
+def test_main_studio_preview_motion_reports_generation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def open_store(_path: Path) -> object:
+        return SimpleNamespace()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    def fake_motion_preview(request: object, *, probe: object, runner: object) -> object:
+        _ = request
+        _ = probe
+        _ = runner
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("kliptych.__main__.generate_motion_preview", fake_motion_preview)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "preview-motion",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--position-id",
+                "22222222-2222-2222-2222-222222222222",
+                "--at-ms",
+                "14000",
+            ]
+        )
+        == 1
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "error"
+    assert event["error_code"] == "studio_command_invalid"
+    assert event["message"] == "boom"
