@@ -286,10 +286,14 @@ def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[
         we = int(w.end_s * 1000)
         if we <= start_ms or ws >= end_ms:
             continue
+        clipped_start_ms = max(ws, start_ms)
+        clipped_end_ms = min(we, end_ms)
+        if clipped_end_ms <= clipped_start_ms:
+            continue
         out.append(
             Word(
-                start_s=(ws - start_ms) / 1000.0,
-                end_s=(we - start_ms) / 1000.0,
+                start_s=(clipped_start_ms - start_ms) / 1000.0,
+                end_s=(clipped_end_ms - start_ms) / 1000.0,
                 text=w.text,
                 confidence=w.confidence,
                 token_id=w.token_id,

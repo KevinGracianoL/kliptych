@@ -505,6 +505,30 @@ def test_motion_preview_watermark_sha_mismatch_skips_watermark(tmp_path: Path) -
     assert result.preview_path.is_file()
 
 
+def test_motion_preview_word_crossing_preview_start_clipped(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup(tmp_path)
+    _ = store.set_captions(
+        variant_id=variant.variant_id,
+        enabled=True,
+        highlight_color="&H00FF0000",
+        capitalization=None,
+    )
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    position = variant.layout_timeline[0]
+    probe = _Probe(60.0)
+    runner = _CapturingRunner()
+    result = _generate(project_dir, variant, position, probe, runner, at_ms=15500)
+    assert result.preview_path.is_file()
+    assert runner.ass_text is not None
+    assert "hello" in runner.ass_text
+    # Captured ASS timings must be non-negative and reflect the clipped
+    # interval [15500, 16000] ms -> [0.0, 0.5] s relative to preview start.
+    assert "0:00:00.00" in runner.ass_text
+    assert "0:00:00.50" in runner.ass_text
+
+
 def test_motion_preview_caption_correction_non_overlapping(tmp_path: Path) -> None:
     project_dir, store, variant, position = _setup(tmp_path)
     _ = store.set_captions(
