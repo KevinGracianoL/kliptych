@@ -876,9 +876,10 @@ def test_main_studio_set_captions_emits_variant(
             enabled: object = None,
             highlight_color: object = None,
             capitalization: object = None,
+            caption_style: object = None,
         ) -> object:
             assert variant_id is not None
-            _ = (enabled, highlight_color, capitalization)
+            _ = (enabled, highlight_color, capitalization, caption_style)
             return project
 
     def open_store(_path: Path) -> _Store:
@@ -1122,3 +1123,237 @@ def test_main_studio_preview_motion_reports_generation_failure(
     assert event["type"] == "error"
     assert event["error_code"] == "studio_command_invalid"
     assert event["message"] == "boom"
+
+
+def test_main_studio_set_captions_full_style_emits_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, object]:
+            return {"variant_id": "id", "caption_style": {"preset": "bold"}}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_captions(
+            *,
+            variant_id: object,
+            enabled: object = None,
+            highlight_color: object = None,
+            capitalization: object = None,
+            caption_style: object = None,
+        ) -> object:
+            assert variant_id is not None
+            _ = (enabled, highlight_color, capitalization, caption_style)
+            return project
+
+        @staticmethod
+        def set_caption_style(*, variant_id: object, caption_style: object) -> object:
+            assert variant_id is not None
+            assert caption_style is not None
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-captions",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--preset",
+                "bold",
+                "--size",
+                "large",
+                "--vertical-position",
+                "top",
+                "--horizontal-alignment",
+                "left",
+                "--outline",
+                "thick",
+                "--shadow",
+                "strong",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "captions_updated"
+    assert "caption_style" in json.dumps(event)
+
+
+def test_main_studio_set_captions_partial_style_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Store:
+        @staticmethod
+        def set_captions(
+            *,
+            variant_id: object,
+            enabled: object = None,
+            highlight_color: object = None,
+            capitalization: object = None,
+        ) -> object:
+            _ = variant_id
+            _ = (enabled, highlight_color, capitalization)
+            return SimpleNamespace(variants=())
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    code = main(
+        [
+            "--quiet",
+            "studio",
+            "set-captions",
+            "--project-dir",
+            str(tmp_path),
+            "--variant-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--preset",
+            "clean",
+        ]
+    )
+    event = _parse(capsys.readouterr().out)
+    assert code == 1
+    assert event["type"] == "error"
+    assert "missing" in str(event["message"])
+
+
+def test_main_studio_set_captions_legacy_fake_store_no_style_arg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, str]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_captions(
+            *,
+            variant_id: object,
+            enabled: object = None,
+            highlight_color: object = None,
+            capitalization: object = None,
+        ) -> object:
+            assert variant_id is not None
+            _ = (enabled, highlight_color, capitalization)
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-captions",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--enabled",
+                "true",
+            ]
+        )
+        == 0
+    )
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "captions_updated"
+
+
+def test_main_studio_set_captions_full_style_one_atomic_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    calls: list[dict[str, object]] = []
+    set_style_calls: list[object] = []
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, object]:
+            return {"variant_id": "id", "caption_style": {"preset": "bold"}}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_captions(**kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            return project
+
+        @staticmethod
+        def set_caption_style(**kwargs: object) -> object:
+            set_style_calls.append(kwargs)
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-captions",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--enabled",
+                "true",
+                "--preset",
+                "bold",
+                "--size",
+                "large",
+                "--vertical-position",
+                "top",
+                "--horizontal-alignment",
+                "left",
+                "--outline",
+                "thick",
+                "--shadow",
+                "strong",
+            ]
+        )
+        == 0
+    )
+    _ = capsys.readouterr()
+    assert len(calls) == 1
+    assert "caption_style" in calls[0]
+    assert set_style_calls == []

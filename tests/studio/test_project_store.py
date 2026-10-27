@@ -1,12 +1,14 @@
 """Behavioral tests for the Track B1 Studio project store."""
 
+import json
 import uuid
 from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
+from pydantic import ValidationError
 
-from kliptych.contract.enums import Layout
+from kliptych.contract.enums import CaptionCapitalization, Layout
 from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.gate.models import MediaInfo
 from kliptych.hashing import sha256_bytes, sha256_file
@@ -18,6 +20,13 @@ from kliptych.studio.models import (
     AnalysisSource,
 )
 from kliptych.studio.project_models import (
+    CaptionHorizontalAlignment,
+    CaptionOutline,
+    CaptionShadow,
+    CaptionStyle,
+    CaptionStylePreset,
+    CaptionStyleSize,
+    CaptionVerticalPosition,
     LayoutPosition,
     ProjectDocument,
     Variant,
@@ -1241,3 +1250,102 @@ def test_store_clear_caption_correction_requires_project(tmp_path: Path) -> None
     _ = store.initialize_project(probe=_Probe(60.0))
     with pytest.raises(ProjectStoreError):
         _ = store.clear_caption_correction(variant_id=uuid.uuid4(), correction_id=uuid.uuid4())
+
+
+def _full_caption_style() -> CaptionStyle:
+    return CaptionStyle(
+        preset=CaptionStylePreset.BOLD,
+        size=CaptionStyleSize.LARGE,
+        vertical_position=CaptionVerticalPosition.TOP,
+        horizontal_alignment=CaptionHorizontalAlignment.LEFT,
+        outline=CaptionOutline.THICK,
+        shadow=CaptionShadow.STRONG,
+    )
+
+
+def test_store_set_caption_style_persists(tmp_path: Path) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    style = _full_caption_style()
+
+    updated = store.set_caption_style(variant_id=variant.variant_id, caption_style=style)
+
+    assert updated.variants[0].caption_style == style
+    on_disk = cast(
+        "dict[str, list[dict[str, object]]]", json.loads((project_dir / "project.json").read_text())
+    )
+    assert on_disk["variants"][0]["caption_style"] == style.model_dump(mode="json")
+
+
+def test_store_clear_caption_style_removes_key(tmp_path: Path) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    style = _full_caption_style()
+    _ = store.set_caption_style(variant_id=variant.variant_id, caption_style=style)
+
+    cleared = store.clear_caption_style(variant_id=variant.variant_id)
+
+    assert cleared.variants[0].caption_style is None
+    on_disk = cast(
+        "dict[str, list[dict[str, object]]]", json.loads((project_dir / "project.json").read_text())
+    )
+    assert "caption_style" not in on_disk["variants"][0]
+
+
+def test_store_set_caption_style_rejects_partial_without_mutation(tmp_path: Path) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    before = (project_dir / "project.json").read_text()
+
+    with pytest.raises((ProjectStoreError, ValidationError)):
+        _ = store.set_caption_style(
+            variant_id=variant.variant_id, caption_style={"preset": "clean"}
+        )
+
+    assert (project_dir / "project.json").read_text() == before
+
+
+def test_store_legacy_set_captions_leaves_no_style_key(tmp_path: Path) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    before = (project_dir / "project.json").read_text()
+    assert "caption_style" not in before
+
+    updated = store.set_captions(variant_id=variant.variant_id, enabled=True)
+
+    assert updated.variants[0].caption_style is None
+    on_disk = (project_dir / "project.json").read_text()
+    assert "caption_style" not in on_disk
+
+
+def test_store_set_captions_atomic_style_update_and_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, store, variant, _ = _setup_project_with_variant(tmp_path)
+    style = _full_caption_style()
+
+    updated = store.set_captions(
+        variant_id=variant.variant_id,
+        enabled=True,
+        highlight_color="&H00FF0000",
+        capitalization=CaptionCapitalization.UPPERCASE,
+        caption_style=style,
+    )
+
+    assert updated.variants[0].captions_enabled is True
+    assert updated.variants[0].caption_highlight_color == "&H00FF0000"
+    assert updated.variants[0].caption_style == style
+
+    before = (project_dir / "project.json").read_text()
+
+    def fail_write(destination: Path, content: str) -> None:
+        _ = destination
+        _ = content
+        message = "boom"
+        raise OSError(message)
+
+    monkeypatch.setattr(_project_store, "_atomic_write_text", fail_write)
+    with pytest.raises(ProjectStoreError):
+        _ = store.set_captions(
+            variant_id=variant.variant_id,
+            enabled=False,
+            caption_style=_full_caption_style(),
+        )
+
+    assert (project_dir / "project.json").read_text() == before

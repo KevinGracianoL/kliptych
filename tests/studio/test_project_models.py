@@ -3,11 +3,20 @@
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from kliptych.contract.enums import Layout
 from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
 from kliptych.studio.project_models import (
+    DEFAULT_CAPTION_STYLE,
     AbsorbNeighbor,
+    CaptionHorizontalAlignment,
+    CaptionOutline,
+    CaptionShadow,
+    CaptionStyle,
+    CaptionStylePreset,
+    CaptionStyleSize,
+    CaptionVerticalPosition,
     LayoutPosition,
     ProjectDocument,
     ProjectStatus,
@@ -190,3 +199,96 @@ def test_position_rejects_band_that_is_not_the_project_source(source: str | None
                 bands=(Band(source=source, source_rect=NormalizedRect()),),
             ),
         )
+
+
+def _full_caption_payload() -> dict[str, str]:
+    return {
+        "preset": "clean",
+        "size": "medium",
+        "vertical_position": "bottom",
+        "horizontal_alignment": "center",
+        "outline": "thin",
+        "shadow": "none",
+    }
+
+
+def test_caption_style_full_payload_parses() -> None:
+    style = CaptionStyle.model_validate(_full_caption_payload())
+
+    assert style.preset is CaptionStylePreset.CLEAN
+    assert style.size is CaptionStyleSize.MEDIUM
+    assert style.vertical_position is CaptionVerticalPosition.BOTTOM
+    assert style.horizontal_alignment is CaptionHorizontalAlignment.CENTER
+    assert style.outline is CaptionOutline.THIN
+    assert style.shadow is CaptionShadow.NONE
+
+
+@pytest.mark.parametrize("field", list(_full_caption_payload()))
+def test_caption_style_missing_field_is_rejected(field: str) -> None:
+    payload = _full_caption_payload()
+    del payload[field]
+
+    with pytest.raises(ValidationError):
+        _ = CaptionStyle.model_validate(payload)
+
+
+def test_caption_style_extra_field_is_rejected() -> None:
+    payload = _full_caption_payload()
+    payload["font_family"] = "Noto Sans"
+
+    with pytest.raises(ValidationError):
+        _ = CaptionStyle.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("preset", "fancy"),
+        ("size", "huge"),
+        ("vertical_position", "upper"),
+        ("horizontal_alignment", "middle"),
+        ("outline", "dashed"),
+        ("shadow", "heavy"),
+    ],
+)
+def test_caption_style_invalid_enum_is_rejected(field: str, bad_value: str) -> None:
+    payload = _full_caption_payload()
+    payload[field] = bad_value
+
+    with pytest.raises(ValidationError):
+        _ = CaptionStyle.model_validate(payload)
+
+
+def test_caption_style_partial_construction_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _ = CaptionStyle.model_validate({"preset": "clean"})
+
+
+def test_caption_style_default_is_explicit_and_complete() -> None:
+    expected = CaptionStyle(
+        preset=CaptionStylePreset.CLEAN,
+        size=CaptionStyleSize.MEDIUM,
+        vertical_position=CaptionVerticalPosition.BOTTOM,
+        horizontal_alignment=CaptionHorizontalAlignment.CENTER,
+        outline=CaptionOutline.THIN,
+        shadow=CaptionShadow.NONE,
+    )
+
+    assert expected == DEFAULT_CAPTION_STYLE
+    assert CaptionStyle.default() == expected
+
+
+def test_variant_without_caption_style_omits_field() -> None:
+    variant = create_initial_variant(
+        name="Variant 1",
+        selection=VariantRange(start_ms=0, end_ms=1000, source_duration_ms=2000),
+        origin=VariantOrigin(
+            source_candidate_id="a" * 64,
+            analysis_sha256="b" * 64,
+            transcript_sha256="b" * 64,
+            source_sha256="b" * 64,
+        ),
+    )
+
+    assert variant.caption_style is None
+    assert "caption_style" not in variant.model_dump(mode="json")
