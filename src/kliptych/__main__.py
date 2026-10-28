@@ -62,6 +62,11 @@ from kliptych.studio.analyzer import (
     AnalysisRequest,
     analyze_project,
 )
+from kliptych.studio.final_render import (
+    FinalRenderError,
+    FinalRenderRequest,
+    render_final_variant,
+)
 from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION, AnalysisDocument
 from kliptych.studio.motion_preview import (
     MotionPreviewRequest,
@@ -758,128 +763,135 @@ def _add_studio_project_argument(parser: argparse.ArgumentParser) -> None:
 def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: ignore[too-many-statements]
     """Register the narrow project operations consumed by the desktop shell."""
     studio_subcommands = parser.add_subparsers(dest="studio_command", required=True)
-    studio_inspect = studio_subcommands.add_parser("inspect", help="inspecciona un proyecto Studio")
-    _add_studio_project_argument(studio_inspect)
-    studio_initialize = studio_subcommands.add_parser(
+    sub = studio_subcommands.add_parser("inspect", help="inspecciona un proyecto Studio")
+    _add_studio_project_argument(sub)
+
+    sub = studio_subcommands.add_parser(
         "initialize", help="crea estado editable medido para un proyecto Studio"
     )
-    _add_studio_project_argument(studio_initialize)
-    studio_variant = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+
+    sub = studio_subcommands.add_parser(
         "create-variant", help="crea una variante inicial desde un candidato B1"
     )
-    _add_studio_project_argument(studio_variant)
-    _ = studio_variant.add_argument("--candidate-id", required=True, help="ID del candidato B1")
-    _ = studio_variant.add_argument("--name", required=True, help="nombre visible de la variante")
-    studio_update = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--candidate-id", required=True, help="ID del candidato B1")
+    _ = sub.add_argument("--name", required=True, help="nombre visible de la variante")
+
+    sub = studio_subcommands.add_parser(
         "update-position", help="persiste un layout validado para una posicion"
     )
-    _add_studio_project_argument(studio_update)
-    _ = studio_update.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_update.add_argument("--position-id", required=True, help="ID de la posicion")
-    _ = studio_update.add_argument("--layout-json", required=True, help="LayoutSpec JSON validado")
-    studio_split = studio_subcommands.add_parser(
-        "split-position", help="divide una posicion en el playhead"
-    )
-    _add_studio_project_argument(studio_split)
-    _ = studio_split.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_split.add_argument("--position-id", required=True, help="ID de la posicion")
-    _ = studio_split.add_argument("--at-ms", required=True, type=int, help="marca de corte en ms")
-    studio_delete = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = sub.add_argument("--layout-json", required=True, help="LayoutSpec JSON validado")
+
+    sub = studio_subcommands.add_parser("split-position", help="divide una posicion en el playhead")
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = sub.add_argument("--at-ms", required=True, type=int, help="marca de corte en ms")
+
+    sub = studio_subcommands.add_parser(
         "delete-position", help="elimina una posicion preservando cobertura"
     )
-    _add_studio_project_argument(studio_delete)
-    _ = studio_delete.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_delete.add_argument("--position-id", required=True, help="ID de la posicion")
-    _ = studio_delete.add_argument(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = sub.add_argument(
         "--absorb", choices=["previous", "next"], help="vecino que absorbe (interior)"
     )
-    studio_duplicate = studio_subcommands.add_parser(
+
+    sub = studio_subcommands.add_parser(
         "duplicate-variant", help="duplica una variante con nuevos IDs"
     )
-    _add_studio_project_argument(studio_duplicate)
-    _ = studio_duplicate.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_duplicate.add_argument("--name", required=True, help="nombre de la copia")
-    studio_import_wm = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--name", required=True, help="nombre de la copia")
+
+    sub = studio_subcommands.add_parser(
         "import-watermark", help="importa un PNG local como watermark"
     )
-    _add_studio_project_argument(studio_import_wm)
-    _ = studio_import_wm.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_import_wm.add_argument("--source", required=True, help="ruta del PNG local")
-    _ = studio_import_wm.add_argument(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--source", required=True, help="ruta del PNG local")
+    _ = sub.add_argument(
         "--position", default="bottom_right", help="zona del enum WatermarkPosition"
     )
-    studio_set_wm = studio_subcommands.add_parser(
+
+    sub = studio_subcommands.add_parser(
         "set-watermark", help="activa/desactiva o cambia la zona del watermark"
     )
-    _add_studio_project_argument(studio_set_wm)
-    _ = studio_set_wm.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_set_wm.add_argument(
-        "--enabled", choices=["true", "false"], help="activar o desactivar"
-    )
-    _ = studio_set_wm.add_argument("--position", help="zona del enum WatermarkPosition")
-    studio_set_cap = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--enabled", choices=["true", "false"], help="activar o desactivar")
+    _ = sub.add_argument("--position", help="zona del enum WatermarkPosition")
+
+    sub = studio_subcommands.add_parser(
         "set-captions", help="actualiza controles de captions de una variante"
     )
-    _add_studio_project_argument(studio_set_cap)
-    _ = studio_set_cap.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_set_cap.add_argument(
-        "--enabled", choices=["true", "false"], help="activar o desactivar"
-    )
-    _ = studio_set_cap.add_argument("--highlight-color", help="color de highlight ASS")
-    _ = studio_set_cap.add_argument(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--enabled", choices=["true", "false"], help="activar o desactivar")
+    _ = sub.add_argument("--highlight-color", help="color de highlight ASS")
+    _ = sub.add_argument(
         "--capitalization", choices=["original", "uppercase", "lowercase"], help="capitalizacion"
     )
-    _ = studio_set_cap.add_argument(
+    _ = sub.add_argument(
         "--preset", choices=["clean", "bold", "boxed"], help="preset de estilo de captions"
     )
-    _ = studio_set_cap.add_argument(
-        "--size", choices=["small", "medium", "large"], help="tamano de captions"
-    )
-    _ = studio_set_cap.add_argument(
+    _ = sub.add_argument("--size", choices=["small", "medium", "large"], help="tamano de captions")
+    _ = sub.add_argument(
         "--vertical-position",
         choices=["top", "middle", "bottom"],
         help="posicion vertical de captions",
     )
-    _ = studio_set_cap.add_argument(
+    _ = sub.add_argument(
         "--horizontal-alignment",
         choices=["left", "center", "right"],
         help="alineacion horizontal de captions",
     )
-    _ = studio_set_cap.add_argument(
+    _ = sub.add_argument(
         "--outline", choices=["none", "thin", "thick"], help="contorno de captions"
     )
-    _ = studio_set_cap.add_argument(
-        "--shadow", choices=["none", "soft", "strong"], help="sombra de captions"
-    )
-    _ = studio_set_cap.add_argument(
+    _ = sub.add_argument("--shadow", choices=["none", "soft", "strong"], help="sombra de captions")
+    _ = sub.add_argument(
         "--clear-caption-style", action="store_true", help="elimina el estilo B2.5"
     )
-    studio_set_corr = studio_subcommands.add_parser(
+
+    sub = studio_subcommands.add_parser(
         "set-caption-correction", help="registra una correccion humana de caption"
     )
-    _add_studio_project_argument(studio_set_corr)
-    _ = studio_set_corr.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_set_corr.add_argument("--start-ms", required=True, type=int, help="inicio en ms")
-    _ = studio_set_corr.add_argument("--end-ms", required=True, type=int, help="fin en ms")
-    _ = studio_set_corr.add_argument("--text", required=True, help="texto corregido")
-    _ = studio_set_corr.add_argument("--author", default="user", help="autor de la correccion")
-    _ = studio_set_corr.add_argument(
-        "--created-at-ms", required=True, type=int, help="timestamp ms"
-    )
-    studio_clear_corr = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--start-ms", required=True, type=int, help="inicio en ms")
+    _ = sub.add_argument("--end-ms", required=True, type=int, help="fin en ms")
+    _ = sub.add_argument("--text", required=True, help="texto corregido")
+    _ = sub.add_argument("--author", default="user", help="autor de la correccion")
+    _ = sub.add_argument("--created-at-ms", required=True, type=int, help="timestamp ms")
+
+    sub = studio_subcommands.add_parser(
         "clear-caption-correction", help="elimina una correccion humana de caption"
     )
-    _add_studio_project_argument(studio_clear_corr)
-    _ = studio_clear_corr.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_clear_corr.add_argument("--correction-id", required=True, help="ID de la correccion")
-    studio_motion = studio_subcommands.add_parser(
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--correction-id", required=True, help="ID de la correccion")
+
+    sub = studio_subcommands.add_parser(
         "preview-motion", help="genera un preview temporal (MP4 corto)"
     )
-    _add_studio_project_argument(studio_motion)
-    _ = studio_motion.add_argument("--variant-id", required=True, help="ID de la variante")
-    _ = studio_motion.add_argument("--position-id", required=True, help="ID de la posicion")
-    _ = studio_motion.add_argument("--at-ms", required=True, type=int, help="marca de inicio en ms")
-    _ = studio_motion.add_argument("--duration-ms", type=int, default=3000, help="duracion en ms")
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--position-id", required=True, help="ID de la posicion")
+    _ = sub.add_argument("--at-ms", required=True, type=int, help="marca de inicio en ms")
+    _ = sub.add_argument("--duration-ms", type=int, default=3000, help="duracion en ms")
+
+    sub = studio_subcommands.add_parser(
+        "render-final", help="renderiza y exporta la variante final de Studio"
+    )
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
+    _ = sub.add_argument("--out", default=None, help="ruta personalizada de exportacion")
 
 
 def _dispatch_command(
@@ -1115,6 +1127,10 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             correction_id=cast("str", args.correction_id),
         ),
         "preview-motion": lambda: _studio_preview_motion_event(
+            args=args,
+            project_dir=Path(cast("str", args.project_dir)),
+        ),
+        "render-final": lambda: _studio_render_final_event(
             args=args,
             project_dir=Path(cast("str", args.project_dir)),
         ),
@@ -1486,6 +1502,46 @@ def _studio_preview_motion_event(
         "fingerprint": result.fingerprint,
         "start_ms": result.frame_start_ms,
         "end_ms": result.frame_end_ms,
+    }
+
+
+def _studio_render_final_event(*, args: argparse.Namespace, project_dir: Path) -> dict[str, object]:
+    probe = FFprobeProbe()
+    runner = _SubprocessMotionRunner()
+    dest_arg = cast("str | None", getattr(args, "out", None))
+    destination = Path(dest_arg) if dest_arg is not None else None
+    environment = detect_environment(SubprocessRunner())
+    try:
+        result = render_final_variant(
+            FinalRenderRequest(
+                project_dir=project_dir,
+                variant_id=uuid.UUID(cast("str", args.variant_id)),
+                destination=destination,
+            ),
+            probe=probe,
+            runner=runner,
+            nvenc_available=environment.nvenc_available,
+        )
+    except FinalRenderError as error:
+        raise ProjectStoreError(error.error_code, error.message) from error
+    except Exception as error:
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+
+    rel_or_abs_path = (
+        result.output_path.relative_to(project_dir).as_posix()
+        if result.output_path.is_relative_to(project_dir)
+        else str(result.output_path)
+    )
+    return {
+        "type": "render_completed",
+        "variant_id": str(result.variant_id),
+        "output_path": rel_or_abs_path,
+        "duration_ms": result.duration_ms,
+        "width": result.width,
+        "height": result.height,
+        "gate_verdict": result.gate_verdict,
+        "encoder_used": result.encoder_used,
     }
 
 
