@@ -892,6 +892,12 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
     _add_studio_project_argument(sub)
     _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
     _ = sub.add_argument("--out", default=None, help="ruta personalizada de exportacion")
+    _ = sub.add_argument(
+        "--normalize-audio",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="aplica normalizacion de sonoridad EBU R128 (-14 LUFS)",
+    )
 
 
 def _dispatch_command(
@@ -1510,6 +1516,7 @@ def _studio_render_final_event(*, args: argparse.Namespace, project_dir: Path) -
     runner = _SubprocessMotionRunner()
     dest_arg = cast("str | None", getattr(args, "out", None))
     destination = Path(dest_arg) if dest_arg is not None else None
+    normalize_audio = cast("bool", getattr(args, "normalize_audio", True))
     environment = detect_environment(SubprocessRunner())
     try:
         result = render_final_variant(
@@ -1517,6 +1524,7 @@ def _studio_render_final_event(*, args: argparse.Namespace, project_dir: Path) -
                 project_dir=project_dir,
                 variant_id=uuid.UUID(cast("str", args.variant_id)),
                 destination=destination,
+                normalize_audio=normalize_audio,
             ),
             probe=probe,
             runner=runner,
@@ -1542,6 +1550,7 @@ def _studio_render_final_event(*, args: argparse.Namespace, project_dir: Path) -
         "height": result.height,
         "gate_verdict": result.gate_verdict,
         "encoder_used": result.encoder_used,
+        "audio_normalized": result.audio_normalized,
     }
 
 

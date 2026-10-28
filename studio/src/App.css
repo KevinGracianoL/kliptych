@@ -30,6 +30,7 @@ button:not(:disabled):active { transform: scale(0.96); }
 
 .export-btn { font-weight: 750; }
 .export-panel { margin-top: 18px; background: #12161f; border: 1px solid #29303c; border-radius: 14px; padding: 14px; }
+.export-options-row { margin-bottom: 12px; }
 .gate-badge { background: rgba(94, 234, 212, 0.12); color: #5eead4; border: 1px solid rgba(94, 234, 212, 0.35); padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 .delivery-card { background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 12px; margin-top: 8px; }
 .delivery-path { color: #5eead4; font-size: 12px; word-break: break-all; margin: 0 0 6px; }

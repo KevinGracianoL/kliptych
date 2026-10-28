@@ -1149,6 +1149,7 @@ def test_main_studio_render_final_emits_result(
         assert getattr(request, "project_dir", None) == project_dir
         assert getattr(request, "variant_id", None) == UUID(variant_id)
         assert getattr(request, "destination", None) is None
+        assert getattr(request, "normalize_audio", None) is True
         return SimpleNamespace(
             output_path=output_path,
             variant_id=UUID(variant_id),
@@ -1157,6 +1158,7 @@ def test_main_studio_render_final_emits_result(
             height=1920,
             gate_verdict="pass",
             encoder_used="libx264",
+            audio_normalized=True,
         )
 
     monkeypatch.setattr("kliptych.__main__.render_final_variant", fake_render_final)
@@ -1185,6 +1187,62 @@ def test_main_studio_render_final_emits_result(
     assert event["height"] == 1920
     assert event["gate_verdict"] == "pass"
     assert event["encoder_used"] == "libx264"
+    assert event["audio_normalized"] is True
+
+
+def test_main_studio_render_final_no_normalize_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def open_store(_path: Path) -> object:
+        return SimpleNamespace()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    variant_id = "11111111-1111-1111-1111-111111111111"
+    project_dir = tmp_path
+    output_path = project_dir / "delivery" / "Variante 1.mp4"
+
+    def fake_render_final(
+        request: object, *, probe: object, runner: object, nvenc_available: bool = False
+    ) -> object:
+        _ = probe
+        _ = runner
+        _ = nvenc_available
+        assert getattr(request, "normalize_audio", None) is False
+        return SimpleNamespace(
+            output_path=output_path,
+            variant_id=UUID(variant_id),
+            duration_ms=20000,
+            width=1080,
+            height=1920,
+            gate_verdict="pass",
+            encoder_used="libx264",
+            audio_normalized=False,
+        )
+
+    monkeypatch.setattr("kliptych.__main__.render_final_variant", fake_render_final)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "render-final",
+                "--project-dir",
+                str(project_dir),
+                "--variant-id",
+                variant_id,
+                "--no-normalize-audio",
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "render_completed"
+    assert event["audio_normalized"] is False
 
 
 def test_main_studio_render_final_reports_failure(

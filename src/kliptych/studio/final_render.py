@@ -83,6 +83,7 @@ class FinalRenderRequest:
     project_dir: Path
     variant_id: uuid.UUID
     destination: Path | None = None
+    normalize_audio: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,10 +97,12 @@ class FinalRenderResult:
     height: int
     gate_verdict: str
     encoder_used: str
+    audio_normalized: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _RenderContext:
+    project_dir: Path
     variant: Variant
     source: Path
     destination: Path
@@ -132,6 +135,7 @@ def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderC
     resolved_output_dir = output_dir.resolve()
 
     return _RenderContext(
+        project_dir=request.project_dir,
         variant=variant,
         source=source,
         destination=destination,
@@ -169,11 +173,8 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
     temp_destination = ctx.destination.with_suffix(".tmp.mp4").resolve()
 
     ass_path, filter_complex, extra_inputs, final_v_label, has_audio = _build_render_plan(
-        project_dir=request.project_dir,
-        variant=ctx.variant,
-        src_dimensions=ctx.src_dimensions,
-        source_has_audio=ctx.source_has_audio,
-        output_dir=ctx.output_dir,
+        ctx,
+        normalize_audio=request.normalize_audio,
     )
 
     render_config = RenderConfig(target_aspect=9 / 16, nvenc_available=nvenc_available)
@@ -229,6 +230,7 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
         height=height,
         gate_verdict="pass",
         encoder_used=encoder_used,
+        audio_normalized=request.normalize_audio if ctx.source_has_audio else False,
     )
 
 
@@ -620,40 +622,38 @@ def _build_watermark_chain(
 
 
 def _build_render_plan(
+    ctx: _RenderContext,
     *,
-    project_dir: Path,
-    variant: Variant,
-    src_dimensions: tuple[int, int],
-    source_has_audio: bool,
-    output_dir: Path,
+    normalize_audio: bool = True,
 ) -> tuple[Path | None, str, list[str], str, bool]:
     filter_parts, current_label = _build_timeline_video_chains(
-        variant.layout_timeline, src_dimensions
+        ctx.variant.layout_timeline, ctx.src_dimensions
     )
 
-    if source_has_audio:
-        var_start_s = variant.start_ms / 1000.0
-        var_dur_s = (variant.end_ms - variant.start_ms) / 1000.0
-        filter_parts.append(
-            f"[0:a]atrim=start={var_start_s}:duration={var_dur_s},asetpts=PTS-STARTPTS[outa]"
-        )
+    if ctx.source_has_audio:
+        var_start_s = ctx.variant.start_ms / 1000.0
+        var_dur_s = (ctx.variant.end_ms - ctx.variant.start_ms) / 1000.0
+        audio_chain = f"atrim=start={var_start_s}:duration={var_dur_s},asetpts=PTS-STARTPTS"
+        if normalize_audio:
+            audio_chain += ",loudnorm=I=-14.0:TP=-1.0:LRA=11.0"
+        filter_parts.append(f"[0:a]{audio_chain}[outa]")
 
     ass_path: Path | None = None
-    if variant.captions_enabled:
+    if ctx.variant.captions_enabled:
         ass_path, current_label = _try_render_ass(
-            project_dir=project_dir,
-            variant=variant,
-            output_dir=output_dir,
+            project_dir=ctx.project_dir,
+            variant=ctx.variant,
+            output_dir=ctx.output_dir,
             filter_parts=filter_parts,
             current_label=current_label,
         )
 
     wm_parts, extra_inputs, current_label = _build_watermark_chain(
-        project_dir, variant, current_label
+        ctx.project_dir, ctx.variant, current_label
     )
     filter_parts.extend(wm_parts)
 
-    return ass_path, ";".join(filter_parts), extra_inputs, current_label, source_has_audio
+    return ass_path, ";".join(filter_parts), extra_inputs, current_label, ctx.source_has_audio
 
 
 def _execute_ffmpeg_with_fallback(  # ruff: ignore[too-many-arguments]

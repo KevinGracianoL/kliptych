@@ -553,3 +553,46 @@ def test_render_final_cancellation_by_signal_cleans_up(tmp_path: Path) -> None:
     assert exc_info.value.error_code == "render_cancelled"
     delivery_dir = project_dir / "delivery"
     assert not any(delivery_dir.glob("*.tmp.mp4")) if delivery_dir.exists() else True
+
+
+def test_render_final_audio_normalization_enabled_by_default(tmp_path: Path) -> None:
+    project_dir, _store, variant = _setup_project(tmp_path)
+    probe = _Probe(duration_s=20.0, width=1080, height=1920, has_audio=True)
+    runner = _Runner()
+
+    result = fr.render_final_variant(
+        fr.FinalRenderRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+
+    assert result.audio_normalized is True
+    argv = runner.invocations[0][0]
+    fc_idx = argv.index("-filter_complex")
+    filter_complex = argv[fc_idx + 1]
+    assert "loudnorm=I=-14.0:TP=-1.0:LRA=11.0" in filter_complex
+
+
+def test_render_final_audio_normalization_disabled(tmp_path: Path) -> None:
+    project_dir, _store, variant = _setup_project(tmp_path)
+    probe = _Probe(duration_s=20.0, width=1080, height=1920, has_audio=True)
+    runner = _Runner()
+
+    result = fr.render_final_variant(
+        fr.FinalRenderRequest(
+            project_dir=project_dir,
+            variant_id=variant.variant_id,
+            normalize_audio=False,
+        ),
+        probe=probe,
+        runner=runner,
+    )
+
+    assert result.audio_normalized is False
+    argv = runner.invocations[0][0]
+    fc_idx = argv.index("-filter_complex")
+    filter_complex = argv[fc_idx + 1]
+    assert "loudnorm" not in filter_complex
