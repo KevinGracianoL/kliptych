@@ -1,7 +1,18 @@
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import "./App.css";
+
+type RenderFinalResult = {
+  type: "render_completed";
+  variant_id: string;
+  output_path: string;
+  duration_ms: number;
+  width: number;
+  height: number;
+  gate_verdict: string;
+  encoder_used: string;
+};
 
 type Candidate = {
   candidate_id: string;
@@ -101,6 +112,8 @@ function App() {
   const [absorbChoice, setAbsorbChoice] = useState<"previous" | "next">("previous");
   const [message, setMessage] = useState("Abre un proyecto B1 para empezar.");
   const [isBusy, setBusy] = useState(false);
+  const [isRenderingFinal, setIsRenderingFinal] = useState(false);
+  const [lastExport, setLastExport] = useState<RenderFinalResult | null>(null);
 
   useEffect(() => {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
@@ -529,6 +542,41 @@ function App() {
     }
   }
 
+  async function renderFinal(promptForPath = false) {
+    if (!projectDir || !selectedVariant || isBusy || isRenderingFinal) return;
+    let targetPath: string | null = null;
+    if (promptForPath) {
+      const suggested = `${selectedVariant.name.trim() || "Variante"}.mp4`;
+      const chosen = await save({
+        title: "Exportar video final",
+        defaultPath: suggested,
+        filters: [{ name: "Video MP4", extensions: ["mp4"] }],
+      });
+      if (typeof chosen !== "string") return;
+      targetPath = chosen;
+    }
+    setIsRenderingFinal(true);
+    setBusy(true);
+    setMessage("Renderizando variante y evaluando Gate fail-closed…");
+    try {
+      const result = await invoke<RenderFinalResult>("studio_project", {
+        projectDir,
+        operation: "render-final",
+        variantId: selectedVariant.variant_id,
+        outPath: targetPath,
+      });
+      setLastExport(result);
+      setMessage(
+        `Exportación completada: ${result.output_path} (${result.width}×${result.height}, Gate: ${result.gate_verdict}, codec: ${result.encoder_used})`
+      );
+    } catch (error) {
+      setMessage(`Error en exportación: ${String(error)}`);
+    } finally {
+      setIsRenderingFinal(false);
+      setBusy(false);
+    }
+  }
+
   function beginDrag(event: React.PointerEvent<HTMLElement>, index: number, mode: DragState["mode"]) {
     const rect = localBands[index];
     if (!rect) return;
@@ -565,8 +613,8 @@ function App() {
         <div className="brand"><span className="brand-mark">K</span><span>Kliptych <b>Studio</b></span></div>
         <div className="project-status">{project?.project_name ?? "Sin proyecto"}</div>
         <div className="topbar-actions">
-          <button className="ghost" onClick={selectBackend}>Backend</button>
-          <button className="primary" onClick={openProject} disabled={isBusy}>Abrir proyecto</button>
+          <button type="button" className="ghost" onClick={selectBackend}>Backend</button>
+          <button type="button" className="primary" onClick={openProject} disabled={isBusy}>Abrir proyecto</button>
         </div>
       </header>
 
@@ -575,7 +623,7 @@ function App() {
           <p className="eyebrow">EDITOR LOCAL DE CLIPS</p>
           <h1>Componé una historia,<br />no solo un recorte.</h1>
           <p>Abre un proyecto B1 analizado para elegir un candidato, crear una variante y revisar su composición.</p>
-          <button className="primary large" onClick={openProject} disabled={isBusy}>Abrir proyecto B1</button>
+          <button type="button" className="primary large" onClick={openProject} disabled={isBusy}>Abrir proyecto B1</button>
           <p className="backend-hint">Backend actual: <code>{backendPath}</code></p>
         </section>
       ) : (
@@ -584,38 +632,122 @@ function App() {
             <div className="section-title"><span>Candidatos</span><small>{project.candidates.length}</small></div>
             <div className="candidate-list">
               {project.candidates.map((candidate) => (
-                <button className="candidate" key={candidate.candidate_id} onClick={() => createVariant(candidate)} disabled={isBusy || project.editable_state === "missing"}>
+                <button type="button" className="candidate" key={candidate.candidate_id} onClick={() => createVariant(candidate)} disabled={isBusy || project.editable_state === "missing"}>
                   <span className="candidate-time">{formatTime(candidate.recommended_start_ms)} · {formatTime(candidate.recommended_end_ms)}</span>
                   <strong>{candidate.excerpt}</strong>
                   <span className="candidate-score">Score {candidate.score.toFixed(2)}</span>
                 </button>
               ))}
             </div>
-            {project.editable_state === "missing" && <button className="primary init" onClick={initializeProject}>Inicializar estado editable</button>}
+            {project.editable_state === "missing" && <button type="button" className="primary init" onClick={initializeProject}>Inicializar estado editable</button>}
             <div className="section-title"><span>Variantes</span><small>{project.variants.length}</small></div>
             <div className="variant-list">
-              {project.variants.map((variant) => <button className={selectedVariant?.variant_id === variant.variant_id ? "variant active" : "variant"} key={variant.variant_id} onClick={() => { setSelectedVariant(variant); setSelectedPosition(variant.layout_timeline[0]); setSourceUrl(null); setComposedUrl(null); }}><span>{variant.name}</span><small>{variant.status === "active" ? "Lista" : "Revisar"}</small></button>)}
+              {project.variants.map((variant) => (
+                <button
+                  type="button"
+                  className={selectedVariant?.variant_id === variant.variant_id ? "variant active" : "variant"}
+                  key={variant.variant_id}
+                  onClick={() => {
+                    setSelectedVariant(variant);
+                    setSelectedPosition(variant.layout_timeline[0]);
+                    setSourceUrl(null);
+                    setComposedUrl(null);
+                    setLastExport(null);
+                  }}
+                >
+                  <span>{variant.name}</span>
+                  <small>{variant.status === "active" ? "Lista" : "Revisar"}</small>
+                </button>
+              ))}
             </div>
           </aside>
 
           <section className="editor">
             <div className="editor-toolbar">
-              <div><p className="eyebrow">{selectedPosition ? `${formatTime(selectedPosition.start_ms)} — ${formatTime(selectedPosition.end_ms)}` : "SELECCIONA UNA VARIANTE"}</p><h2>{selectedVariant?.name ?? "Sin variante activa"}</h2></div>
-              <button className="primary" onClick={requestPreview} disabled={!selectedPosition || isBusy}>Generar preview</button>
-              <button className="ghost" onClick={applyLayout} disabled={!pending || isBusy}>Aplicar cambios</button>
-              <label className="split-control">Corte (ms) <input type="number" value={splitAtMs} onChange={(event) => setSplitAtMs(Number(event.target.value))} disabled={isBusy} /></label>
-              <button className="ghost" onClick={splitPosition} disabled={selectedVariant?.layout_timeline.length === 1 || isBusy}>Dividir</button>
-              <button className="ghost" onClick={deletePosition} disabled={(selectedVariant?.layout_timeline.length ?? 0) <= 1 || isBusy}>Eliminar posición</button>
-              <select value={absorbChoice} onChange={(event) => setAbsorbChoice(event.target.value as "previous" | "next")} disabled={isBusy}><option value="previous">Absorber anterior</option><option value="next">Absorber siguiente</option></select>
-              <button className="ghost" onClick={duplicateVariant} disabled={!selectedVariant || isBusy}>Duplicar variante</button>
-              <button className="primary" onClick={generateMotionPreview} disabled={!selectedPosition || isBusy}>Preview temporal</button>
+              <div>
+                <p className="eyebrow">
+                  {selectedPosition
+                    ? `${formatTime(selectedPosition.start_ms)} — ${formatTime(selectedPosition.end_ms)}`
+                    : "SELECCIONA UNA VARIANTE"}
+                </p>
+                <h2>{selectedVariant?.name ?? "Sin variante activa"}</h2>
+              </div>
+              <div className="toolbar-actions">
+                <button type="button" className="primary" onClick={requestPreview} disabled={!selectedPosition || isBusy}>
+                  Generar preview
+                </button>
+                <button type="button" className="ghost" onClick={applyLayout} disabled={!pending || isBusy}>
+                  Aplicar cambios
+                </button>
+                <label className="split-control">
+                  Corte (ms)
+                  <input
+                    type="number"
+                    value={splitAtMs}
+                    onChange={(event) => setSplitAtMs(Number(event.target.value))}
+                    disabled={isBusy}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={splitPosition}
+                  disabled={selectedVariant?.layout_timeline.length === 1 || isBusy}
+                >
+                  Dividir
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={deletePosition}
+                  disabled={(selectedVariant?.layout_timeline.length ?? 0) <= 1 || isBusy}
+                >
+                  Eliminar posición
+                </button>
+                <select
+                  value={absorbChoice}
+                  onChange={(event) => setAbsorbChoice(event.target.value as "previous" | "next")}
+                  disabled={isBusy}
+                >
+                  <option value="previous">Absorber anterior</option>
+                  <option value="next">Absorber siguiente</option>
+                </select>
+                <button type="button" className="ghost" onClick={duplicateVariant} disabled={!selectedVariant || isBusy}>
+                  Duplicar variante
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={generateMotionPreview}
+                  disabled={!selectedPosition || isBusy}
+                >
+                  Preview temporal
+                </button>
+                <button
+                  type="button"
+                  className="primary export-btn"
+                  onClick={() => renderFinal(false)}
+                  disabled={!selectedVariant || isBusy || isRenderingFinal}
+                >
+                  {isRenderingFinal ? "Renderizando…" : "Exportar final"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => renderFinal(true)}
+                  disabled={!selectedVariant || isBusy || isRenderingFinal}
+                  title="Elegir ruta de destino personalizada"
+                >
+                  Exportar como…
+                </button>
+              </div>
             </div>
             <div className="canvas-grid">
               <article className="source-panel">
                 <div className="panel-heading"><span>Fuente</span><small>frame exacto</small></div>
                 <div className="source-canvas" onPointerMove={updateDrag} onPointerUp={() => setDrag(null)}>
                   {sourceUrl ? <img src={sourceUrl} alt="Frame fuente" /> : <div className="canvas-empty">Genera un preview para cargar el frame fuente.</div>}
-                  {sourceUrl && localBands.map((band, index) => <div className="crop-box" key={index} onPointerDown={(event) => beginDrag(event, index, "move")} style={{ left: `${band.x * 100}%`, top: `${band.y * 100}%`, width: `${band.width * 100}%`, height: `${band.height * 100}%` }}><span>Banda {index + 1}</span><button aria-label={`Redimensionar banda ${index + 1}`} className="resize-handle" onPointerDown={(event) => { event.stopPropagation(); beginDrag(event, index, "resize"); }} /></div>)}
+                  {sourceUrl && localBands.map((band, index) => <div className="crop-box" key={index} onPointerDown={(event) => beginDrag(event, index, "move")} style={{ left: `${band.x * 100}%`, top: `${band.y * 100}%`, width: `${band.width * 100}%`, height: `${band.height * 100}%` }}><span>Banda {index + 1}</span><button type="button" aria-label={`Redimensionar banda ${index + 1}`} className="resize-handle" onPointerDown={(event) => { event.stopPropagation(); beginDrag(event, index, "resize"); }} /></div>)}
                 </div>
                 <p className="canvas-note">Arrastra o redimensiona localmente. Aplicar cambios llega en el siguiente paso.</p>
               </article>
@@ -625,10 +757,10 @@ function App() {
                 {motionPreviewUrl && <video className="motion-preview" src={motionPreviewUrl} controls autoPlay loop />}
               </article>
             </div>
-            <div className="timeline"><div className="timeline-label">Timeline de composición</div><div className="timeline-track">{selectedPosition && <button className="timeline-segment">{selectedPosition.layout_spec.layout}</button>}</div></div>
+            <div className="timeline"><div className="timeline-label">Timeline de composición</div><div className="timeline-track">{selectedPosition && <button type="button" className="timeline-segment">{selectedPosition.layout_spec.layout}</button>}</div></div>
             <div className="watermark-panel">
               <span className="eyebrow">Watermark</span>
-              <button className="ghost" onClick={importWatermark} disabled={!selectedVariant || isBusy}>Importar PNG</button>
+              <button type="button" className="ghost" onClick={importWatermark} disabled={!selectedVariant || isBusy}>Importar PNG</button>
               <label><input type="checkbox" checked={watermarkEnabled} onChange={(event) => { setWatermarkEnabled(event.target.checked); updateWatermark(event.target.checked, watermarkPosition); }} disabled={!selectedVariant || isBusy} /> Activar</label>
               <select value={watermarkPosition} onChange={(event) => { setWatermarkPosition(event.target.value); updateWatermark(watermarkEnabled, event.target.value); }} disabled={!selectedVariant || isBusy}>
                 <option value="center_top">center_top</option>
@@ -782,11 +914,41 @@ function App() {
                 <input type="number" value={captionCorrectionStart} onChange={(e) => setCaptionCorrectionStart(Number(e.target.value))} disabled={isBusy} />
                 <input type="number" value={captionCorrectionEnd} onChange={(e) => setCaptionCorrectionEnd(Number(e.target.value))} disabled={isBusy} />
                 <textarea value={captionCorrectionText} onChange={(e) => setCaptionCorrectionText(e.target.value)} disabled={isBusy} placeholder="Texto corregido" />
-                <button className="ghost" onClick={applyCaptionCorrection} disabled={isBusy || !captionCorrectionText.trim()}>Registrar corrección</button>
+                <button type="button" className="ghost" onClick={applyCaptionCorrection} disabled={isBusy || !captionCorrectionText.trim()}>Registrar corrección</button>
                 {selectedVariant?.caption_corrections?.map((c) => (
                   <small key={c.correction_id}>{c.start_ms}–{c.end_ms}: {c.corrected_text} ({c.author})</small>
                 ))}
               </div>
+            </div>
+
+            <div className="export-panel" aria-live="polite">
+              <div className="panel-heading">
+                <span>Exportación final</span>
+                {lastExport && lastExport.variant_id === selectedVariant?.variant_id && (
+                  <small className="gate-badge">Gate: {lastExport.gate_verdict}</small>
+                )}
+              </div>
+              {isRenderingFinal && (
+                <div className="export-loading-state">
+                  <span className="export-spinner" aria-hidden="true" />
+                  <p>Ensamblando video multi-posición y verificando Gate fail-closed…</p>
+                </div>
+              )}
+              {!isRenderingFinal && lastExport && lastExport.variant_id === selectedVariant?.variant_id && (
+                <div className="delivery-card">
+                  <p className="delivery-path tabular-nums">{lastExport.output_path}</p>
+                  <div className="delivery-metrics tabular-nums">
+                    <span>{lastExport.width} × {lastExport.height}</span>
+                    <span>{formatTime(lastExport.duration_ms)}</span>
+                    <span>Codec: {lastExport.encoder_used}</span>
+                  </div>
+                </div>
+              )}
+              {!isRenderingFinal && (!lastExport || lastExport.variant_id !== selectedVariant?.variant_id) && (
+                <p className="canvas-note">
+                  Genera el MP4 definitivo de 1080×1920 con timeline continuo, audio nativo, watermark y subtítulos validados por el Gate.
+                </p>
+              )}
             </div>
           </section>
         </div>

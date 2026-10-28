@@ -95,6 +95,7 @@ fn studio_project(
     created_at_ms: Option<i64>,
     correction_id: Option<String>,
     duration_ms: Option<i64>,
+    out_path: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -113,6 +114,7 @@ fn studio_project(
         "set-caption-correction",
         "clear-caption-correction",
         "preview-motion",
+        "render-final",
     ]
     .contains(&operation.as_str())
     {
@@ -347,6 +349,18 @@ fn studio_project(
         if let Some(value) = duration_ms {
             args.push("--duration-ms".to_owned());
             args.push(value.to_string());
+        }
+    }
+    if operation == "render-final" {
+        args.push("--variant-id".to_owned());
+        args.push(
+            variant_id
+                .clone()
+                .ok_or_else(|| "Falta variantId.".to_owned())?,
+        );
+        if let Some(path) = out_path {
+            args.push("--out".to_owned());
+            args.push(path);
         }
     }
     run_backend(&executable, &args)
