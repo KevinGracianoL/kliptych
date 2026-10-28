@@ -108,6 +108,7 @@ fn studio_project(
     correction_id: Option<String>,
     duration_ms: Option<i64>,
     out_path: Option<String>,
+    normalize_audio: Option<bool>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -373,6 +374,9 @@ fn studio_project(
         if let Some(path) = out_path {
             args.push("--out".to_owned());
             args.push(path);
+        }
+        if let Some(false) = normalize_audio {
+            args.push("--no-normalize-audio".to_owned());
         }
     }
     run_backend(&executable, &args)

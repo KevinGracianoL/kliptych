@@ -22,6 +22,7 @@ type RenderFinalResult = {
   height: number;
   gate_verdict: string;
   encoder_used: string;
+  audio_normalized?: boolean;
 };
 
 type Candidate = {
@@ -124,6 +125,7 @@ function App() {
   const [isBusy, setBusy] = useState(false);
   const [isRenderingFinal, setIsRenderingFinal] = useState(false);
   const [lastExport, setLastExport] = useState<RenderFinalResult | null>(null);
+  const [normalizeAudio, setNormalizeAudio] = useState(true);
   const [welcomeMode, setWelcomeMode] = useState<"new" | "existing">("new");
   const [newUrl, setNewUrl] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
@@ -744,6 +746,7 @@ function App() {
         operation: "render-final",
         variantId: selectedVariant.variant_id,
         outPath: targetPath,
+        normalizeAudio,
       });
       setLastExport(result);
       setMessage(
@@ -1317,6 +1320,17 @@ function App() {
                   <small className="gate-badge">Gate: {lastExport.gate_verdict}</small>
                 )}
               </div>
+              <div className="export-options-row">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={normalizeAudio}
+                    onChange={(e) => setNormalizeAudio(e.target.checked)}
+                    disabled={isBusy || isRenderingFinal}
+                  />
+                  Normalización EBU R128 (-14 LUFS)
+                </label>
+              </div>
               {isRenderingFinal && (
                 <div className="export-loading-state">
                   <span className="export-spinner" aria-hidden="true" />
@@ -1330,6 +1344,7 @@ function App() {
                     <span>{lastExport.width} × {lastExport.height}</span>
                     <span>{formatTime(lastExport.duration_ms)}</span>
                     <span>Codec: {lastExport.encoder_used}</span>
+                    <span>{lastExport.audio_normalized ? "Audio: R128 (-14 LUFS)" : "Audio: Original"}</span>
                   </div>
                 </div>
               )}
