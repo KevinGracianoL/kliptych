@@ -522,3 +522,34 @@ def test_render_final_runner_produces_no_output_raises(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.error_code == "encoder_failed"
+
+
+def test_render_final_cancellation_by_signal_cleans_up(tmp_path: Path) -> None:
+    project_dir, _store, variant = _setup_project(tmp_path)
+    probe = _Probe(duration_s=20.0, width=1080, height=1920)
+
+    class _CancellingRunner:
+        @staticmethod
+        def run(argv: tuple[str, ...], *, timeout_s: float, cwd: Path | None = None) -> object:
+            _ = argv
+            _ = timeout_s
+            _ = cwd
+            # Simulate SIGTERM signal handler
+            fr.signal_cleanup_handler(15, None)
+            return None
+
+    runner = _CancellingRunner()
+
+    with pytest.raises(fr.FinalRenderError) as exc_info:
+        _ = fr.render_final_variant(
+            fr.FinalRenderRequest(
+                project_dir=project_dir,
+                variant_id=variant.variant_id,
+            ),
+            probe=probe,
+            runner=runner,
+        )
+
+    assert exc_info.value.error_code == "render_cancelled"
+    delivery_dir = project_dir / "delivery"
+    assert not any(delivery_dir.glob("*.tmp.mp4")) if delivery_dir.exists() else True

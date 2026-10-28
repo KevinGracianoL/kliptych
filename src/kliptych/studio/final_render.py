@@ -4,12 +4,14 @@ import contextlib
 import logging
 import os
 import re
+import signal
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from types import FrameType
+from typing import Protocol, cast
 
 from kliptych.contract import CaptionStyleConfig
 from kliptych.contract.enums import CaptionCapitalization, Platform
@@ -47,6 +49,8 @@ _CANVAS_HEIGHT = 1920
 _DELIVERY_DIR = "delivery"
 _MIN_SOURCE_DIMENSION = 2
 _DEFAULT_TIMEOUT_S = 600.0
+
+type _SignalHandler = Callable[[int, FrameType | None], object] | int | None
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,16 @@ def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderC
     )
 
 
+def signal_cleanup_handler(signum: int, _frame: object) -> None:
+    """Handle termination signals cooperatively during final rendering.
+
+    Raises:
+        FinalRenderError: Always raised to trigger deterministic cleanup.
+    """
+    msg = f"Final render process terminated by signal {signum}."
+    raise FinalRenderError(msg, error_code="render_cancelled")
+
+
 def render_final_variant(  # ruff: ignore[too-many-arguments]
     request: FinalRenderRequest,
     *,
@@ -165,6 +179,11 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
     render_config = RenderConfig(target_aspect=9 / 16, nvenc_available=nvenc_available)
     effective_gate = gate if gate is not None else Gate(probe=probe, render=render_config)
 
+    previous_signals: dict[int, object] = {}
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            previous_signals[sig] = signal.signal(sig, signal_cleanup_handler)
+
     try:
         encoder_used = _execute_ffmpeg_with_fallback(
             ffmpeg=ffmpeg,
@@ -192,6 +211,9 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
                 temp_destination.unlink()
         raise
     finally:
+        for sig, prev in previous_signals.items():
+            with contextlib.suppress(ValueError, OSError):
+                _ = signal.signal(sig, cast("_SignalHandler", prev))
         if ass_path is not None:
             with contextlib.suppress(OSError):
                 if ass_path.exists():
@@ -351,8 +373,8 @@ def _read_transcript(project_dir: Path) -> Transcript:
 def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[Word]:
     out: list[Word] = []
     for w in transcript.words:
-        ws = int(w.start_s * 1000)
-        we = int(w.end_s * 1000)
+        ws = round(w.start_s * 1000)
+        we = round(w.end_s * 1000)
         if we <= start_ms or ws >= end_ms:
             continue
         clipped_start_ms = max(ws, start_ms)
@@ -383,8 +405,8 @@ def _apply_caption_corrections(
     result: list[Word] = []
     for w in words:
         skip = False
-        ws = int(w.start_s * 1000)
-        we = int(w.end_s * 1000)
+        ws = round(w.start_s * 1000)
+        we = round(w.end_s * 1000)
         for c in corrections:
             c_start_rel = c.start_ms - start_ms
             c_end_rel = c.end_ms - start_ms
