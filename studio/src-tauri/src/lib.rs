@@ -87,6 +87,7 @@ fn studio_project(
     horizontal_alignment: Option<String>,
     outline: Option<String>,
     shadow: Option<String>,
+    clear_caption_style: Option<String>,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     text: Option<String>,
@@ -278,6 +279,11 @@ fn studio_project(
             if let Some(val) = shadow.clone() {
                 args.push("--shadow".to_owned());
                 args.push(val);
+            }
+        }
+        if let Some(val) = clear_caption_style.clone() {
+            if val == "true" {
+                args.push("--clear-caption-style".to_owned());
             }
         }
     }

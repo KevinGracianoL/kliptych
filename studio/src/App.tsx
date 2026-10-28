@@ -446,6 +446,8 @@ function App() {
         payload.horizontalAlignment = styleOverrides?.horizontal_alignment ?? captionHorizAlign;
         payload.outline = styleOverrides?.outline ?? captionOutline;
         payload.shadow = styleOverrides?.shadow ?? captionShadow;
+      } else {
+        payload.clearCaptionStyle = "true";
       }
       const event = await invoke<{ variant: Variant }>("studio_project", payload);
       const updatedVariant = event.variant;
