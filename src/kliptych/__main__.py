@@ -851,6 +851,9 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
     _ = studio_set_cap.add_argument(
         "--shadow", choices=["none", "soft", "strong"], help="sombra de captions"
     )
+    _ = studio_set_cap.add_argument(
+        "--clear-caption-style", action="store_true", help="elimina el estilo B2.5"
+    )
     studio_set_corr = studio_subcommands.add_parser(
         "set-caption-correction", help="registra una correccion humana de caption"
     )
@@ -1095,6 +1098,7 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             horizontal_alignment=cast("str | None", getattr(args, "horizontal_alignment", None)),
             outline=cast("str | None", getattr(args, "outline", None)),
             shadow=cast("str | None", getattr(args, "shadow", None)),
+            clear_caption_style=bool(getattr(args, "clear_caption_style", False)),
         ),
         "set-caption-correction": lambda: _studio_set_caption_correction_event(
             store,
@@ -1300,6 +1304,40 @@ def _studio_set_watermark_event(
     return {"type": "watermark_updated", "variant": variant.model_dump(mode="json")}
 
 
+def _dispatch_set_captions(
+    store: _StudioStore,
+    *,
+    variant_id: uuid.UUID,
+    enabled_value: bool | None,
+    highlight_color: str | None,
+    capitalization_value: CaptionCapitalization | None,
+    clear_caption_style: bool,
+    style: CaptionStyle | None,
+) -> ProjectDocument:
+    if clear_caption_style:
+        return store.set_captions(
+            variant_id=variant_id,
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+            caption_style=None,
+        )
+    if style is not None:
+        return store.set_captions(
+            variant_id=variant_id,
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+            caption_style=style,
+        )
+    return store.set_captions(
+        variant_id=variant_id,
+        enabled=enabled_value,
+        highlight_color=highlight_color,
+        capitalization=capitalization_value,
+    )
+
+
 def _studio_set_captions_event(
     store: _StudioStore,
     *,
@@ -1313,6 +1351,7 @@ def _studio_set_captions_event(
     horizontal_alignment: str | None = None,
     outline: str | None = None,
     shadow: str | None = None,
+    clear_caption_style: bool = False,
 ) -> dict[str, object]:
     style_values = {
         "preset": preset,
@@ -1350,21 +1389,15 @@ def _studio_set_captions_event(
             msg = str(error)
             raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
     try:
-        if all(provided) and style is not None:
-            project = store.set_captions(
-                variant_id=uuid.UUID(variant_id),
-                enabled=enabled_value,
-                highlight_color=highlight_color,
-                capitalization=capitalization_value,
-                caption_style=style,
-            )
-        else:
-            project = store.set_captions(
-                variant_id=uuid.UUID(variant_id),
-                enabled=enabled_value,
-                highlight_color=highlight_color,
-                capitalization=capitalization_value,
-            )
+        project = _dispatch_set_captions(
+            store,
+            variant_id=uuid.UUID(variant_id),
+            enabled_value=enabled_value,
+            highlight_color=highlight_color,
+            capitalization_value=capitalization_value,
+            clear_caption_style=clear_caption_style,
+            style=style,
+        )
     except (ProjectStoreError, ValueError) as error:
         if isinstance(error, ProjectStoreError):
             raise

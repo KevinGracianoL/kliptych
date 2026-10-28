@@ -1357,3 +1357,51 @@ def test_main_studio_set_captions_full_style_one_atomic_call(
     assert len(calls) == 1
     assert "caption_style" in calls[0]
     assert set_style_calls == []
+
+
+def test_main_studio_set_captions_clear_caption_style(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    calls: list[dict[str, object]] = []
+
+    class _Variant:
+        variant_id: str = "11111111-1111-1111-1111-111111111111"
+
+        @staticmethod
+        def model_dump(**_kwargs: object) -> dict[str, object]:
+            return {"variant_id": "id"}
+
+    variant = cast("object", _Variant())
+    project = cast("object", SimpleNamespace(variants=(variant,)))
+
+    class _Store:
+        @staticmethod
+        def set_captions(**kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            return project
+
+    def open_store(_path: Path) -> _Store:
+        return _Store()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "set-captions",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--clear-caption-style",
+            ]
+        )
+        == 0
+    )
+    _ = capsys.readouterr()
+    assert len(calls) == 1
+    assert calls[0].get("caption_style") is None
