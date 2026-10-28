@@ -135,6 +135,7 @@ function App() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isScrubbingRef = useRef(false);
+  const rafIdRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
 
@@ -307,18 +308,46 @@ function App() {
   }
 
   function handleScrub(e: React.ChangeEvent<HTMLInputElement>) {
-    isScrubbingRef.current = true;
     const ms = Number(e.target.value);
-    setPlayheadMs(ms);
     if (videoRef.current) {
       videoRef.current.currentTime = ms / 1000.0;
+    }
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        setPlayheadMs(ms);
+        rafIdRef.current = null;
+      });
     }
   }
 
   function handleScrubCommit() {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     isScrubbingRef.current = false;
-    setSplitAtMs(playheadMs);
+    if (videoRef.current) {
+      setPlayheadMs(Math.round(videoRef.current.currentTime * 1000));
+    }
   }
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.code !== "Space") return;
+      const target = e.target as HTMLElement | null;
+      const isInput =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable;
+      if (isInput) return;
+      if (sourceVideoUrl) {
+        e.preventDefault();
+        togglePlay();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sourceVideoUrl, isPlaying, playheadMs, selectedPosition]);
 
   async function openProject() {
     const selected = await open({ multiple: false, directory: true, title: "Abrir proyecto Kliptych" });
@@ -1083,8 +1112,13 @@ function App() {
                     min={selectedPosition?.start_ms ?? 0}
                     max={selectedPosition?.end_ms ?? 60000}
                     value={playheadMs}
-                    onChange={handleScrub}
+                    onPointerDown={() => {
+                      isScrubbingRef.current = true;
+                    }}
                     onPointerUp={handleScrubCommit}
+                    onPointerCancel={handleScrubCommit}
+                    onKeyUp={handleScrubCommit}
+                    onChange={handleScrub}
                     disabled={!sourceVideoUrl || isBusy}
                     aria-label="Línea de tiempo de reproducción"
                   />
