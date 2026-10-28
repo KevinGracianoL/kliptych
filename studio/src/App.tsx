@@ -1,7 +1,17 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import "./App.css";
+
+type AnalysisStreamEvent = {
+  schema_version?: string;
+  type: "progress" | "completed" | "error" | "cancelled";
+  stage?: "downloading" | "transcribing" | "finding_candidates" | "completed" | "failed" | "cancelled";
+  analysis_path?: string;
+  candidate_count?: number;
+  error_code?: string;
+  message?: string;
+};
 
 type RenderFinalResult = {
   type: "render_completed";
@@ -114,6 +124,13 @@ function App() {
   const [isBusy, setBusy] = useState(false);
   const [isRenderingFinal, setIsRenderingFinal] = useState(false);
   const [lastExport, setLastExport] = useState<RenderFinalResult | null>(null);
+  const [welcomeMode, setWelcomeMode] = useState<"new" | "existing">("new");
+  const [newUrl, setNewUrl] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDir, setNewProjectDir] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState<string>("idle");
+  const [analysisMessage, setAnalysisMessage] = useState("");
 
   useEffect(() => {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
@@ -166,6 +183,71 @@ function App() {
       setMessage("Backend Kliptych configurado.");
     } catch (error) {
       setMessage(String(error));
+    }
+  }
+
+  async function selectNewProjectDir() {
+    const selected = await open({ multiple: false, directory: true, title: "Seleccionar carpeta para nuevo proyecto" });
+    if (typeof selected !== "string") return;
+    setNewProjectDir(selected);
+  }
+
+  async function startAnalysis() {
+    if (!newUrl.trim() || !newProjectDir || isAnalyzing || isBusy) return;
+    setIsAnalyzing(true);
+    setAnalysisStage("downloading");
+    setAnalysisMessage("Descargando video fuente...");
+    setMessage("Iniciando análisis local...");
+
+    const channel = new Channel<AnalysisStreamEvent>();
+    channel.onmessage = (event) => {
+      if (event.type === "progress" && event.stage) {
+        setAnalysisStage(event.stage);
+        const stageLabels: Record<string, string> = {
+          downloading: "Descargando video fuente...",
+          transcribing: "Transcribiendo audio con Whisper...",
+          finding_candidates: "Detectando candidatos por densidad de habla...",
+        };
+        setAnalysisMessage(stageLabels[event.stage] ?? `Etapa: ${event.stage}`);
+      } else if (event.type === "completed") {
+        setAnalysisStage("completed");
+        setAnalysisMessage(`Análisis completado: ${event.candidate_count ?? 0} candidatos.`);
+      }
+    };
+
+    try {
+      await configureBackend();
+      await invoke<AnalysisStreamEvent>("analyze_url", {
+        onEvent: channel,
+        url: newUrl.trim(),
+        projectDir: newProjectDir,
+        projectName: newProjectName.trim() || "Proyecto Kliptych",
+      });
+
+      const inspectEvent = await invoke<ProjectEvent>("studio_project", {
+        projectDir: newProjectDir,
+        operation: "inspect",
+      });
+      setProjectDir(newProjectDir);
+      setProject(inspectEvent);
+
+      if (inspectEvent.editable_state === "missing") {
+        await invoke("studio_project", { projectDir: newProjectDir, operation: "initialize" });
+        setProject({ ...inspectEvent, editable_state: "ready" });
+      }
+
+      setSelectedVariant(null);
+      setSelectedPosition(null);
+      setSourceUrl(null);
+      setComposedUrl(null);
+      setMotionPreviewUrl(null);
+      setLastExport(null);
+      setMessage(`Proyecto analizado: ${inspectEvent.candidates.length} candidatos listos.`);
+    } catch (error) {
+      setMessage(`Error en análisis: ${String(error)}`);
+      setAnalysisMessage(`Error: ${String(error)}`);
+    } finally {
+      setIsAnalyzing(false);
     }
   }
 
@@ -622,8 +704,107 @@ function App() {
         <section className="welcome">
           <p className="eyebrow">EDITOR LOCAL DE CLIPS</p>
           <h1>Componé una historia,<br />no solo un recorte.</h1>
-          <p>Abre un proyecto B1 analizado para elegir un candidato, crear una variante y revisar su composición.</p>
-          <button type="button" className="primary large" onClick={openProject} disabled={isBusy}>Abrir proyecto B1</button>
+          <div className="welcome-nav">
+            <button
+              type="button"
+              className={welcomeMode === "new" ? "tab active" : "tab"}
+              onClick={() => setWelcomeMode("new")}
+              disabled={isAnalyzing}
+            >
+              Nuevo proyecto desde URL
+            </button>
+            <button
+              type="button"
+              className={welcomeMode === "existing" ? "tab active" : "tab"}
+              onClick={() => setWelcomeMode("existing")}
+              disabled={isAnalyzing}
+            >
+              Abrir proyecto existente
+            </button>
+          </div>
+
+          {welcomeMode === "new" ? (
+            <form
+              className="ingest-card"
+              onSubmit={(e) => {
+                e.preventDefault();
+                startAnalysis();
+              }}
+            >
+              <div className="form-field">
+                <label htmlFor="new-url">URL del video (YouTube o Twitch)</label>
+                <input
+                  id="new-url"
+                  type="url"
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  value={newUrl}
+                  onChange={(e) => setNewUrl(e.target.value)}
+                  disabled={isAnalyzing || isBusy}
+                  required
+                />
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="new-name">Nombre del proyecto</label>
+                <input
+                  id="new-name"
+                  type="text"
+                  placeholder="Mi clip de podcast"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  disabled={isAnalyzing || isBusy}
+                />
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="new-dir">Carpeta local de destino</label>
+                <div className="dir-picker-row">
+                  <input
+                    id="new-dir"
+                    type="text"
+                    readOnly
+                    placeholder="Selecciona una carpeta…"
+                    value={newProjectDir ?? ""}
+                    disabled={isAnalyzing || isBusy}
+                  />
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={selectNewProjectDir}
+                    disabled={isAnalyzing || isBusy}
+                  >
+                    Elegir…
+                  </button>
+                </div>
+              </div>
+
+              {isAnalyzing ? (
+                <div className="analysis-progress-card" aria-live="polite">
+                  <div className="progress-header">
+                    <span className="export-spinner" aria-hidden="true" />
+                    <span className="gate-badge">{analysisStage}</span>
+                  </div>
+                  <p className="progress-desc">{analysisMessage}</p>
+                </div>
+              ) : (
+                <button
+                  type="submit"
+                  className="primary large"
+                  disabled={!newUrl.trim() || !newProjectDir || isBusy}
+                >
+                  Comenzar análisis local
+                </button>
+              )}
+            </form>
+          ) : (
+            <div className="existing-card">
+              <p>Abre un proyecto analizado para elegir un candidato, crear una variante y revisar su composición.</p>
+              <button type="button" className="primary large" onClick={openProject} disabled={isBusy}>
+                Abrir carpeta de proyecto
+              </button>
+            </div>
+          )}
+
           <p className="backend-hint">Backend actual: <code>{backendPath}</code></p>
         </section>
       ) : (

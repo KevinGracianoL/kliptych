@@ -469,6 +469,84 @@ fn preview_video_data(project_dir: String, relative_path: String) -> Result<Stri
     ))
 }
 
+#[tauri::command]
+async fn analyze_url(
+    state: tauri::State<'_, BackendPath>,
+    on_event: tauri::ipc::Channel<Value>,
+    url: String,
+    project_dir: String,
+    project_name: String,
+) -> Result<Value, String> {
+    if url.trim().is_empty() {
+        return Err("Ingresa una URL válida.".to_owned());
+    }
+    let dest = Path::new(&project_dir);
+    if dest.is_symlink() {
+        return Err("La carpeta de destino no debe ser un enlace simbólico.".to_owned());
+    }
+    let executable = state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el backend.".to_owned())?
+        .clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::BufRead;
+
+        let mut child = Command::new(&executable)
+            .args([
+                "--quiet",
+                "analyze",
+                "--url",
+                &url,
+                "--project-dir",
+                &project_dir,
+                "--project-name",
+                &project_name,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("No se pudo iniciar Kliptych analyze: {err}"))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "No se pudo abrir stdout de Kliptych.".to_owned())?;
+        let reader = std::io::BufReader::new(stdout);
+
+        let mut last_event: Option<Value> = None;
+        for line in reader.lines() {
+            let line = line.map_err(|err| format!("Error leyendo stdout: {err}"))?;
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                let _ = on_event.send(value.clone());
+                last_event = Some(value);
+            }
+        }
+
+        let status = child
+            .wait()
+            .map_err(|err| format!("Error esperando proceso: {err}"))?;
+        if status.success() {
+            last_event.ok_or_else(|| "Kliptych finalizó sin emitir evento.".to_owned())
+        } else {
+            let code = status.code().unwrap_or(-1);
+            if code == 2 {
+                Err("Análisis cancelado.".to_owned())
+            } else {
+                let msg = last_event
+                    .as_ref()
+                    .and_then(|v| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Kliptych analyze falló.");
+                Err(msg.to_owned())
+            }
+        }
+    })
+    .await
+    .map_err(|err| format!("Error en tarea de análisis: {err}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -477,6 +555,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_backend_path,
             backend_status,
+            analyze_url,
             studio_project,
             preview_position,
             preview_image_data,

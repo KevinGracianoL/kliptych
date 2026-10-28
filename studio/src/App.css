@@ -39,3 +39,21 @@ button:not(:disabled):active { transform: scale(0.96); }
 .export-loading-state { display: flex; align-items: center; gap: 10px; color: #a9b2c3; font-size: 13px; padding: 8px 0; }
 .export-spinner { width: 14px; height: 14px; border: 2px solid rgba(94, 234, 212, 0.2); border-top-color: #5eead4; border-radius: 50%; animation: studio-spin 0.8s linear infinite; display: inline-block; }
 @keyframes studio-spin { to { transform: rotate(360deg); } }
+
+.welcome-nav { display: flex; gap: 8px; margin: 18px 0 20px; border-bottom: 1px solid #202634; padding-bottom: 8px; }
+.tab { background: transparent; color: #8e99ac; border: 0; padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: color .15s ease-out, background .15s ease-out; }
+.tab:hover { color: #f5f7fb; background: #171b24; }
+.tab.active { color: #5eead4; background: #171b24; }
+
+.ingest-card, .existing-card { background: #12161f; border: 1px solid #29303c; border-radius: 14px; padding: 24px; text-align: left; display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
+.form-field { display: flex; flex-direction: column; gap: 6px; }
+.form-field label { font-size: 11px; color: #8e99ac; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; }
+.form-field input { background: #0c0f15; color: #f5f7fb; border: 1px solid #252a35; border-radius: 8px; padding: 10px 12px; font-size: 13px; outline: none; transition: border-color .15s ease-out; }
+.form-field input:focus-visible { border-color: #5eead4; }
+.dir-picker-row { display: flex; gap: 8px; }
+.dir-picker-row input { flex: 1; }
+
+.analysis-progress-card { background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 16px; }
+.progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.stage-badge { background: rgba(94, 234, 212, 0.12); color: #5eead4; border: 1px solid rgba(94, 234, 212, 0.35); padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.progress-desc { color: #a9b2c3; font-size: 13px; margin: 0; }
