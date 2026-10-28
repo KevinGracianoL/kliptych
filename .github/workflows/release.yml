@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de versión a publicar (ej: v0.1.0)"
+        required: true
+        default: "v0.1.0"
+        type: string
 
 permissions:
   contents: write
@@ -37,7 +43,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies (Ubuntu)
-        if: matrix.platform == 'ubuntu-24.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y -o Acquire::Retries=3 \
@@ -60,9 +66,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: studio
-          tagName: ${{ github.ref_name }}
-          releaseName: "Kliptych Studio ${{ github.ref_name }}"
-          releaseBody: "Release oficial de Kliptych Studio ${{ github.ref_name }} para macOS, Windows y Linux."
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Kliptych Studio ${{ inputs.tag || github.ref_name }}"
+          releaseBody: "Release oficial de Kliptych Studio ${{ inputs.tag || github.ref_name }} para macOS, Windows y Linux."
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
