@@ -62,3 +62,9 @@ button:not(:disabled):active { transform: scale(0.96); }
 .analysis-error-card { background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
 .error-eyebrow { color: #f87171 !important; font-size: 10px; }
 .error-text { color: #fca5a5; font-size: 12px; margin: 0; line-height: 1.4; word-break: break-word; }
+
+.source-video-player { width: 100%; height: 100%; object-fit: contain; display: block; }
+.video-playback-controls { display: flex; align-items: center; gap: 10px; margin-top: 12px; background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 8px 12px; }
+.play-btn { padding: 6px 12px; font-weight: 700; font-size: 12px; }
+.playhead-readout, .duration-readout { color: #8e99ac; font-size: 12px; font-weight: 600; min-width: 36px; text-align: center; }
+.scrubber-slider { flex: 1; accent-color: #5eead4; cursor: pointer; height: 6px; }

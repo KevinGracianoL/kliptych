@@ -1,6 +1,6 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 type AnalysisStreamEvent = {
@@ -133,12 +133,26 @@ function App() {
   const [analysisMessage, setAnalysisMessage] = useState("");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const isScrubbingRef = useRef(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playheadMs, setPlayheadMs] = useState(0);
+
+  const sourceVideoUrl = projectDir ? convertFileSrc(`${projectDir}/source.mp4`) : null;
+
   useEffect(() => {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
     setDrag(null);
     setPending(false);
     setMotionPreviewUrl(null);
-    if (selectedPosition) setSplitAtMs(Math.floor((selectedPosition.start_ms + selectedPosition.end_ms) / 2));
+    if (selectedPosition) {
+      const mid = Math.floor((selectedPosition.start_ms + selectedPosition.end_ms) / 2);
+      setSplitAtMs(mid);
+      setPlayheadMs(selectedPosition.start_ms);
+      if (videoRef.current) {
+        videoRef.current.currentTime = selectedPosition.start_ms / 1000.0;
+      }
+    }
   }, [selectedPosition]);
 
   useEffect(() => {
@@ -264,6 +278,46 @@ function App() {
     } finally {
       setIsAnalyzing(false);
     }
+  }
+
+  function togglePlay() {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+    } else {
+      if (
+        selectedPosition &&
+        (playheadMs < selectedPosition.start_ms || playheadMs >= selectedPosition.end_ms)
+      ) {
+        videoRef.current.currentTime = selectedPosition.start_ms / 1000.0;
+        setPlayheadMs(selectedPosition.start_ms);
+      }
+      void videoRef.current.play();
+    }
+  }
+
+  function handleVideoTimeUpdate() {
+    if (!videoRef.current || isScrubbingRef.current) return;
+    const currentMs = Math.round(videoRef.current.currentTime * 1000);
+    setPlayheadMs(currentMs);
+    if (selectedPosition && currentMs >= selectedPosition.end_ms) {
+      videoRef.current.currentTime = selectedPosition.start_ms / 1000.0;
+      setPlayheadMs(selectedPosition.start_ms);
+    }
+  }
+
+  function handleScrub(e: React.ChangeEvent<HTMLInputElement>) {
+    isScrubbingRef.current = true;
+    const ms = Number(e.target.value);
+    setPlayheadMs(ms);
+    if (videoRef.current) {
+      videoRef.current.currentTime = ms / 1000.0;
+    }
+  }
+
+  function handleScrubCommit() {
+    isScrubbingRef.current = false;
+    setSplitAtMs(playheadMs);
   }
 
   async function openProject() {
@@ -961,12 +1015,96 @@ function App() {
             </div>
             <div className="canvas-grid">
               <article className="source-panel">
-                <div className="panel-heading"><span>Fuente</span><small>frame exacto</small></div>
-                <div className="source-canvas" onPointerMove={updateDrag} onPointerUp={() => setDrag(null)}>
-                  {sourceUrl ? <img src={sourceUrl} alt="Frame fuente" /> : <div className="canvas-empty">Genera un preview para cargar el frame fuente.</div>}
-                  {sourceUrl && localBands.map((band, index) => <div className="crop-box" key={index} onPointerDown={(event) => beginDrag(event, index, "move")} style={{ left: `${band.x * 100}%`, top: `${band.y * 100}%`, width: `${band.width * 100}%`, height: `${band.height * 100}%` }}><span>Banda {index + 1}</span><button type="button" aria-label={`Redimensionar banda ${index + 1}`} className="resize-handle" onPointerDown={(event) => { event.stopPropagation(); beginDrag(event, index, "resize"); }} /></div>)}
+                <div className="panel-heading">
+                  <span>Fuente</span>
+                  <small className="tabular-nums">
+                    {formatTime(playheadMs)} / {selectedPosition ? formatTime(selectedPosition.end_ms) : "0:00"}
+                  </small>
                 </div>
-                <p className="canvas-note">Arrastra o redimensiona localmente. Aplicar cambios llega en el siguiente paso.</p>
+                <div className="source-canvas" onPointerMove={updateDrag} onPointerUp={() => setDrag(null)}>
+                  {sourceVideoUrl ? (
+                    <video
+                      ref={videoRef}
+                      className="source-video-player"
+                      src={sourceVideoUrl}
+                      preload="auto"
+                      playsInline
+                      onTimeUpdate={handleVideoTimeUpdate}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                    />
+                  ) : sourceUrl ? (
+                    <img src={sourceUrl} alt="Frame fuente" />
+                  ) : (
+                    <div className="canvas-empty">Genera un preview o reproduce el video fuente.</div>
+                  )}
+                  {localBands.map((band, index) => (
+                    <div
+                      className="crop-box"
+                      key={index}
+                      onPointerDown={(event) => beginDrag(event, index, "move")}
+                      style={{
+                        left: `${band.x * 100}%`,
+                        top: `${band.y * 100}%`,
+                        width: `${band.width * 100}%`,
+                        height: `${band.height * 100}%`,
+                      }}
+                    >
+                      <span>Banda {index + 1}</span>
+                      <button
+                        type="button"
+                        aria-label={`Redimensionar banda ${index + 1}`}
+                        className="resize-handle"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          beginDrag(event, index, "resize");
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                <div className="video-playback-controls">
+                  <button
+                    type="button"
+                    className="ghost play-btn"
+                    onClick={togglePlay}
+                    disabled={!sourceVideoUrl || isBusy}
+                    aria-label={isPlaying ? "Pausar video" : "Reproducir video"}
+                  >
+                    {isPlaying ? "Pausa" : "Play"}
+                  </button>
+                  <span className="playhead-readout tabular-nums">
+                    {formatTime(playheadMs)}
+                  </span>
+                  <input
+                    type="range"
+                    className="scrubber-slider"
+                    min={selectedPosition?.start_ms ?? 0}
+                    max={selectedPosition?.end_ms ?? 60000}
+                    value={playheadMs}
+                    onChange={handleScrub}
+                    onPointerUp={handleScrubCommit}
+                    disabled={!sourceVideoUrl || isBusy}
+                    aria-label="Línea de tiempo de reproducción"
+                  />
+                  <span className="duration-readout tabular-nums">
+                    {selectedPosition ? formatTime(selectedPosition.end_ms) : "0:00"}
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setSplitAtMs(playheadMs)}
+                    disabled={!selectedPosition || isBusy}
+                    title="Usar posición actual del playhead para dividir"
+                  >
+                    Fijar corte
+                  </button>
+                </div>
+
+                <p className="canvas-note">
+                  Arrastra o redimensiona bandas sobre el video en vivo. Ajusta el playhead con la barra para revisar encuadres.
+                </p>
               </article>
               <article className="composed-panel">
                 <div className="panel-heading"><span>Composición</span>{pending ? <small className="pending">Cambios sin aplicar</small> : <small>720 × 1280</small>}</div>
