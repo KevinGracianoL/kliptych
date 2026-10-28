@@ -81,6 +81,12 @@ fn studio_project(
     wm_position: Option<String>,
     highlight_color: Option<String>,
     capitalization: Option<String>,
+    preset: Option<String>,
+    size: Option<String>,
+    vertical_position: Option<String>,
+    horizontal_alignment: Option<String>,
+    outline: Option<String>,
+    shadow: Option<String>,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     text: Option<String>,
@@ -249,6 +255,30 @@ fn studio_project(
         if let Some(value) = capitalization.clone() {
             args.push("--capitalization".to_owned());
             args.push(value);
+        }
+        if let Some(value) = preset.clone() {
+            args.push("--preset".to_owned());
+            args.push(value);
+            if let Some(val) = size.clone() {
+                args.push("--size".to_owned());
+                args.push(val);
+            }
+            if let Some(val) = vertical_position.clone() {
+                args.push("--vertical-position".to_owned());
+                args.push(val);
+            }
+            if let Some(val) = horizontal_alignment.clone() {
+                args.push("--horizontal-alignment".to_owned());
+                args.push(val);
+            }
+            if let Some(val) = outline.clone() {
+                args.push("--outline".to_owned());
+                args.push(val);
+            }
+            if let Some(val) = shadow.clone() {
+                args.push("--shadow".to_owned());
+                args.push(val);
+            }
         }
     }
     if operation == "set-caption-correction" {

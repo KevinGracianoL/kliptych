@@ -25,6 +25,15 @@ type Position = {
   layout_spec: { layout: string; bands: Band[] };
 };
 
+type CaptionStyle = {
+  preset: "clean" | "bold" | "boxed";
+  size: "small" | "medium" | "large";
+  vertical_position: "top" | "middle" | "bottom";
+  horizontal_alignment: "left" | "center" | "right";
+  outline: "none" | "thin" | "thick";
+  shadow: "none" | "soft" | "strong";
+};
+
 type Variant = {
   variant_id: string;
   name: string;
@@ -34,6 +43,7 @@ type Variant = {
   captions_enabled?: boolean;
   caption_highlight_color?: string;
   caption_capitalization?: string;
+  caption_style?: CaptionStyle | null;
   caption_corrections?: { correction_id: string; start_ms: number; end_ms: number; corrected_text: string; author: string; created_at_ms: number }[];
 };
 
@@ -77,6 +87,13 @@ function App() {
   const [captionsEnabled, setCaptionsEnabled] = useState(false);
   const [captionHighlightColor, setCaptionHighlightColor] = useState("&H000000FF");
   const [captionCapitalization, setCaptionCapitalization] = useState("original");
+  const [captionStyleActive, setCaptionStyleActive] = useState(false);
+  const [captionPreset, setCaptionPreset] = useState<"clean" | "bold" | "boxed">("clean");
+  const [captionSize, setCaptionSize] = useState<"small" | "medium" | "large">("medium");
+  const [captionVertPos, setCaptionVertPos] = useState<"top" | "middle" | "bottom">("bottom");
+  const [captionHorizAlign, setCaptionHorizAlign] = useState<"left" | "center" | "right">("center");
+  const [captionOutline, setCaptionOutline] = useState<"none" | "thin" | "thick">("thin");
+  const [captionShadow, setCaptionShadow] = useState<"none" | "soft" | "strong">("none");
   const [captionCorrectionText, setCaptionCorrectionText] = useState("");
   const [captionCorrectionStart, setCaptionCorrectionStart] = useState(0);
   const [captionCorrectionEnd, setCaptionCorrectionEnd] = useState(0);
@@ -99,6 +116,23 @@ function App() {
     setCaptionsEnabled(selectedVariant?.captions_enabled ?? false);
     setCaptionHighlightColor(selectedVariant?.caption_highlight_color ?? "&H000000FF");
     setCaptionCapitalization(selectedVariant?.caption_capitalization ?? "original");
+    if (selectedVariant?.caption_style) {
+      setCaptionStyleActive(true);
+      setCaptionPreset(selectedVariant.caption_style.preset);
+      setCaptionSize(selectedVariant.caption_style.size);
+      setCaptionVertPos(selectedVariant.caption_style.vertical_position);
+      setCaptionHorizAlign(selectedVariant.caption_style.horizontal_alignment);
+      setCaptionOutline(selectedVariant.caption_style.outline);
+      setCaptionShadow(selectedVariant.caption_style.shadow);
+    } else {
+      setCaptionStyleActive(false);
+      setCaptionPreset("clean");
+      setCaptionSize("medium");
+      setCaptionVertPos("bottom");
+      setCaptionHorizAlign("center");
+      setCaptionOutline("thin");
+      setCaptionShadow("none");
+    }
     if (selectedVariant?.layout_timeline[0]) {
       setCaptionCorrectionStart(selectedVariant.layout_timeline[0].start_ms);
       setCaptionCorrectionEnd(selectedVariant.layout_timeline[0].end_ms);
@@ -387,18 +421,33 @@ function App() {
     }
   }
 
-  async function updateCaptions(enabled: boolean, highlightColor: string, capitalization: string) {
+  async function updateCaptions(
+    enabled: boolean,
+    highlightColor: string,
+    capitalization: string,
+    styleActive = captionStyleActive,
+    styleOverrides?: Partial<CaptionStyle>,
+  ) {
     if (!projectDir || !selectedVariant || isBusy) return;
     setBusy(true);
     try {
-      const event = await invoke<{ variant: Variant }>("studio_project", {
+      const payload: Record<string, string | null> = {
         projectDir,
         operation: "set-captions",
         variantId: selectedVariant.variant_id,
         enabled: enabled ? "true" : "false",
         highlightColor,
         capitalization,
-      });
+      };
+      if (styleActive) {
+        payload.preset = styleOverrides?.preset ?? captionPreset;
+        payload.size = styleOverrides?.size ?? captionSize;
+        payload.verticalPosition = styleOverrides?.vertical_position ?? captionVertPos;
+        payload.horizontalAlignment = styleOverrides?.horizontal_alignment ?? captionHorizAlign;
+        payload.outline = styleOverrides?.outline ?? captionOutline;
+        payload.shadow = styleOverrides?.shadow ?? captionShadow;
+      }
+      const event = await invoke<{ variant: Variant }>("studio_project", payload);
       const updatedVariant = event.variant;
       const updatedPosition =
         updatedVariant.layout_timeline.find((p) => p.position_id === selectedPosition?.position_id) ??
@@ -592,13 +641,140 @@ function App() {
             </div>
             <div className="caption-panel">
               <span className="eyebrow">Captions</span>
-              <label><input type="checkbox" checked={captionsEnabled} onChange={(event) => { setCaptionsEnabled(event.target.checked); updateCaptions(event.target.checked, captionHighlightColor, captionCapitalization); }} disabled={!selectedVariant || isBusy} /> Activar</label>
-              <label>Highlight <input type="text" value={captionHighlightColor} onChange={(event) => setCaptionHighlightColor(event.target.value)} onBlur={() => updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization)} disabled={!captionsEnabled || isBusy} /></label>
-              <select value={captionCapitalization} onChange={(event) => { setCaptionCapitalization(event.target.value); updateCaptions(captionsEnabled, captionHighlightColor, event.target.value); }} disabled={!captionsEnabled || isBusy}>
-                <option value="original">original (Aa)</option>
-                <option value="uppercase">uppercase (AA)</option>
-                <option value="lowercase">lowercase (aa)</option>
-              </select>
+              <div className="caption-controls-row">
+                <label><input type="checkbox" checked={captionsEnabled} onChange={(event) => { setCaptionsEnabled(event.target.checked); updateCaptions(event.target.checked, captionHighlightColor, captionCapitalization); }} disabled={!selectedVariant || isBusy} /> Activar</label>
+                <label>Highlight <input type="text" value={captionHighlightColor} onChange={(event) => setCaptionHighlightColor(event.target.value)} onBlur={() => updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization)} disabled={!captionsEnabled || isBusy} /></label>
+                <select value={captionCapitalization} onChange={(event) => { setCaptionCapitalization(event.target.value); updateCaptions(captionsEnabled, captionHighlightColor, event.target.value); }} disabled={!captionsEnabled || isBusy}>
+                  <option value="original">original (Aa)</option>
+                  <option value="uppercase">uppercase (AA)</option>
+                  <option value="lowercase">lowercase (aa)</option>
+                </select>
+              </div>
+
+              <div className="caption-style-section">
+                <div className="style-toggle-row">
+                  <span className="eyebrow">Estilo visual B2.5</span>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={captionStyleActive}
+                      onChange={(e) => {
+                        const nextActive = e.target.checked;
+                        setCaptionStyleActive(nextActive);
+                        updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, nextActive);
+                      }}
+                      disabled={!captionsEnabled || isBusy}
+                    />
+                    Habilitar preset
+                  </label>
+                </div>
+
+                {captionStyleActive && (
+                  <div className="caption-style-grid">
+                    <label>
+                      Preset
+                      <select
+                        value={captionPreset}
+                        onChange={(e) => {
+                          const val = e.target.value as "clean" | "bold" | "boxed";
+                          setCaptionPreset(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { preset: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="clean">Clean (sin sombra)</option>
+                        <option value="bold">Bold (alto contraste)</option>
+                        <option value="boxed">Boxed (caja oscura)</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Tamaño
+                      <select
+                        value={captionSize}
+                        onChange={(e) => {
+                          const val = e.target.value as "small" | "medium" | "large";
+                          setCaptionSize(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { size: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="small">Pequeño</option>
+                        <option value="medium">Medio</option>
+                        <option value="large">Grande</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Posición
+                      <select
+                        value={captionVertPos}
+                        onChange={(e) => {
+                          const val = e.target.value as "top" | "middle" | "bottom";
+                          setCaptionVertPos(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { vertical_position: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="bottom">Inferior</option>
+                        <option value="middle">Centro</option>
+                        <option value="top">Superior</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Alineación
+                      <select
+                        value={captionHorizAlign}
+                        onChange={(e) => {
+                          const val = e.target.value as "left" | "center" | "right";
+                          setCaptionHorizAlign(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { horizontal_alignment: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="center">Centrada</option>
+                        <option value="left">Izquierda</option>
+                        <option value="right">Derecha</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Contorno
+                      <select
+                        value={captionOutline}
+                        onChange={(e) => {
+                          const val = e.target.value as "none" | "thin" | "thick";
+                          setCaptionOutline(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { outline: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="none">Sin contorno</option>
+                        <option value="thin">Fino</option>
+                        <option value="thick">Grueso</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Sombra
+                      <select
+                        value={captionShadow}
+                        onChange={(e) => {
+                          const val = e.target.value as "none" | "soft" | "strong";
+                          setCaptionShadow(val);
+                          updateCaptions(captionsEnabled, captionHighlightColor, captionCapitalization, true, { shadow: val });
+                        }}
+                        disabled={isBusy}
+                      >
+                        <option value="none">Sin sombra</option>
+                        <option value="soft">Suave</option>
+                        <option value="strong">Marcada</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+              </div>
               <div className="caption-correction">
                 <span className="eyebrow">Corrección humana</span>
                 <input type="number" value={captionCorrectionStart} onChange={(e) => setCaptionCorrectionStart(Number(e.target.value))} disabled={isBusy} />
