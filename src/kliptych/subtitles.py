@@ -90,6 +90,7 @@ class SubtitleStyle(BaseModel):
     back_colour: str = Field(default="&H00000000", pattern=r"^&H[0-9A-Fa-f]{8}$")
     outline: int = Field(default=2, ge=0)
     shadow: int = Field(default=0, ge=0)
+    border_style: int = Field(default=1, ge=1, le=3)
     margin_v: int = Field(default=40, ge=0)
     alignment: int = Field(default=2, ge=1, le=9)
     capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
@@ -146,6 +147,7 @@ class SubtitleRenderer:
         style: SubtitleStyle | None = None,
         layout: SubtitleLayout | None = None,
         render: RenderConfig | None = None,
+        fonts_dir: Path | None = None,
     ) -> None:
         """Configura el estilo, el lienzo y el render.
 
@@ -153,10 +155,12 @@ class SubtitleRenderer:
             style: Estilo ASS; por defecto el legible para 9:16.
             layout: Resolución lógica del ``.ass``; por defecto 1080x1920.
             render: Binario, timeout y NVENC del quemado; por defecto los estándar.
+            fonts_dir: Directorio controlado de fuentes para libass (``fontsdir``).
         """
         self._style: SubtitleStyle = SubtitleStyle() if style is None else style
         self._layout: SubtitleLayout = SubtitleLayout() if layout is None else layout
         self._render: RenderConfig = RenderConfig() if render is None else render
+        self._fonts_dir: Path | None = fonts_dir
 
     @classmethod
     def from_caption_style(
@@ -165,6 +169,7 @@ class SubtitleRenderer:
         *,
         layout: SubtitleLayout | None = None,
         render: RenderConfig | None = None,
+        fonts_dir: Path | None = None,
     ) -> Self:
         """Construye un SubtitleRenderer a partir del CaptionStyleConfig del contrato.
 
@@ -172,6 +177,7 @@ class SubtitleRenderer:
             caption_style: Configuración estética de subtítulos del contrato.
             layout: Resolución lógica del lienzo ASS.
             render: Configuración de render ffmpeg.
+            fonts_dir: Directorio controlado de fuentes.
 
         Returns:
             La instancia de SubtitleRenderer configurada.
@@ -180,6 +186,7 @@ class SubtitleRenderer:
             style=SubtitleStyle.from_caption_style(caption_style),
             layout=layout,
             render=render,
+            fonts_dir=fonts_dir,
         )
 
     def build(self, words: Sequence[Word]) -> str:
@@ -331,6 +338,12 @@ class SubtitleRenderer:
         filter_graph = (
             f"subtitles=filename='{_relative_filter_path(subtitles, destination_resolved.parent)}'"
         )
+        if self._fonts_dir is not None:
+            if self._fonts_dir.is_symlink() or not self._fonts_dir.is_dir():
+                msg = f"directorio de fuentes inválido: {self._fonts_dir}"
+                raise SubtitleError(msg)
+            fonts_resolved = self._fonts_dir.resolve()
+            filter_graph += f":fontsdir='{_filter_path(fonts_resolved)}'"
         argv = [
             self._render.ffmpeg,
             "-hide_banner",
@@ -373,7 +386,7 @@ def _style_line(style: SubtitleStyle) -> str:
     return (
         f"Style: {_STYLE_NAME},{style.fontname},{style.fontsize},"
         f"{style.primary_colour},{style.secondary_colour},{style.outline_colour},{style.back_colour},"
-        f"0,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},"
+        f"0,0,0,0,100,100,0,0,{style.border_style},{style.outline},{style.shadow},"
         f"{style.alignment},{_MARGIN_H},{_MARGIN_H},{style.margin_v},{_ENCODING}"
     )
 
@@ -590,6 +603,9 @@ def _filter_path(path: Path) -> str:
     # Solo se usa como fallback cuando no se puede relativizar: el filtro
     # `subtitles` en Windows solo acepta rutas relativas al cwd.
     return path.as_posix().replace(":", "\\:")
+
+
+escape_filter_path = _filter_path
 
 
 def _relative_filter_path(subtitles: Path, base: Path) -> str:
