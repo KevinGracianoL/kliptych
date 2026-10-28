@@ -53,7 +53,12 @@ button:not(:disabled):active { transform: scale(0.96); }
 .dir-picker-row { display: flex; gap: 8px; }
 .dir-picker-row input { flex: 1; }
 
-.analysis-progress-card { background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 16px; }
-.progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.analysis-progress-card { background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.progress-header { display: flex; align-items: center; gap: 10px; }
 .stage-badge { background: rgba(94, 234, 212, 0.12); color: #5eead4; border: 1px solid rgba(94, 234, 212, 0.35); padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 .progress-desc { color: #a9b2c3; font-size: 13px; margin: 0; }
+.cancel-btn { align-self: flex-start; margin-top: 4px; }
+
+.analysis-error-card { background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.error-eyebrow { color: #f87171 !important; font-size: 10px; }
+.error-text { color: #fca5a5; font-size: 12px; margin: 0; line-height: 1.4; word-break: break-word; }

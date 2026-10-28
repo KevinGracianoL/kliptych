@@ -1030,6 +1030,12 @@ def open_project_store(project_dir: Path) -> ProjectStore:
             existing_analysis=None,
             owns_empty_project_dir=True,
         )
+    if project_dir.is_dir() and not any(project_dir.iterdir()):
+        return ProjectStore(
+            project_dir=project_dir,
+            existing_analysis=None,
+            owns_empty_project_dir=True,
+        )
     analysis = _load_active_analysis(project_dir)
     return ProjectStore(
         project_dir=project_dir,

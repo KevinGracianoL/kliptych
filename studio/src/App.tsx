@@ -131,6 +131,7 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisStage, setAnalysisStage] = useState<string>("idle");
   const [analysisMessage, setAnalysisMessage] = useState("");
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   useEffect(() => {
     setLocalBands(selectedPosition?.layout_spec.bands.map((band) => band.source_rect) ?? []);
@@ -192,12 +193,25 @@ function App() {
     setNewProjectDir(selected);
   }
 
+  async function cancelAnalysis() {
+    try {
+      await invoke("cancel_analysis");
+      setAnalysisMessage("Cancelando análisis...");
+    } catch (err) {
+      setMessage(`Error al cancelar: ${String(err)}`);
+    }
+  }
+
   async function startAnalysis() {
     if (!newUrl.trim() || !newProjectDir || isAnalyzing || isBusy) return;
     setIsAnalyzing(true);
+    setAnalysisError(null);
     setAnalysisStage("downloading");
     setAnalysisMessage("Descargando video fuente...");
     setMessage("Iniciando análisis local...");
+
+    const sanitizedName = newProjectName.trim().replace(/[^\w\-. ]/g, "_").trim();
+    const effectiveDir = sanitizedName ? `${newProjectDir}/${sanitizedName}` : newProjectDir;
 
     const channel = new Channel<AnalysisStreamEvent>();
     channel.onmessage = (event) => {
@@ -220,19 +234,19 @@ function App() {
       await invoke<AnalysisStreamEvent>("analyze_url", {
         onEvent: channel,
         url: newUrl.trim(),
-        projectDir: newProjectDir,
+        projectDir: effectiveDir,
         projectName: newProjectName.trim() || "Proyecto Kliptych",
       });
 
       const inspectEvent = await invoke<ProjectEvent>("studio_project", {
-        projectDir: newProjectDir,
+        projectDir: effectiveDir,
         operation: "inspect",
       });
-      setProjectDir(newProjectDir);
+      setProjectDir(effectiveDir);
       setProject(inspectEvent);
 
       if (inspectEvent.editable_state === "missing") {
-        await invoke("studio_project", { projectDir: newProjectDir, operation: "initialize" });
+        await invoke("studio_project", { projectDir: effectiveDir, operation: "initialize" });
         setProject({ ...inspectEvent, editable_state: "ready" });
       }
 
@@ -244,8 +258,9 @@ function App() {
       setLastExport(null);
       setMessage(`Proyecto analizado: ${inspectEvent.candidates.length} candidatos listos.`);
     } catch (error) {
-      setMessage(`Error en análisis: ${String(error)}`);
-      setAnalysisMessage(`Error: ${String(error)}`);
+      const errStr = String(error);
+      setAnalysisError(errStr);
+      setMessage(`Error en análisis: ${errStr}`);
     } finally {
       setIsAnalyzing(false);
     }
@@ -782,9 +797,16 @@ function App() {
                 <div className="analysis-progress-card" aria-live="polite">
                   <div className="progress-header">
                     <span className="export-spinner" aria-hidden="true" />
-                    <span className="gate-badge">{analysisStage}</span>
+                    <span className="stage-badge">{analysisStage}</span>
                   </div>
                   <p className="progress-desc">{analysisMessage}</p>
+                  <button
+                    type="button"
+                    className="ghost cancel-btn"
+                    onClick={cancelAnalysis}
+                  >
+                    Cancelar
+                  </button>
                 </div>
               ) : (
                 <button
@@ -794,6 +816,20 @@ function App() {
                 >
                   Comenzar análisis local
                 </button>
+              )}
+
+              {analysisError && (
+                <div className="analysis-error-card" role="alert">
+                  <span className="eyebrow error-eyebrow">ERROR EN ANÁLISIS</span>
+                  <p className="error-text">{analysisError}</p>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setAnalysisError(null)}
+                  >
+                    Descartar
+                  </button>
+                </div>
               )}
             </form>
           ) : (

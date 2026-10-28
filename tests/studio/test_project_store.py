@@ -1349,3 +1349,11 @@ def test_store_set_captions_atomic_style_update_and_write_failure(
         )
 
     assert (project_dir / "project.json").read_text() == before
+
+
+def test_open_project_store_accepts_existing_empty_directory(tmp_path: Path) -> None:
+    empty_dir = tmp_path / "empty_dir"
+    empty_dir.mkdir()
+    store = open_project_store(empty_dir)
+    assert store.existing_analysis is None
+    assert store.owns_empty_project_dir is True
