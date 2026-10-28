@@ -16,6 +16,7 @@ from kliptych.__main__ import main
 from kliptych.contract import Band, Layout, LayoutSpec
 from kliptych.environment import EnvironmentReport
 from kliptych.studio.analyzer import AnalysisCancelled, AnalysisEngineError, AnalysisRequest
+from kliptych.studio.final_render import FinalRenderError
 from kliptych.studio.models import (
     ANALYSIS_SCHEMA_VERSION,
     AnalysisDocument,
@@ -1123,6 +1124,110 @@ def test_main_studio_preview_motion_reports_generation_failure(
     assert event["type"] == "error"
     assert event["error_code"] == "studio_command_invalid"
     assert event["message"] == "boom"
+
+
+def test_main_studio_render_final_emits_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def open_store(_path: Path) -> object:
+        return SimpleNamespace()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    variant_id = "11111111-1111-1111-1111-111111111111"
+    project_dir = tmp_path
+    output_path = project_dir / "delivery" / "Variante 1.mp4"
+
+    def fake_render_final(
+        request: object, *, probe: object, runner: object, nvenc_available: bool = False
+    ) -> object:
+        _ = probe
+        _ = runner
+        _ = nvenc_available
+        assert getattr(request, "project_dir", None) == project_dir
+        assert getattr(request, "variant_id", None) == UUID(variant_id)
+        assert getattr(request, "destination", None) is None
+        return SimpleNamespace(
+            output_path=output_path,
+            variant_id=UUID(variant_id),
+            duration_ms=20000,
+            width=1080,
+            height=1920,
+            gate_verdict="pass",
+            encoder_used="libx264",
+        )
+
+    monkeypatch.setattr("kliptych.__main__.render_final_variant", fake_render_final)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "render-final",
+                "--project-dir",
+                str(project_dir),
+                "--variant-id",
+                variant_id,
+            ]
+        )
+        == 0
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "render_completed"
+    assert event["variant_id"] == variant_id
+    assert event["output_path"] == "delivery/Variante 1.mp4"
+    assert event["duration_ms"] == 20000
+    assert event["width"] == 1080
+    assert event["height"] == 1920
+    assert event["gate_verdict"] == "pass"
+    assert event["encoder_used"] == "libx264"
+
+
+def test_main_studio_render_final_reports_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _disable_logging_setup(monkeypatch)
+
+    def open_store(_path: Path) -> object:
+        return SimpleNamespace()
+
+    monkeypatch.setattr("kliptych.__main__.open_project_store", open_store)
+
+    def fake_render_final(
+        request: object, *, probe: object, runner: object, nvenc_available: bool = False
+    ) -> object:
+        _ = request
+        _ = probe
+        _ = runner
+        _ = nvenc_available
+        msg = "Gate check failed: aspect mismatch"
+        raise FinalRenderError(msg, error_code="gate_rejected")
+
+    monkeypatch.setattr("kliptych.__main__.render_final_variant", fake_render_final)
+
+    assert (
+        main(
+            [
+                "--quiet",
+                "studio",
+                "render-final",
+                "--project-dir",
+                str(tmp_path),
+                "--variant-id",
+                "11111111-1111-1111-1111-111111111111",
+            ]
+        )
+        == 1
+    )
+
+    event = _parse(capsys.readouterr().out)
+    assert event["type"] == "error"
+    assert event["error_code"] == "gate_rejected"
+    assert event["message"] == "Gate check failed: aspect mismatch"
 
 
 def test_main_studio_set_captions_full_style_emits_variant(

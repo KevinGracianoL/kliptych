@@ -294,8 +294,8 @@ def _read_transcript(project_dir: Path) -> Transcript:
 def _words_in_range(transcript: Transcript, start_ms: int, end_ms: int) -> list[Word]:
     out: list[Word] = []
     for w in transcript.words:
-        ws = int(w.start_s * 1000)
-        we = int(w.end_s * 1000)
+        ws = round(w.start_s * 1000)
+        we = round(w.end_s * 1000)
         if we <= start_ms or ws >= end_ms:
             continue
         clipped_start_ms = max(ws, start_ms)
@@ -326,8 +326,8 @@ def _apply_caption_corrections(
     result: list[Word] = []
     for w in words:
         skip = False
-        ws = int(w.start_s * 1000)
-        we = int(w.end_s * 1000)
+        ws = round(w.start_s * 1000)
+        we = round(w.end_s * 1000)
         for c in corrections:
             c_start_rel = c.start_ms - start_ms
             c_end_rel = c.end_ms - start_ms

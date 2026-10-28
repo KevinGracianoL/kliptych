@@ -23,3 +23,19 @@ button { border:0; cursor:pointer; border-radius:9px; transition: background .18
 .caption-style-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #8e99ac; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
 .caption-style-grid select { background: #171b24; color: #f5f7fb; border: 1px solid #29303c; border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none; }
 .caption-style-grid select:focus-visible { border-color: #5eead4; }
+
+.toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button:not(:disabled):active { transform: scale(0.96); }
+@media (prefers-reduced-motion: reduce) { button:not(:disabled):active { transform: none; } }
+
+.export-btn { font-weight: 750; }
+.export-panel { margin-top: 18px; background: #12161f; border: 1px solid #29303c; border-radius: 14px; padding: 14px; }
+.gate-badge { background: rgba(94, 234, 212, 0.12); color: #5eead4; border: 1px solid rgba(94, 234, 212, 0.35); padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.delivery-card { background: #0c0f15; border: 1px solid #202634; border-radius: 8px; padding: 12px; margin-top: 8px; }
+.delivery-path { color: #5eead4; font-size: 12px; word-break: break-all; margin: 0 0 6px; }
+.delivery-metrics { display: flex; gap: 16px; color: #8e99ac; font-size: 11px; }
+.tabular-nums { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+.export-loading-state { display: flex; align-items: center; gap: 10px; color: #a9b2c3; font-size: 13px; padding: 8px 0; }
+.export-spinner { width: 14px; height: 14px; border: 2px solid rgba(94, 234, 212, 0.2); border-top-color: #5eead4; border-radius: 50%; animation: studio-spin 0.8s linear infinite; display: inline-block; }
+@keyframes studio-spin { to { transform: rotate(360deg); } }
