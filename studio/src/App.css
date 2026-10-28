@@ -15,3 +15,11 @@ button { border:0; cursor:pointer; border-radius:9px; transition: background .18
 
 .crop-box { touch-action: none; }
 .resize-handle { position:absolute; right:-7px; bottom:-7px; width:14px; height:14px; padding:0; border:2px solid #071412; border-radius:50%; background:#5eead4; cursor:nwse-resize; }
+
+.caption-controls-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.caption-style-section { margin-top: 14px; padding: 12px; background: #0c0f15; border: 1px solid #202634; border-radius: 8px; }
+.style-toggle-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.caption-style-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 8px; }
+.caption-style-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #8e99ac; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; }
+.caption-style-grid select { background: #171b24; color: #f5f7fb; border: 1px solid #29303c; border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none; }
+.caption-style-grid select:focus-visible { border-color: #5eead4; }

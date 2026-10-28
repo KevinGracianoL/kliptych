@@ -18,7 +18,19 @@ from kliptych.studio.models import (
     AnalysisSource,
 )
 from kliptych.studio.preview import PreviewError
-from kliptych.studio.project_models import LayoutPosition, ProjectDocument, ProjectStatus, Variant
+from kliptych.studio.project_models import (
+    CaptionHorizontalAlignment,
+    CaptionOutline,
+    CaptionShadow,
+    CaptionStyle,
+    CaptionStylePreset,
+    CaptionStyleSize,
+    CaptionVerticalPosition,
+    LayoutPosition,
+    ProjectDocument,
+    ProjectStatus,
+    Variant,
+)
 from kliptych.studio.project_store import ProjectStore, open_project_store
 
 _SOURCE_SHA = sha256_bytes(b"source")
@@ -1080,3 +1092,64 @@ def test_motion_preview_duration_clamped(tmp_path: Path) -> None:
     assert result.preview_path.is_file()
     clamped_ms = max(500, min(10000, 100))
     assert runner.duration == str(clamped_ms / 1000.0)
+
+
+def test_motion_preview_b25_caption_style_emits_noto_sans_and_fontsdir(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup(tmp_path)
+    _ = store.set_captions(
+        variant_id=variant.variant_id,
+        enabled=True,
+        highlight_color="&H00FF0000",
+        capitalization=None,
+    )
+    style = CaptionStyle(
+        preset=CaptionStylePreset.BOXED,
+        size=CaptionStyleSize.LARGE,
+        vertical_position=CaptionVerticalPosition.TOP,
+        horizontal_alignment=CaptionHorizontalAlignment.CENTER,
+        outline=CaptionOutline.THICK,
+        shadow=CaptionShadow.NONE,
+    )
+    _ = store.set_caption_style(variant_id=variant.variant_id, caption_style=style)
+
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    variant = refreshed.variants[0]
+    position = variant.layout_timeline[0]
+    probe = _Probe(60.0)
+    runner = _CapturingRunner()
+
+    result = _generate(project_dir, variant, position, probe, runner, at_ms=14000)
+    assert result.preview_path.is_file()
+    assert runner.ass_text is not None
+    assert "Style: Default,Noto Sans,70," in runner.ass_text
+    assert ",3,4,0," in runner.ass_text  # BorderStyle=3, Outline=4, Shadow=0
+    joined_argv = " ".join(runner.argv)
+    assert ":fontsdir=" in joined_argv
+
+
+def test_motion_preview_caption_style_changes_fingerprint(tmp_path: Path) -> None:
+    project_dir, store, variant, position = _setup(tmp_path)
+    probe = _Probe(60.0)
+    runner1 = _Runner()
+    res1 = _generate(project_dir, variant, position, probe, runner1, at_ms=14000)
+
+    style = CaptionStyle(
+        preset=CaptionStylePreset.BOLD,
+        size=CaptionStyleSize.MEDIUM,
+        vertical_position=CaptionVerticalPosition.BOTTOM,
+        horizontal_alignment=CaptionHorizontalAlignment.CENTER,
+        outline=CaptionOutline.THIN,
+        shadow=CaptionShadow.NONE,
+    )
+    _ = store.set_caption_style(variant_id=variant.variant_id, caption_style=style)
+    refreshed = open_project_store(project_dir).read_project()
+    assert refreshed is not None
+    v2 = refreshed.variants[0]
+    p2 = v2.layout_timeline[0]
+
+    runner2 = _Runner()
+    res2 = _generate(project_dir, v2, p2, probe, runner2, at_ms=14000)
+
+    assert res1.fingerprint != res2.fingerprint
+    assert res1.preview_path != res2.preview_path

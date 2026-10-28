@@ -362,3 +362,58 @@ def test_subtitle_style_secondary_colour_and_capitalization() -> None:
     # _style_line usa style.secondary_colour en vez de constante fija
     line = _style_line(style)
     assert "&H0000FF00" in line
+
+
+def test_subtitle_style_border_style_serialization() -> None:
+    style = SubtitleStyle(border_style=3, outline=4, shadow=0)
+    assert style.border_style == 3
+    line = _style_line(style)
+    assert ",3,4,0," in line
+
+
+def test_subtitle_style_rejects_invalid_border_style() -> None:
+    with pytest.raises(ValidationError):
+        _ = SubtitleStyle(border_style=0)
+    with pytest.raises(ValidationError):
+        _ = SubtitleStyle(border_style=4)
+
+
+def test_subtitle_renderer_build_argv_includes_fonts_dir(tmp_path: Path) -> None:
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    renderer = SubtitleRenderer(fonts_dir=fonts_dir)
+    argv = renderer.render_arguments(
+        video=tmp_path / "in.mp4",
+        subtitles=tmp_path / "subs.ass",
+        destination=tmp_path / "out.mp4",
+        mute_audio=False,
+    )
+    filter_arg = argv[argv.index("-vf") + 1]
+    assert ":fontsdir=" in filter_arg
+
+
+def test_subtitle_renderer_build_argv_rejects_invalid_fonts_dir(tmp_path: Path) -> None:
+    non_existent = tmp_path / "non_existent_fonts"
+    renderer = SubtitleRenderer(fonts_dir=non_existent)
+    with pytest.raises(SubtitleError, match="directorio de fuentes"):
+        _ = renderer.render_arguments(
+            video=tmp_path / "in.mp4",
+            subtitles=tmp_path / "subs.ass",
+            destination=tmp_path / "out.mp4",
+            mute_audio=False,
+        )
+
+
+def test_subtitle_renderer_build_argv_rejects_symlink_fonts_dir(tmp_path: Path) -> None:
+    real_dir = tmp_path / "real_fonts"
+    real_dir.mkdir()
+    sym_dir = tmp_path / "sym_fonts"
+    sym_dir.symlink_to(real_dir)
+    renderer = SubtitleRenderer(fonts_dir=sym_dir)
+    with pytest.raises(SubtitleError, match="directorio de fuentes"):
+        _ = renderer.render_arguments(
+            video=tmp_path / "in.mp4",
+            subtitles=tmp_path / "subs.ass",
+            destination=tmp_path / "out.mp4",
+            mute_audio=False,
+        )

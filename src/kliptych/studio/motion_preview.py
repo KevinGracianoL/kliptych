@@ -11,9 +11,11 @@ from typing import Protocol
 
 from kliptych.contract import CaptionStyleConfig
 from kliptych.contract.enums import CaptionCapitalization
+from kliptych.fonts import FontError, packaged_fonts_dir
 from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.layout_geometry import build_layout_filter_chains
+from kliptych.studio.caption_styles import resolve_studio_caption_style
 from kliptych.studio.models import AnalysisDocument
 from kliptych.studio.preview import PreviewError  # type: ignore[attr-defined]
 from kliptych.studio.project_models import (
@@ -23,7 +25,12 @@ from kliptych.studio.project_models import (
     VariantCaptionCorrection,
 )
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
-from kliptych.subtitles import SubtitleError, SubtitleRenderer, SubtitleStyle
+from kliptych.subtitles import (
+    SubtitleError,
+    SubtitleRenderer,
+    SubtitleStyle,
+    escape_filter_path,
+)
 from kliptych.transcribe import Transcript, Word
 
 _MOTION_PREVIEW_IMPLEMENTATION_VERSION = "1"
@@ -249,6 +256,11 @@ def _motion_fingerprint(  # ruff: ignore[too-many-arguments,too-many-positional-
             "captions_enabled": variant.captions_enabled,
             "caption_highlight_color": variant.caption_highlight_color,
             "caption_capitalization": variant.caption_capitalization.value,
+            "caption_style": (
+                variant.caption_style.model_dump(mode="json")
+                if variant.caption_style is not None
+                else None
+            ),
             "caption_corrections": [c.model_dump(mode="json") for c in variant.caption_corrections],
             "canvas_width": _MOTION_CANVAS_WIDTH,
             "canvas_height": _MOTION_CANVAS_HEIGHT,
@@ -342,6 +354,38 @@ def _apply_caption_corrections(
     return result
 
 
+def _resolve_caption_style_and_fonts(
+    variant: Variant,
+) -> tuple[SubtitleStyle, Path | None]:
+    if variant.caption_style is not None:
+        style = resolve_studio_caption_style(
+            variant.caption_style,
+            highlight_color=variant.caption_highlight_color,
+            capitalization=variant.caption_capitalization,
+        )
+        return style, packaged_fonts_dir()
+    style = SubtitleStyle.from_caption_style(
+        CaptionStyleConfig(
+            capitalization=CaptionCapitalization(variant.caption_capitalization.value),
+            highlight_color=variant.caption_highlight_color,
+        )
+    )
+    return style, None
+
+
+def _build_ass_text(variant: Variant, words: list[Word]) -> tuple[str, Path | None] | None:
+    """Build ASS text and return optional fonts_dir, or None on failure.
+
+    Returns:
+        Tuple of ASS string and optional fonts directory, or None.
+    """
+    try:
+        style, fonts_dir = _resolve_caption_style_and_fonts(variant)
+        return SubtitleRenderer(style=style).build(words), fonts_dir
+    except (ValueError, SubtitleError, FontError):
+        return None
+
+
 def _try_render_ass(  # ruff: ignore[too-many-arguments]
     *,
     project_dir: Path,
@@ -363,18 +407,11 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
     )
     if not words:
         return None, final_label
-    try:
-        style = SubtitleStyle.from_caption_style(
-            CaptionStyleConfig(
-                capitalization=CaptionCapitalization(variant.caption_capitalization.value),
-                highlight_color=variant.caption_highlight_color,
-            )
-        )
-        renderer = SubtitleRenderer(style=style)
-        ass_content = renderer.build(words)
-    except (OSError, ValueError, SubtitleError) as error:
-        _ = error
+    built = _build_ass_text(variant, words)
+    if built is None:
         return None, "[outv]"
+    ass_content, fonts_dir = built
+
     output_dir = destination.parent.resolve()
     ass_path: Path | None = None
     try:
@@ -391,9 +428,10 @@ def _try_render_ass(  # ruff: ignore[too-many-arguments]
         with contextlib.suppress(OSError):
             ass_path.unlink()
         return None, "[outv]"
-    filter_parts.append(
-        f"[outv]subtitles=filename='{ass_path.relative_to(output_dir).as_posix()}'[outv_sub]"
-    )
+    subtitles_opts = f"filename='{ass_path.relative_to(output_dir).as_posix()}'"
+    if fonts_dir is not None:
+        subtitles_opts += f":fontsdir='{escape_filter_path(fonts_dir)}'"
+    filter_parts.append(f"[outv]subtitles={subtitles_opts}[outv_sub]")
     return ass_path, "[outv_sub]"
 
 

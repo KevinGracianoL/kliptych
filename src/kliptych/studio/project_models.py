@@ -22,6 +22,95 @@ class ProjectStatus(StrEnum):
     REQUIRES_REVIEW = "requires_review"
 
 
+def _caption_style_absent(value: "CaptionStyle | None") -> bool:
+    """Report whether a caption style is absent for serialization exclusion.
+
+    Returns:
+        ``True`` when the style is ``None``.
+    """
+    return value is None
+
+
+class CaptionStylePreset(StrEnum):
+    """Closed B2.5 caption preset choices."""
+
+    CLEAN = "clean"
+    BOLD = "bold"
+    BOXED = "boxed"
+
+
+class CaptionStyleSize(StrEnum):
+    """Closed B2.5 caption size choices."""
+
+    SMALL = "small"
+    MEDIUM = "medium"
+    LARGE = "large"
+
+
+class CaptionVerticalPosition(StrEnum):
+    """Closed B2.5 vertical caption position choices."""
+
+    TOP = "top"
+    MIDDLE = "middle"
+    BOTTOM = "bottom"
+
+
+class CaptionHorizontalAlignment(StrEnum):
+    """Closed B2.5 horizontal caption alignment choices."""
+
+    LEFT = "left"
+    CENTER = "center"
+    RIGHT = "right"
+
+
+class CaptionOutline(StrEnum):
+    """Closed B2.5 caption outline choices."""
+
+    NONE = "none"
+    THIN = "thin"
+    THICK = "thick"
+
+
+class CaptionShadow(StrEnum):
+    """Closed B2.5 caption shadow choices."""
+
+    NONE = "none"
+    SOFT = "soft"
+    STRONG = "strong"
+
+
+class CaptionStyle(BaseModel):
+    """Complete, validated B2.5 caption style.
+
+    All six fields are always present; partial styles are not representable.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+    preset: CaptionStylePreset
+    size: CaptionStyleSize
+    vertical_position: CaptionVerticalPosition
+    horizontal_alignment: CaptionHorizontalAlignment
+    outline: CaptionOutline
+    shadow: CaptionShadow
+
+    @classmethod
+    def default(cls) -> "CaptionStyle":
+        """Return the documented stable default caption style."""
+        return DEFAULT_CAPTION_STYLE
+
+
+DEFAULT_CAPTION_STYLE = CaptionStyle(
+    preset=CaptionStylePreset.CLEAN,
+    size=CaptionStyleSize.MEDIUM,
+    vertical_position=CaptionVerticalPosition.BOTTOM,
+    horizontal_alignment=CaptionHorizontalAlignment.CENTER,
+    outline=CaptionOutline.THIN,
+    shadow=CaptionShadow.NONE,
+)
+CAPTION_STYLE_DEFAULT = DEFAULT_CAPTION_STYLE
+
+
 class VariantOrigin(BaseModel):
     """Immutable B1 evidence binding carried by a human-created variant."""
 
@@ -132,6 +221,7 @@ class Variant(BaseModel):
     captions_enabled: bool = False
     caption_highlight_color: str = "&H000000FF"
     caption_capitalization: CaptionCapitalization = CaptionCapitalization.ORIGINAL
+    caption_style: CaptionStyle | None = Field(default=None, exclude_if=_caption_style_absent)
     caption_corrections: tuple[VariantCaptionCorrection, ...] = ()
     layout_timeline: tuple[LayoutPosition, ...]
 
@@ -320,6 +410,7 @@ def duplicate_variant(variant: Variant, *, name: str) -> Variant:
         captions_enabled=variant.captions_enabled,
         caption_highlight_color=variant.caption_highlight_color,
         caption_capitalization=variant.caption_capitalization,
+        caption_style=variant.caption_style,
         caption_corrections=variant.caption_corrections,
         layout_timeline=positions,
     )

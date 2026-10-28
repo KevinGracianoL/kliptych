@@ -14,7 +14,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, override
 
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -26,6 +26,7 @@ from kliptych.hashing import sha256_file
 from kliptych.studio.models import AnalysisDocument
 from kliptych.studio.project_models import (
     AbsorbNeighbor,
+    CaptionStyle,
     ProjectDocument,
     ProjectStatus,
     VariantCaptionCorrection,
@@ -60,6 +61,17 @@ _EDITABLE_STATE_NAMES = ("project.json", "assets", "previews")
 _MIN_CROP_SIZE = 0.05
 
 
+class _CaptionStyleUnset:
+    """Private sentinel for an omitted caption style update."""
+
+    @override
+    def __repr__(self) -> str:
+        return "<caption-style-unset>"
+
+
+_CAPTION_STYLE_UNSET = _CaptionStyleUnset()
+
+
 class ProjectStoreError(Exception):
     """A project directory cannot safely host a Studio analysis."""
 
@@ -68,6 +80,31 @@ class ProjectStoreError(Exception):
         super().__init__(f"{code}: {message}")
         self.code: str = code
         self.message: str = message
+
+
+def _validate_caption_style_boundary(
+    value: CaptionStyle | _CaptionStyleUnset | object | None,
+) -> CaptionStyle | _CaptionStyleUnset | None:
+    """Normalize a caption style boundary value into a validated style.
+
+    Returns:
+        The validated style, ``None`` for an explicit clear, or the unset
+        sentinel when the caller omitted the field.
+
+    Raises:
+        ProjectStoreError: If the supplied style is invalid.
+    """
+    if value is _CAPTION_STYLE_UNSET:
+        return _CAPTION_STYLE_UNSET
+    if value is None:
+        return None
+    if isinstance(value, CaptionStyle):
+        return value
+    try:
+        return CaptionStyle.model_validate(value)
+    except (TypeError, ValueError) as error:
+        msg = str(error)
+        raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +552,7 @@ class ProjectStore:
         enabled: bool | None = None,
         highlight_color: str | None = None,
         capitalization: CaptionCapitalization | None = None,
+        caption_style: CaptionStyle | _CaptionStyleUnset | None = _CAPTION_STYLE_UNSET,
     ) -> ProjectDocument:
         """Update caption controls for one variant.
 
@@ -537,6 +575,7 @@ class ProjectStore:
             msg = "Variant is not part of the editable project."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         variant = project.variants[variant_index]
+        validated_style = _validate_caption_style_boundary(caption_style)
         update: dict[str, object] = {}
         if enabled is not None:
             update["captions_enabled"] = enabled
@@ -544,12 +583,43 @@ class ProjectStore:
             update["caption_highlight_color"] = highlight_color
         if capitalization is not None:
             update["caption_capitalization"] = capitalization
+        if validated_style is not _CAPTION_STYLE_UNSET:
+            update["caption_style"] = validated_style
         updated_variant = variant.model_copy(update=update)
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
         self.write_project(updated)
         return updated
+
+    def set_caption_style(
+        self, *, variant_id: uuid.UUID, caption_style: CaptionStyle | dict[str, object]
+    ) -> ProjectDocument:
+        """Persist one complete B2.5 caption style for a variant.
+
+        Returns:
+            The project document containing the updated variant.
+
+        Raises:
+            ProjectStoreError: If the variant is absent or the style invalid.
+        """
+        if isinstance(caption_style, CaptionStyle):
+            validated = caption_style
+        else:
+            try:
+                validated = CaptionStyle.model_validate(caption_style)
+            except (TypeError, ValueError) as error:
+                msg = str(error)
+                raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        return self.set_captions(variant_id=variant_id, caption_style=validated)
+
+    def clear_caption_style(self, *, variant_id: uuid.UUID) -> ProjectDocument:
+        """Remove a persisted B2.5 caption style from a variant.
+
+        Returns:
+            The project document containing the updated variant.
+        """
+        return self.set_captions(variant_id=variant_id, caption_style=None)
 
     def set_caption_correction(
         self,

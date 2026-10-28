@@ -68,8 +68,21 @@ from kliptych.studio.motion_preview import (
     generate_motion_preview,
 )
 from kliptych.studio.preview import PreviewError, PreviewRequest, generate_preview
-from kliptych.studio.project_models import AbsorbNeighbor, ProjectDocument
-from kliptych.studio.project_store import ProjectStoreError, open_project_store
+from kliptych.studio.project_models import (
+    AbsorbNeighbor,
+    CaptionHorizontalAlignment,
+    CaptionOutline,
+    CaptionShadow,
+    CaptionStyle,
+    CaptionStylePreset,
+    CaptionStyleSize,
+    CaptionVerticalPosition,
+    ProjectDocument,
+)
+from kliptych.studio.project_store import (
+    ProjectStoreError,
+    open_project_store,
+)
 from kliptych.transcribe import FasterWhisperTranscriber
 
 logger = logging.getLogger("kliptych.cli")
@@ -167,8 +180,19 @@ class _StudioStore(Protocol):
         enabled: bool | None = None,
         highlight_color: str | None = None,
         capitalization: CaptionCapitalization | None = None,
+        caption_style: CaptionStyle | None = None,
     ) -> ProjectDocument:
         """Update caption controls for one variant."""
+        ...
+
+    def set_caption_style(
+        self, *, variant_id: uuid.UUID, caption_style: CaptionStyle
+    ) -> ProjectDocument:
+        """Persist one complete B2.5 caption style."""
+        ...
+
+    def clear_caption_style(self, *, variant_id: uuid.UUID) -> ProjectDocument:
+        """Remove one persisted B2.5 caption style."""
         ...
 
     def set_caption_correction(
@@ -805,6 +829,31 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
     _ = studio_set_cap.add_argument(
         "--capitalization", choices=["original", "uppercase", "lowercase"], help="capitalizacion"
     )
+    _ = studio_set_cap.add_argument(
+        "--preset", choices=["clean", "bold", "boxed"], help="preset de estilo de captions"
+    )
+    _ = studio_set_cap.add_argument(
+        "--size", choices=["small", "medium", "large"], help="tamano de captions"
+    )
+    _ = studio_set_cap.add_argument(
+        "--vertical-position",
+        choices=["top", "middle", "bottom"],
+        help="posicion vertical de captions",
+    )
+    _ = studio_set_cap.add_argument(
+        "--horizontal-alignment",
+        choices=["left", "center", "right"],
+        help="alineacion horizontal de captions",
+    )
+    _ = studio_set_cap.add_argument(
+        "--outline", choices=["none", "thin", "thick"], help="contorno de captions"
+    )
+    _ = studio_set_cap.add_argument(
+        "--shadow", choices=["none", "soft", "strong"], help="sombra de captions"
+    )
+    _ = studio_set_cap.add_argument(
+        "--clear-caption-style", action="store_true", help="elimina el estilo B2.5"
+    )
     studio_set_corr = studio_subcommands.add_parser(
         "set-caption-correction", help="registra una correccion humana de caption"
     )
@@ -1043,6 +1092,13 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             enabled=cast("str | None", getattr(args, "enabled", None)),
             highlight_color=cast("str | None", getattr(args, "highlight_color", None)),
             capitalization=cast("str | None", getattr(args, "capitalization", None)),
+            preset=cast("str | None", getattr(args, "preset", None)),
+            size=cast("str | None", getattr(args, "size", None)),
+            vertical_position=cast("str | None", getattr(args, "vertical_position", None)),
+            horizontal_alignment=cast("str | None", getattr(args, "horizontal_alignment", None)),
+            outline=cast("str | None", getattr(args, "outline", None)),
+            shadow=cast("str | None", getattr(args, "shadow", None)),
+            clear_caption_style=bool(getattr(args, "clear_caption_style", False)),
         ),
         "set-caption-correction": lambda: _studio_set_caption_correction_event(
             store,
@@ -1248,6 +1304,40 @@ def _studio_set_watermark_event(
     return {"type": "watermark_updated", "variant": variant.model_dump(mode="json")}
 
 
+def _dispatch_set_captions(
+    store: _StudioStore,
+    *,
+    variant_id: uuid.UUID,
+    enabled_value: bool | None,
+    highlight_color: str | None,
+    capitalization_value: CaptionCapitalization | None,
+    clear_caption_style: bool,
+    style: CaptionStyle | None,
+) -> ProjectDocument:
+    if clear_caption_style:
+        return store.set_captions(
+            variant_id=variant_id,
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+            caption_style=None,
+        )
+    if style is not None:
+        return store.set_captions(
+            variant_id=variant_id,
+            enabled=enabled_value,
+            highlight_color=highlight_color,
+            capitalization=capitalization_value,
+            caption_style=style,
+        )
+    return store.set_captions(
+        variant_id=variant_id,
+        enabled=enabled_value,
+        highlight_color=highlight_color,
+        capitalization=capitalization_value,
+    )
+
+
 def _studio_set_captions_event(
     store: _StudioStore,
     *,
@@ -1255,17 +1345,58 @@ def _studio_set_captions_event(
     enabled: str | None,
     highlight_color: str | None,
     capitalization: str | None,
+    preset: str | None = None,
+    size: str | None = None,
+    vertical_position: str | None = None,
+    horizontal_alignment: str | None = None,
+    outline: str | None = None,
+    shadow: str | None = None,
+    clear_caption_style: bool = False,
 ) -> dict[str, object]:
+    style_values = {
+        "preset": preset,
+        "size": size,
+        "vertical_position": vertical_position,
+        "horizontal_alignment": horizontal_alignment,
+        "outline": outline,
+        "shadow": shadow,
+    }
+    provided = [value is not None for value in style_values.values()]
+    if any(provided) and not all(provided):
+        missing = [name for name, value in style_values.items() if value is None]
+        msg = "Caption style requires all six fields; missing: " + ", ".join(missing)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
     try:
         enabled_value = None if enabled is None else enabled == "true"
         capitalization_value = (
             None if capitalization is None else CaptionCapitalization(capitalization)
         )
-        project = store.set_captions(
+    except ValueError as error:
+        msg = str(error)
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    style: CaptionStyle | None = None
+    if all(provided):
+        try:
+            style = CaptionStyle(
+                preset=CaptionStylePreset(cast("str", preset)),
+                size=CaptionStyleSize(cast("str", size)),
+                vertical_position=CaptionVerticalPosition(cast("str", vertical_position)),
+                horizontal_alignment=CaptionHorizontalAlignment(cast("str", horizontal_alignment)),
+                outline=CaptionOutline(cast("str", outline)),
+                shadow=CaptionShadow(cast("str", shadow)),
+            )
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    try:
+        project = _dispatch_set_captions(
+            store,
             variant_id=uuid.UUID(variant_id),
-            enabled=enabled_value,
+            enabled_value=enabled_value,
             highlight_color=highlight_color,
-            capitalization=capitalization_value,
+            capitalization_value=capitalization_value,
+            clear_caption_style=clear_caption_style,
+            style=style,
         )
     except (ProjectStoreError, ValueError) as error:
         if isinstance(error, ProjectStoreError):

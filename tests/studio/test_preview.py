@@ -25,6 +25,13 @@ from kliptych.studio.preview import (
     generate_preview,
 )
 from kliptych.studio.project_models import (
+    CaptionHorizontalAlignment,
+    CaptionOutline,
+    CaptionShadow,
+    CaptionStyle,
+    CaptionStylePreset,
+    CaptionStyleSize,
+    CaptionVerticalPosition,
     ProjectStatus,
     VariantOrigin,
     VariantRange,
@@ -1012,3 +1019,42 @@ def test_preview_rejects_nonregular_preview_directory(
             probe=_Probe(),
             runner=_Runner(),
         )
+
+
+def test_preview_caption_style_changes_fingerprint(tmp_path: Path) -> None:
+    project_dir, variant_id, position_id = _initialized_project(tmp_path)
+    res1 = generate_preview(
+        PreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant_id,
+            position_id=position_id,
+            at_ms=15_000,
+        ),
+        probe=_Probe(),
+        runner=_Runner(),
+    )
+
+    store = open_project_store(project_dir)
+    style = CaptionStyle(
+        preset=CaptionStylePreset.BOLD,
+        size=CaptionStyleSize.LARGE,
+        vertical_position=CaptionVerticalPosition.BOTTOM,
+        horizontal_alignment=CaptionHorizontalAlignment.CENTER,
+        outline=CaptionOutline.THICK,
+        shadow=CaptionShadow.STRONG,
+    )
+    _ = store.set_caption_style(variant_id=variant_id, caption_style=style)
+
+    res2 = generate_preview(
+        PreviewRequest(
+            project_dir=project_dir,
+            variant_id=variant_id,
+            position_id=position_id,
+            at_ms=15_000,
+        ),
+        probe=_Probe(),
+        runner=_Runner(),
+    )
+
+    assert res1.preview_fingerprint != res2.preview_fingerprint
+    assert res1.preview_path != res2.preview_path

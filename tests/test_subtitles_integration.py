@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from kliptych.fonts import packaged_fonts_dir
 from kliptych.gate.probe import FFprobeProbe
 from kliptych.subtitles import SubtitleRenderer, SubtitleStyle
 from kliptych.transcribe import Word
@@ -111,3 +112,21 @@ def test_real_burn_respects_custom_style(tmp_path: Path) -> None:
     subtitles = renderer.write(_words(), tmp_path / "subs.ass")
     destination = renderer.burn(video=video, subtitles=subtitles, destination=tmp_path / "b.mp4")
     assert destination.is_file()
+
+
+def test_real_burn_with_packaged_fonts_dir(tmp_path: Path) -> None:
+    video = _generate_fixture(tmp_path / "fixture.mp4")
+    renderer = SubtitleRenderer(
+        style=SubtitleStyle(fontname="Noto Sans", fontsize=48, border_style=3, outline=4),
+        fonts_dir=packaged_fonts_dir(),
+    )
+    subtitles = renderer.write(_words(), tmp_path / "subs_noto.ass")
+    destination = renderer.burn(
+        video=video,
+        subtitles=subtitles,
+        destination=tmp_path / "out_noto.mp4",
+    )
+    assert destination.is_file()
+    assert destination.stat().st_size > 0
+    media = FFprobeProbe().probe(destination)
+    assert media.has_video

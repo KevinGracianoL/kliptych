@@ -316,6 +316,11 @@ def _fingerprint(
             "captions_enabled": variant.captions_enabled,
             "caption_highlight_color": variant.caption_highlight_color,
             "caption_capitalization": variant.caption_capitalization.value,
+            "caption_style": (
+                variant.caption_style.model_dump(mode="json")
+                if variant.caption_style is not None
+                else None
+            ),
             "caption_corrections": [c.model_dump(mode="json") for c in variant.caption_corrections],
             "canvas_width": _CANVAS_WIDTH,
             "canvas_height": _CANVAS_HEIGHT,
