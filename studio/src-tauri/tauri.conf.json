@@ -30,12 +30,25 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Video",
+    "shortDescription": "Editor local de clips verticales con IA",
+    "longDescription": "Kliptych Studio permite componer historias en formato vertical 9:16 con ingesta directa de URL, subtítulos con tipografía OFL empaquetada, scrubbing en tiempo real y exportación final con evaluación de conformidad fail-closed.",
+    "copyright": "Copyright 2026 Kevin Graciano",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2"
+        ]
+      }
+    }
   }
 }

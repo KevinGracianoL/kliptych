@@ -21,6 +21,37 @@ fn validate_analyze_inputs(url: &str, project_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_default_backend_path() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate_name = if cfg!(windows) {
+                "kliptych.exe"
+            } else {
+                "kliptych"
+            };
+            let sibling = exe_dir.join(candidate_name);
+            if sibling.is_file() {
+                return sibling.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        let home_path = PathBuf::from(home);
+        let candidate_name = if cfg!(windows) {
+            "kliptych.exe"
+        } else {
+            "kliptych"
+        };
+        let local_bin = home_path.join(".local").join("bin").join(candidate_name);
+        if local_bin.is_file() {
+            return local_bin.to_string_lossy().to_string();
+        }
+    }
+
+    "kliptych".to_owned()
+}
+
 fn run_backend(executable: &str, args: &[String]) -> Result<Value, String> {
     let output = Command::new(executable)
         .args(args)
@@ -617,9 +648,10 @@ async fn analyze_url(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let default_backend = resolve_default_backend_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BackendPath(Mutex::new("kliptych".to_owned())))
+        .manage(BackendPath(Mutex::new(default_backend)))
         .manage(ActiveAnalysis(Arc::new(Mutex::new(None))))
         .invoke_handler(tauri::generate_handler![
             set_backend_path,
@@ -706,5 +738,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp dir");
         let res = validate_analyze_inputs("https://example.com/v", temp.path().to_str().unwrap());
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn resolve_default_backend_path_returns_non_empty() {
+        let backend = super::resolve_default_backend_path();
+        assert!(!backend.trim().is_empty());
     }
 }
