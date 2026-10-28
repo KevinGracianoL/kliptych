@@ -2,12 +2,24 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use serde_json::Value;
 
 struct BackendPath(Mutex<String>);
+struct ActiveAnalysis(Arc<Mutex<Option<u32>>>);
+
+fn validate_analyze_inputs(url: &str, project_dir: &str) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err("Ingresa una URL válida.".to_owned());
+    }
+    let dest = Path::new(project_dir);
+    if dest.is_symlink() {
+        return Err("La carpeta de destino no debe ser un enlace simbólico.".to_owned());
+    }
+    Ok(())
+}
 
 fn run_backend(executable: &str, args: &[String]) -> Result<Value, String> {
     let output = Command::new(executable)
@@ -469,14 +481,147 @@ fn preview_video_data(project_dir: String, relative_path: String) -> Result<Stri
     ))
 }
 
+#[tauri::command]
+fn cancel_analysis(state: tauri::State<'_, ActiveAnalysis>) -> Result<(), String> {
+    let pid_opt = *state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el proceso activo.".to_owned())?;
+    if let Some(pid) = pid_opt {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-INT", &pid.to_string()])
+                .output();
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+        }
+        Ok(())
+    } else {
+        Err("No hay análisis en curso para cancelar.".to_owned())
+    }
+}
+
+#[tauri::command]
+async fn analyze_url(
+    backend_state: tauri::State<'_, BackendPath>,
+    analysis_state: tauri::State<'_, ActiveAnalysis>,
+    on_event: tauri::ipc::Channel<Value>,
+    url: String,
+    project_dir: String,
+    project_name: String,
+) -> Result<Value, String> {
+    validate_analyze_inputs(&url, &project_dir)?;
+    let executable = backend_state
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer el backend.".to_owned())?
+        .clone();
+    let pid_holder = analysis_state.0.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, Read};
+
+        let mut child = Command::new(&executable)
+            .args([
+                "--quiet",
+                "analyze",
+                "--url",
+                &url,
+                "--project-dir",
+                &project_dir,
+                "--project-name",
+                &project_name,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("No se pudo iniciar Kliptych analyze: {err}"))?;
+
+        let pid = child.id();
+        if let Ok(mut lock) = pid_holder.lock() {
+            *lock = Some(pid);
+        }
+
+        let stderr = child.stderr.take();
+        let stderr_thread = std::thread::spawn(move || {
+            if let Some(err) = stderr {
+                let mut buf = String::new();
+                let _ = std::io::BufReader::new(err).read_to_string(&mut buf);
+                buf
+            } else {
+                String::new()
+            }
+        });
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "No se pudo abrir stdout de Kliptych.".to_owned())?;
+        let reader = std::io::BufReader::new(stdout);
+
+        let mut last_event: Option<Value> = None;
+        for line in reader.lines() {
+            let line = line.map_err(|err| format!("Error leyendo stdout: {err}"))?;
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                let _ = on_event.send(value.clone());
+                last_event = Some(value);
+            }
+        }
+
+        let status = child
+            .wait()
+            .map_err(|err| format!("Error esperando proceso: {err}"))?;
+
+        if let Ok(mut lock) = pid_holder.lock() {
+            *lock = None;
+        }
+
+        let stderr_output = stderr_thread.join().unwrap_or_default();
+
+        if status.success() {
+            last_event.ok_or_else(|| "Kliptych finalizó sin emitir evento.".to_owned())
+        } else {
+            let code = status.code().unwrap_or(-1);
+            if code == 2 {
+                Err("Análisis cancelado.".to_owned())
+            } else {
+                let msg = last_event
+                    .as_ref()
+                    .and_then(|v| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| {
+                        let stderr_trim = stderr_output.trim();
+                        if stderr_trim.is_empty() {
+                            "Kliptych analyze falló.".to_owned()
+                        } else {
+                            format!("Kliptych analyze falló: {stderr_trim}")
+                        }
+                    });
+                Err(msg)
+            }
+        }
+    })
+    .await
+    .map_err(|err| format!("Error en tarea de análisis: {err}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(BackendPath(Mutex::new("kliptych".to_owned())))
+        .manage(ActiveAnalysis(Arc::new(Mutex::new(None))))
         .invoke_handler(tauri::generate_handler![
             set_backend_path,
             backend_status,
+            analyze_url,
+            cancel_analysis,
             studio_project,
             preview_position,
             preview_image_data,
@@ -490,7 +635,7 @@ pub fn run() {
 mod tests {
     use std::{fs, path::Path};
 
-    use super::preview_image_path;
+    use super::{preview_image_path, validate_analyze_inputs};
 
     fn write_preview(project: &Path) -> String {
         let preview_dir = project.join("previews").join("variant");
@@ -523,5 +668,39 @@ mod tests {
         .expect_err("path traversal must be rejected");
 
         assert_eq!(error, "Ruta de preview inválida.");
+    }
+
+    #[test]
+    fn validate_analyze_inputs_rejects_empty_url() {
+        let error = validate_analyze_inputs("", "/valid/path").expect_err("empty url rejected");
+        assert_eq!(error, "Ingresa una URL válida.");
+    }
+
+    #[test]
+    fn validate_analyze_inputs_rejects_symlink_dir() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let target = temp.path().join("real_dir");
+        fs::create_dir(&target).expect("create target dir");
+        let symlink = temp.path().join("symlink_dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &symlink).expect("create symlink");
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(&target, &symlink);
+
+        if symlink.is_symlink() {
+            let error = validate_analyze_inputs("https://example.com/v", symlink.to_str().unwrap())
+                .expect_err("symlink rejected");
+            assert_eq!(
+                error,
+                "La carpeta de destino no debe ser un enlace simbólico."
+            );
+        }
+    }
+
+    #[test]
+    fn validate_analyze_inputs_accepts_valid_inputs() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let res = validate_analyze_inputs("https://example.com/v", temp.path().to_str().unwrap());
+        assert!(res.is_ok());
     }
 }
