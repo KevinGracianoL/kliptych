@@ -1,157 +1,189 @@
 # Kliptych
 
-Feed it a campaign brief; it delivers publication-ready vertical clips and ruthlessly blocks anything that breaks the brand's rules
+Feed it a campaign brief or source URL; it delivers publication-ready vertical clips and ruthlessly blocks anything that breaks the rules.
 
-[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions) [![Release](https://img.shields.io/github/v/release/KevinGracianoL/kliptych?color=2563eb&logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases) ![Tests](https://img.shields.io/badge/tests-%E2%89%A52%2C100_passed-10b981?logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25_(CI_gate)-0d9488)
-![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows-334155?logo=githubactions&logoColor=white) ![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white) ![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white) ![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
+[![CI](https://github.com/KevinGracianoL/kliptych/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGracianoL/kliptych/actions) [![Release](https://img.shields.io/github/v/release/KevinGracianoL/kliptych?color=2563eb&logo=github&logoColor=white)](https://github.com/KevinGracianoL/kliptych/releases) ![Tests](https://img.shields.io/badge/tests-%E2%89%A52%2C430_passed-10b981?logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/coverage-%E2%89%A590%25_(CI_gate)-0d9488)
+![OS](https://img.shields.io/badge/OS-ubuntu_%7C_windows_%7C_macos-334155?logo=githubactions&logoColor=white) ![GPU](https://img.shields.io/badge/GPU-CUDA_12_%C2%B7_Faster--Whisper_%C2%B7_MediaPipe_%C2%B7_NVENC-76b900?logo=nvidia&logoColor=white) ![Python](https://img.shields.io/badge/python-3.13%2B-3776ab?logo=python&logoColor=white) ![Tauri](https://img.shields.io/badge/tauri-v2-24c8db?logo=tauri&logoColor=white) ![Architecture](https://img.shields.io/badge/architecture-fail--closed_gate-d97706)
 
-Content Rewards / UGC campaigns only pay when every contractual rule holds:
+Content Rewards and UGC campaigns only pay when every contractual rule holds:
 exact brand spelling, mandatory mentions and hashtags, duration bounds, audio
 requirements, watermark coverage. Human review does not scale to dozens of
 cuts, and an LLM verdict is not evidence.
 
-Kliptych converts a chaotic campaign brief into a validated vertical-video
-delivery package through a versioned JSON contract, a GPU pipeline
-(download, transcription, moments, 9:16 reframe, karaoke subtitles, hardware
-render), and a fail-closed compliance gate.
+Kliptych converts chaotic inputs into validated vertical-video deliverables
+through a versioned JSON contract, a local GPU/CPU pipeline (download, transcription,
+moments, multi-band reframing, typography styling, EBU R128 loudness normalization,
+hardware render), and an uncompromising fail-closed compliance gate.
 
-What it does NOT do: it never auto-publishes, never lets an LLM clear a hard
-rule, and never ships a partial delivery — a rejected piece aborts the whole
-batch.
+What it does **NOT** do: it never auto-publishes, never lets an LLM clear a hard
+rule, and never ships a partial delivery — a single rejected check aborts publication.
+
+---
+
+## Two Ways to Use Kliptych
+
+### 1. Kliptych Studio (Local Desktop Editor)
+A standalone, high-performance desktop application built with **Tauri 2 + React 19**:
+- **Streaming Ingest (B4):** Paste a YouTube or Twitch URL; watch real-time progress (`downloading`, `transcribing`, `finding_candidates`) powered by streaming Tauri IPC channels.
+- **Interactive Live Video & Scrubbing (B5):** Native zero-copy video playback with HTTP 206 partial range streaming. Instant scrubbing across 10 GB VODs with bounded memory (<150 MB).
+- **Multi-Position Layout Timeline (B2.1, B3):** Cut and arrange multiple composition intervals (`Vertical`, `Dividido`, `Trío`, `Spotlight`) with free rectangular cropping over live footage.
+- **Packaged Typography Presets (B2.5):** Clean, Bold, and Boxed presets using officially packaged `Noto Sans Regular` (SIL OFL 1.1) passed via `fontsdir`, with outline and shadow controls.
+- **Attributed Human Caption Overrides (B2.4a):** Seamlessly correct transcript words directly in the playhead interval without losing original ASR provenance.
+- **7-Zone Watermark Overlay (B2.2):** Import local PNG assets with deterministic SHA-256 binding and position snapping.
+- **EBU R128 Loudness Normalization (B6):** Broadcast-standard `-14.0 LUFS` integrated loudness and `-1.0 dBTP` true peak ceiling for distortion-free playback on TikTok, Reels, and Shorts.
+- **Fail-Closed Final Export (B3):** Lazy, on-demand compilation assembling multi-position cuts, native AAC audio, subtitles, and watermarks, verified by `Gate.evaluate_piece` before publishing.
+
+### 2. Headless Python CLI (Engine & Automation)
+Full programmatic pipeline for automated headless workflows, batch processing, and campaign verification:
+- `kliptych analyze`: Download, transcribe, detect speech-density moments, and segment candidates without rendering video.
+- `kliptych preview`: Generate exact frame snapshots and short temporal MP4 previews.
+- `kliptych studio render-final`: Lazy CLI export of specific edited variants with full gate evaluation.
+- `kliptych campaign`: Execute automated zero-contract or brief-driven campaigns.
+
+---
 
 ## Quickstart
 
-Requires Python 3.13+ and [`uv`](https://docs.astral.sh/uv/).
+### Prerequisites
+- Python 3.13+ and [`uv`](https://docs.astral.sh/uv/)
+- Node.js 22+ and Rust stable (if developing or running Studio from source)
+- FFmpeg installed and available on PATH
+
+### 1. Running Kliptych Studio (Desktop)
 
 ```sh
-uv sync
-uv sync --extra transcription --extra reframe  # CUDA + MediaPipe
-uv run kliptych env                             # toolchain, GPU, NVENC
+# Clone repository
+git clone https://github.com/KevinGracianoL/kliptych.git
+cd kliptych
 
-# Personal zero-contract mode (pure deterministic local engine)
+# Install dependencies
+uv sync
+npm --prefix studio install
+
+# Launch desktop app in development mode
+npm --prefix studio run tauri dev
+```
+
+### 2. Running Headless Python CLI
+
+```sh
+# Sync virtual environment (CUDA + MediaPipe extras optional)
+uv sync
+uv sync --extra transcription --extra reframe
+
+# Check detected environment (NVENC, hardware codecs)
+uv run kliptych env
+
+# Personal zero-contract mode (automatic clipping from URL)
 uv run kliptych campaign --url "https://..." --out runs/my-run/package
 
-# Campaign mode with contract and verification gate
+# Campaign brief verification with fail-closed gate
 uv run kliptych ingest campaigns/fixtures/given-clips/brief.md
 uv run kliptych run campaigns/fixtures/given-clips/brief.md \
   --out runs/demo-pass/package \
   --recorded campaigns/fixtures/given-clips/recorded
 ```
 
-Accepted run prints `"outcome": "exported"`; a fixture missing a mandatory
-mention prints `"outcome": "blocked"` and exports nothing.
+---
 
-## How it Works
+## Architecture & How It Works
 
 ```mermaid
-flowchart LR
-    Brief[Campaign Brief] --> Resolver[Contract Resolver]
-    Resolver --> Modes[Orchestrator Modes]
-    Modes --> Pipeline[ML/GPU Pipeline]
-    Pipeline --> Gate{Gate}
-    Gate --> Exporter[Atomic Exporter]
-    Exporter --> Manifest[manifest.json]
+flowchart TD
+    subgraph Inputs
+        URL[Video URL]
+        Brief[Campaign Brief]
+    end
+
+    subgraph Studio[Kliptych Studio - Tauri 2 / React 19]
+        Ingest[Streaming Ingest / ASR]
+        Canvas[Interactive Canvas & Video Scrubbing]
+        Timeline[LayoutTimeline Multi-Position]
+        Styles[Typography Presets & Human Overrides]
+    end
+
+    subgraph Engine[Kliptych Engine]
+        ASR[Faster-Whisper]
+        Segmenter[Speech-Density Segmenter]
+        Assembler[Multi-Position Assembler]
+        Loudnorm[EBU R128 Loudnorm -14 LUFS]
+        NVENC[NVENC GPU / CPU Fallback]
+    end
+
+    subgraph Verification[Quality Gate]
+        Gate{Gate.evaluate_piece}
+        Pass[Publish to delivery/]
+        Fail[Atomic Rejection & Cleanup]
+    end
+
+    URL --> Ingest
+    Brief --> Engine
+    Ingest --> Engine
+    Engine --> Canvas
+    Canvas --> Timeline
+    Timeline --> Styles
+    Styles --> Assembler
+    Assembler --> Loudnorm
+    Loudnorm --> NVENC
+    NVENC --> Gate
+    Gate -->|Pass| Pass
+    Gate -->|Fail| Fail
 ```
 
-## Modes
+---
 
-| Mode | Plain language |
-|------|----------------|
-| `long_video` | Full chain from a long URL: downloads the best moments, cuts them, and renders vertical clips with subtitles. |
-| `audio_locked` | Same as above but dubs a mandatory external audio track over the video (slideshows require it). |
-| `repost_ugc` | Reuses an already-approved clip: no re-transcription, just reframe, metadata cleanup, and caption rewrite. |
-| `slideshow` | Turns still images into a video paced against the external audio track. |
-
-## Features & Pipeline Capabilities
+## Pipeline Features & Capabilities
 
 - **Zero-Contract Mode:** Instant clipping from a URL without requiring an LLM or campaign brief.
-- **High-Retention Karaoke Subtitles:** Animated syllable/word SubStation Alpha (`{\k}`) tags, customizable highlight sweep color (`CaptionStyleConfig`), and case formatting (`Aa`, `AA`, `aa`).
+- **High-Retention Karaoke Subtitles:** Syllable/word SubStation Alpha (`{\k}`) tags, customizable highlight sweep color, and capitalization controls (`original`, `uppercase`, `lowercase`).
+- **Typography Presets (`clean`, `bold`, `boxed`):** Packaged `NotoSans-Regular.ttf` under SIL OFL 1.1 ensuring host-independent rendering with outline and shadow parameters.
 - **Multi-Band Layout Composition (`LayoutSpec`):** Normalized rectangular coordinates (`0.0`–`1.0`) with vertical stacking presets (`Dividido` 50/50, `Trío` 33/33/33, `Spotlight` asymmetric).
-- **Spatially-Bounded Face Tracking:** Restricts MediaPipe face detection strictly to the streamer's camera crop, eliminating false positives from game footage and dramatically cutting CPU usage.
-- **Multi-Format Aspect Ratios:** Exact integer ratios supporting TikTok/Reels (`9:16`), YouTube horizontal (`16:9`), Instagram Feed (`4:5`), and Square (`1:1`) with dynamic gate compliance.
-- **Hardware Acceleration:** Native NVENC GPU encoding with runtime fail-closed fallback channel recording to manifest and checkpoint.
+- **Spatially-Bounded Face Tracking:** Restricts MediaPipe face detection strictly to the streamer's camera crop, eliminating false positives from game footage and cutting CPU usage.
+- **Multi-Format Aspect Ratios:** Exact integer ratios supporting TikTok/Reels (`9:16`), YouTube horizontal (`16:9`), Instagram Feed (`4:5`), and Square (`1:1`).
+- **Hardware Acceleration:** Native `h264_nvenc` encoding with automatic fallback to CPU `libx264`.
+- **EBU R128 Audio Loudness Normalization:** Integrated `loudnorm` filter targetting `-14.0 LUFS` and `-1.0 dBTP` ceiling for compliance across social platforms.
 - **Atomic Batch Delivery & Failure Diagnostics:** 12-piece batch publishing is strictly atomic; rejections write an immediate `delivery.failure_report.json` with exact failing checks and evidence.
+- **Multi-Platform Release Packaging:** Official Tauri bundler targets generating native Linux (`.deb`, `.AppImage`), Windows (`.msi`, `.exe`), and macOS (`.dmg`) installers with automated GitHub Actions releases.
 
-## Why the Gate rejects
+---
 
-Any single failed check rejects the piece, and anything the gate cannot
-mechanically prove pauses for explicit human approval instead of passing
-silently — see [docs/gate.md](docs/gate.md).
+## Why the Gate Rejects
 
-## Learn more
+Any single failed check rejects the piece, and anything the gate cannot mechanically prove pauses for explicit human approval instead of passing silently — see [docs/gate.md](docs/gate.md).
 
+The gate enforces:
+1. `artifact.integrity`: Artifact exists, is readable, and is not a symlink/junction.
+2. `artifact.video_stream`: Artifact contains a playable video stream with matching dimensions.
+3. `artifact.aspect`: Output matches declared aspect ratio (e.g., 9:16) within strict numerical tolerances.
+4. `duration.min` & `duration.max`: Clip duration strictly satisfies platform or brief limits.
+5. `audio.present` & `audio.silence`: Audio stream exists without accidental digital silence.
+
+---
+
+## Learn More
+
+- [ADR 0001 — Track B1 Analysis CLI Contract](docs/adr/0001-track-b1-analysis-cli-contract.md)
+- [ADR 0002 — Track B2 Project Timeline Contract](docs/adr/0002-track-b2-project-timeline-contract.md)
+- [ADR 0003 — Track B3 Studio Final Render & Export Contract](docs/adr/0003-track-b3-studio-final-render-contract.md)
+- [ADR 0004 — Track B4 Studio Ingest & Streaming Analysis Contract](docs/adr/0004-track-b4-studio-ingest-analysis-contract.md)
+- [ADR 0005 — Track B5 Studio Interactive Video Playback & Scrubbing](docs/adr/0005-track-b5-studio-video-scrubbing-contract.md)
+- [ADR 0006 — Track B6 Studio EBU R128 Audio Normalization Contract](docs/adr/0006-track-b6-audio-normalization-contract.md)
+- [ADR 0007 — Track B7 Studio Packaging & Release Contract](docs/adr/0007-track-b7-release-packaging-contract.md)
 - [Architecture — 4 Engineering Pillars](docs/architecture.md)
 - [Benchmarks — GTX 1650 Ti, 4 GB VRAM](docs/benchmarks.md)
 - [Gate — Fail-Closed Compliance Engine](docs/gate.md)
 - [Operations — CLI 2-Step Workflow](docs/operations.md)
 
-<details><summary>Technical detail: fail-closed export barrier</summary>
-
-`_derive_status` maps any measured `FAIL` to `REJECTED`, whatever the rule
-severity. The exporter (`_is_piece_exportable`) ships only `PASSED` pieces,
-or `PENDING_REVIEW` with zero `FAIL`s plus `--approve-manual-review
---approved-by "<operator>"`. Batch export is atomic via staging + rename:
-one rejection aborts the delivery, never a partial shipment.
-
-</details>
-
-<details><summary>Technical detail: constrained-VRAM GPU orchestration</summary>
-
-One GPU stage at a time: `faster-whisper` (`int8` CUDA, in-memory cache)
-transcribes and releases VRAM, MediaPipe `FaceDetector` (CPU delegate, zero
-VRAM) drives the 9:16 reframe, FFmpeg `h264_nvenc` renders with `libx264`
-fallback. Checkpoints carry SHA-256 fingerprints so `--resume` regenerates
-exactly the stale stage. Full numbers in
-[docs/benchmarks.md](docs/benchmarks.md).
-
-</details>
-
-<details><summary>Technical detail: human-in-the-loop approval</summary>
-
-Unprovable rules resolve to `MANUAL_REVIEW`, never `PASS`. The run pauses at
-`PENDING_REVIEW` (exit 1, no `delivery/`), and resumes only with an
-attributed signature that is sealed into the delivery record next to
-`brief_sha256` / `contract_sha256`. Full workflow in
-[docs/operations.md](docs/operations.md).
-
-</details>
-
-## Current Limits
-
-- faster-whisper needs the CUDA runtime libraries (`cublas` and `cudnn` from the
-  `nvidia-*` packages, e.g. `cublas64_12.dll` on Windows). They are registered
-  automatically before loading, and it is best-effort: if they are missing, or
-  if CUDA fails to initialize, transcription falls back **loudly** to CPU
-  inference with a `CUDA no disponible (...); usando CPU` warning instead of
-  failing quietly. With `--device cuda` there is no fallback: it raises
-  `TranscriptionError`. CPU inference is markedly slower than the CUDA numbers
-  in [docs/benchmarks.md](docs/benchmarks.md), and no reproducible CPU
-  real-time factor has been measured yet, so treat any RT figure quoted for the
-  CPU path as unverified. **VRAM metrics are meaningless during CPU execution.**
-- 4 GB VRAM constraint requires a strictly sequential pipeline: one GPU
-  stage at a time, no parallel model execution.
-- Under heavy load, manual CUDA garbage collection/purging between models
-  is required to reclaim VRAM before loading the next stage.
-- Exported clip text comes from a speech model and can be text nobody said.
-  Measured on a real 3 h 07 m stream (11 247 s): the transcript carries one
-  contiguous region of 908,6 s built from 35 repetitions of `gracias por ver
-  el video`; a 44-second clip was cut from it, subtitled, exported, and
-  **passed the gate**. Nothing in the delivered package marks it. There is no
-  detection today. Audio energy does not locate these regions — the invented
-  region measures ~5 dB **louder** than real speech (median −34,65 dB against
-  −40,38 dB over four speech controls), so an energy floor keeps the invention
-  and discards quiet speech. Word confidence does not locate them either: the
-  best threshold misses 81,1 % of the invented words and 0,3 misses 70,9 %,
-  while 96,4 % of the words under 0,3 confidence are real speech. A larger ASR
-  model does not fix it — `large-v3-turbo` reproduces the same phrase — so
-  consensus between two models is not a mitigation. Details in
-  [#91](https://github.com/KevinGracianoL/kliptych/issues/91).
+---
 
 ## Project Status
 
-**Phase A (Backend Core Engine)** is 100% completed and verified (2,183 tests, 0 open issues, CI green). Full history in [docs/architecture.md](docs/architecture.md); `campaigns/private/` and `runs/` are git-ignored and CI fixtures are synthetic.
+- **Phase A (Backend Core Engine):** 100% completed and verified (A1–A4).
+- **Phase B (Kliptych Studio Desktop App):** 100% completed and verified (B1–B7).
+- **Test Suite:** 2,439 tests passed, 0 failed, 90.21% test coverage across all components.
+- **CI Status:** 5/5 green jobs on Ubuntu, Windows, and macOS.
 
-Development is moving to **Phase B: Kliptych Studio** (local desktop UI in Tauri for interactive canvas cropping, visual preview, and lazy rendering).
+---
 
 ## License
 
