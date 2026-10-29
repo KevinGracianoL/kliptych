@@ -187,17 +187,33 @@ function App() {
     }
   }, [selectedVariant]);
 
-  async function configureBackend(path = backendPath) {
-    await invoke("set_backend_path", { executable: path });
+  useEffect(() => {
+    async function syncBackendPath() {
+      try {
+        const resolved = await invoke<string>("get_backend_path");
+        if (resolved && resolved.trim().length > 0) {
+          setBackendPath(resolved);
+        }
+      } catch {
+        // Keep initial state if invoke fails
+      }
+    }
+    void syncBackendPath();
+  }, []);
+
+  async function configureBackend(explicitPath?: string) {
+    if (explicitPath) {
+      await invoke("set_backend_path", { executable: explicitPath });
+    }
     await invoke("backend_status");
   }
 
   async function selectBackend() {
     const selected = await open({ multiple: false, directory: false, title: "Selecciona el ejecutable kliptych" });
     if (typeof selected !== "string") return;
-    setBackendPath(selected);
     try {
       await configureBackend(selected);
+      setBackendPath(selected);
       setMessage("Backend Kliptych configurado.");
     } catch (error) {
       setMessage(String(error));

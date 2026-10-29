@@ -1,0 +1,74 @@
+name: Release Kliptych Studio
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de versión a publicar (ej: v0.1.0)"
+        required: true
+        default: "v0.1.0"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: package (${{ matrix.platform }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            args: ""
+          - platform: "ubuntu-24.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y -o Acquire::Retries=3 \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Studio dependencies
+        working-directory: studio
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: studio
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Kliptych Studio ${{ inputs.tag || github.ref_name }}"
+          releaseBody: "Release oficial de Kliptych Studio ${{ inputs.tag || github.ref_name }} para macOS, Windows y Linux."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

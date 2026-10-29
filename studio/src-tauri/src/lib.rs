@@ -21,6 +21,81 @@ fn validate_analyze_inputs(url: &str, project_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_backend_from_locations(
+    exe_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> String {
+    let candidate_name = if cfg!(windows) {
+        "kliptych.exe"
+    } else {
+        "kliptych"
+    };
+
+    if let Some(dir) = exe_dir {
+        let sibling = dir.join(candidate_name);
+        if sibling.is_file() {
+            return sibling.to_string_lossy().to_string();
+        }
+    }
+
+    if let Some(home) = home_dir {
+        let local_bin = home.join(".local").join("bin").join(candidate_name);
+        if local_bin.is_file() {
+            return local_bin.to_string_lossy().to_string();
+        }
+
+        let cargo_bin = home.join(".cargo").join("bin").join(candidate_name);
+        if cargo_bin.is_file() {
+            return cargo_bin.to_string_lossy().to_string();
+        }
+
+        #[cfg(windows)]
+        {
+            let app_data_bin = home
+                .join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("kliptych")
+                .join(candidate_name);
+            if app_data_bin.is_file() {
+                return app_data_bin.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    if let Some(app_data) = local_app_data {
+        let app_data_bin = app_data
+            .join("Programs")
+            .join("kliptych")
+            .join(candidate_name);
+        if app_data_bin.is_file() {
+            return app_data_bin.to_string_lossy().to_string();
+        }
+    }
+
+    let _ = local_app_data;
+    "kliptych".to_owned()
+}
+
+fn resolve_default_backend_path() -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(PathBuf::from);
+    let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+
+    resolve_backend_from_locations(
+        exe_dir.as_deref(),
+        home.as_deref(),
+        local_app_data.as_deref(),
+    )
+}
+
 fn run_backend(executable: &str, args: &[String]) -> Result<Value, String> {
     let output = Command::new(executable)
         .args(args)
@@ -42,6 +117,15 @@ fn run_backend(executable: &str, args: &[String]) -> Result<Value, String> {
             .unwrap_or("Kliptych rechazó la operación.")
             .to_owned())
     }
+}
+
+#[tauri::command]
+fn get_backend_path(state: tauri::State<'_, BackendPath>) -> Result<String, String> {
+    state
+        .0
+        .lock()
+        .map(|guard| guard.clone())
+        .map_err(|_| "No se pudo leer el backend.".to_owned())
 }
 
 #[tauri::command]
@@ -617,11 +701,13 @@ async fn analyze_url(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let default_backend = resolve_default_backend_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BackendPath(Mutex::new("kliptych".to_owned())))
+        .manage(BackendPath(Mutex::new(default_backend)))
         .manage(ActiveAnalysis(Arc::new(Mutex::new(None))))
         .invoke_handler(tauri::generate_handler![
+            get_backend_path,
             set_backend_path,
             backend_status,
             analyze_url,
@@ -706,5 +792,65 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp dir");
         let res = validate_analyze_inputs("https://example.com/v", temp.path().to_str().unwrap());
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn resolve_backend_from_locations_detects_sibling() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let exe_dir = temp.path().join("bin");
+        fs::create_dir_all(&exe_dir).expect("create bin dir");
+        let candidate_name = if cfg!(windows) {
+            "kliptych.exe"
+        } else {
+            "kliptych"
+        };
+        let sibling = exe_dir.join(candidate_name);
+        fs::write(&sibling, b"binary").expect("write sibling");
+
+        let resolved = super::resolve_backend_from_locations(Some(&exe_dir), None, None);
+        assert_eq!(resolved, sibling.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn resolve_backend_from_locations_detects_local_bin() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home_dir = temp.path();
+        let local_bin = home_dir.join(".local").join("bin");
+        fs::create_dir_all(&local_bin).expect("create local bin dir");
+        let candidate_name = if cfg!(windows) {
+            "kliptych.exe"
+        } else {
+            "kliptych"
+        };
+        let target = local_bin.join(candidate_name);
+        fs::write(&target, b"binary").expect("write target");
+
+        let resolved = super::resolve_backend_from_locations(None, Some(home_dir), None);
+        assert_eq!(resolved, target.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn resolve_backend_from_locations_detects_cargo_bin() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home_dir = temp.path();
+        let cargo_bin = home_dir.join(".cargo").join("bin");
+        fs::create_dir_all(&cargo_bin).expect("create cargo bin dir");
+        let candidate_name = if cfg!(windows) {
+            "kliptych.exe"
+        } else {
+            "kliptych"
+        };
+        let target = cargo_bin.join(candidate_name);
+        fs::write(&target, b"binary").expect("write target");
+
+        let resolved = super::resolve_backend_from_locations(None, Some(home_dir), None);
+        assert_eq!(resolved, target.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn resolve_backend_from_locations_fallback_to_plain_name() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let resolved = super::resolve_backend_from_locations(None, Some(temp.path()), None);
+        assert_eq!(resolved, "kliptych");
     }
 }
