@@ -1,0 +1,21 @@
+name: Install Studio Linux dependencies
+description: Install native development libraries and the declared media playback runtime.
+runs:
+  using: composite
+  steps:
+    - name: Install development and runtime packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -o Acquire::Retries=3
+        sudo apt-get install -y -o Acquire::Retries=3 \
+          libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+          libssl-dev libayatana-appindicator3-dev librsvg2-dev gstreamer1.0-tools
+        node "$GITHUB_ACTION_PATH/install-runtime.mjs"
+    - name: Verify WebKit media factories
+      shell: bash
+      run: |
+        set -euo pipefail
+        for element in autoaudiosink qtdemux h264parse avdec_h264 avdec_aac; do
+          gst-inspect-1.0 "$element" > /dev/null
+        done

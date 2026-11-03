@@ -25,7 +25,8 @@ Studio configures Tauri 2 bundler targets in `studio/src-tauri/tauri.conf.json`:
 
 - **Linux (`ubuntu-latest` / glibc):**
   - `.deb`: Standard Debian package with explicit runtime dependencies:
-    `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1`, `librsvg2-2`.
+    `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1`, `librsvg2-2`,
+    `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-libav`.
   - `.AppImage`: Portable single-binary distribution.
 - **Windows (`windows-latest`):**
   - `.msi`: Enterprise/Windows Installer target using WiX v4.
@@ -60,6 +61,36 @@ Release generation is automated via GitHub Actions:
   a draft GitHub Release with attached assets.
 
 ## Consequences & Verification
+
+### Linux media runtime correction (2026-11-03)
+
+Opening the synthetic Studio project on EndeavourOS produced a grey WebView.
+The application log recorded `GStreamer element autoaudiosink not found` and
+the corresponding WebKit process ended. A direct GStreamer factory probe returned
+`autoaudiosink: false`; after an authorized installation of `gst-plugins-good`,
+the same probe returned `autoaudiosink: true`. This is a native playback-runtime
+dependency, not evidence of a corrupt project or an FFmpeg render failure.
+
+- Debian packages declare `gstreamer1.0-plugins-good`,
+  `gstreamer1.0-plugins-bad` and `gstreamer1.0-libav` as runtime dependencies.
+  They provide MP4 demuxing, H.264 parsing, audio output and H.264/AAC decoding.
+- AppImage enables `bundle.linux.appimage.bundleMediaFramework`. Per the
+  [official Tauri guide](https://v2.tauri.app/distribute/appimage/#multimedia-support-via-gstreamer),
+  its Ubuntu build host must have the required media plugins installed.
+- CI and release packaging share one Linux-dependency action. It installs the
+  runtime package list from the Debian metadata rather than maintaining a
+  separate media-package policy, then verifies the GStreamer factories
+  `autoaudiosink`, `qtdemux`, `h264parse`, `avdec_h264` and `avdec_aac`.
+- Source installations document the corresponding Arch/EndeavourOS and Debian
+  prerequisites. No automatic privileged installation occurs inside Studio.
+- Do not suppress the crash by muting/removing audio or silently disabling video.
+  Do not use a GPU-renderer workaround without evidence of a GPU failure.
+- Config regressions cover required runtime dependencies, AppImage inclusion,
+  and use of the shared action by both workflows. Native project reopening is a
+  separate verification; factory presence alone does not prove the whole UI flow.
+
+No project/CLI schema changes, new Python/Rust dependencies, resource measurements
+or installer-verification claims are introduced by this correction.
 
 - Creators can download and install Kliptych Studio like any standard desktop software.
 - The desktop shell automatically detects the Python engine without manual terminal setup.

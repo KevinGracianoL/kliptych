@@ -40,3 +40,10 @@ FFmpeg process and does not label an unfinished artifact as completed.
 A job persisted as running whose owning worker has ended without recording a
 terminal result. Recovery never silently retries it: explicit user action is
 required. Previously published files are never overwritten by a retry.
+
+## Linux playback runtime
+
+The WebKitGTK/GStreamer components used by the desktop WebView to decode MP4
+video and play audio. This is separate from the Python engine's FFmpeg renderer:
+having FFmpeg installed does not establish that the native player can open the
+same file. MP4 playback requires the demuxer, parsers, decoders and an audio sink.
