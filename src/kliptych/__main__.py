@@ -56,6 +56,7 @@ from kliptych.runtime import (
     OpenAIChatModel,
     RecordedModel,
 )
+from kliptych.studio import export_queue as _export_queue
 from kliptych.studio.analyzer import (
     AnalysisCancelled,
     AnalysisEngineError,
@@ -65,6 +66,7 @@ from kliptych.studio.analyzer import (
 from kliptych.studio.final_render import (
     FinalRenderError,
     FinalRenderRequest,
+    FinalRenderResult,
     render_final_variant,
 )
 from kliptych.studio.models import ANALYSIS_SCHEMA_VERSION, AnalysisDocument
@@ -154,7 +156,13 @@ class _StudioStore(Protocol):
         """Delete one timeline position while preserving continuous coverage."""
         ...
 
-    def duplicate_variant(self, *, variant_id: uuid.UUID, name: str) -> ProjectDocument:
+    def duplicate_variant(
+        self,
+        *,
+        variant_id: uuid.UUID,
+        name: str,
+        output_aspect: Aspect | None = None,
+    ) -> ProjectDocument:
         """Duplicate a variant with fresh IDs."""
         ...
 
@@ -808,6 +816,12 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
     _add_studio_project_argument(sub)
     _ = sub.add_argument("--variant-id", required=True, help="ID de la variante")
     _ = sub.add_argument("--name", required=True, help="nombre de la copia")
+    _ = sub.add_argument(
+        "--output-aspect",
+        choices=["9:16", "16:9"],
+        default=None,
+        help="aspecto de la copia (por defecto conserva el original)",
+    )
 
     sub = studio_subcommands.add_parser(
         "import-watermark", help="importa un PNG local como watermark"
@@ -897,6 +911,30 @@ def _add_studio_subcommands(parser: argparse.ArgumentParser) -> None:  # ruff: i
         action=argparse.BooleanOptionalAction,
         default=True,
         help="aplica normalizacion de sonoridad EBU R128 (-14 LUFS)",
+    )
+
+    sub = studio_subcommands.add_parser(
+        "export-queue", help="gestiona la cola de exportacion persistente de Studio"
+    )
+    _add_studio_project_argument(sub)
+    _ = sub.add_argument(
+        "--action",
+        required=True,
+        choices=["status", "enqueue", "run", "stop", "retry"],
+        help="operacion de cola",
+    )
+    _ = sub.add_argument(
+        "--variant-id",
+        action="append",
+        default=None,
+        dest="variant_id",
+        help="ID de variante (repetible para enqueue)",
+    )
+    _ = sub.add_argument("--job-id", default=None, help="ID del trabajo para retry")
+    _ = sub.add_argument(
+        "--no-normalize-audio",
+        action="store_true",
+        help="desactiva la normalizacion de sonoridad en enqueue",
     )
 
 
@@ -1091,6 +1129,7 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             store,
             variant_id=cast("str", args.variant_id),
             name=cast("str", args.name),
+            output_aspect=cast("str | None", getattr(args, "output_aspect", None)),
         ),
         "import-watermark": lambda: _studio_import_watermark_event(
             store,
@@ -1137,6 +1176,10 @@ def _studio_event(store: _StudioStore, *, args: argparse.Namespace) -> dict[str,
             project_dir=Path(cast("str", args.project_dir)),
         ),
         "render-final": lambda: _studio_render_final_event(
+            args=args,
+            project_dir=Path(cast("str", args.project_dir)),
+        ),
+        "export-queue": lambda: _studio_export_queue_event(
             args=args,
             project_dir=Path(cast("str", args.project_dir)),
         ),
@@ -1268,11 +1311,39 @@ def _studio_delete_position_event(
     return {"type": "position_deleted", "variant": variant.model_dump(mode="json")}
 
 
-def _studio_duplicate_variant_event(
-    store: _StudioStore, *, variant_id: str, name: str
-) -> dict[str, object]:
+def _parse_duplicate_output_aspect(raw: str | None) -> Aspect | None:
+    """Parse an optional duplicate-variant output aspect.
+
+    Returns:
+        The validated aspect, or None when the caller omits it.
+
+    Raises:
+        ProjectStoreError: If the raw value is not a supported Studio aspect.
+    """
+    if raw is None:
+        return None
     try:
-        project = store.duplicate_variant(variant_id=uuid.UUID(variant_id), name=name)
+        aspect = Aspect(raw)
+    except ValueError as error:
+        msg = f"unsupported Studio output aspect: {raw!r}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+    if aspect not in {Aspect.VERTICAL, Aspect.HORIZONTAL}:
+        msg = f"unsupported Studio output aspect: {raw!r}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    return aspect
+
+
+def _studio_duplicate_variant_event(
+    store: _StudioStore, *, variant_id: str, name: str, output_aspect: str | None = None
+) -> dict[str, object]:
+    aspect = _parse_duplicate_output_aspect(output_aspect)
+    try:
+        if aspect is None:
+            project = store.duplicate_variant(variant_id=uuid.UUID(variant_id), name=name)
+        else:
+            project = store.duplicate_variant(
+                variant_id=uuid.UUID(variant_id), name=name, output_aspect=aspect
+            )
     except (ProjectStoreError, ValueError) as error:
         if isinstance(error, ProjectStoreError):
             raise
@@ -1552,6 +1623,217 @@ def _studio_render_final_event(*, args: argparse.Namespace, project_dir: Path) -
         "encoder_used": result.encoder_used,
         "audio_normalized": result.audio_normalized,
     }
+
+
+def _parse_export_variant_ids(raw: object) -> list[uuid.UUID]:
+    """Parse repeatable variant IDs for one export-queue operation.
+
+    Args:
+        raw: The raw argparse value for variant IDs.
+
+    Returns:
+        The validated variant identities, possibly empty.
+
+    Raises:
+        ProjectStoreError: If any value is not a UUID.
+    """
+    if raw is None:
+        return []
+    values = cast("list[str]", raw)
+    try:
+        return [uuid.UUID(item) for item in values]
+    except ValueError as error:
+        msg = f"Invalid variant ID: {error}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+
+
+def _parse_export_job_id(raw: object) -> uuid.UUID | None:
+    """Parse an optional job ID for one export-queue operation.
+
+    Args:
+        raw: The raw argparse value for the job ID.
+
+    Returns:
+        The validated job identity, or None when omitted.
+
+    Raises:
+        ProjectStoreError: If the value is not a UUID.
+    """
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(cast("str", raw))
+    except ValueError as error:
+        msg = f"Invalid job ID: {error}"
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg) from error
+
+
+def _export_queue_renderer() -> _export_queue.ExportRenderer:
+    """Build the real final-render boundary for one explicit queue run.
+
+    Returns:
+        A callable rendering one queued request through the existing service.
+    """
+    probe = FFprobeProbe()
+    runner = _SubprocessMotionRunner()
+    environment = detect_environment(SubprocessRunner())
+
+    def render(request: FinalRenderRequest) -> FinalRenderResult:
+        return render_final_variant(
+            request,
+            probe=probe,
+            runner=runner,
+            nvenc_available=environment.nvenc_available,
+        )
+
+    return render
+
+
+def _studio_export_queue_status_event(*, project_dir: Path) -> dict[str, object]:
+    """Return one export-queue status snapshot.
+
+    Args:
+        project_dir: The Studio project directory.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If the queue cannot be read.
+    """
+    try:
+        queue, active = _export_queue.get_status(project_dir)
+    except _export_queue.ExportQueueError as error:
+        raise ProjectStoreError(error.code, error.message) from error
+    return _export_queue.queue_event_payload(queue, worker_active=active)
+
+
+def _studio_export_queue_enqueue_event(
+    *, project_dir: Path, variant_ids: list[uuid.UUID], normalize_audio: bool
+) -> dict[str, object]:
+    """Enqueue variants and return the fresh queue snapshot.
+
+    Args:
+        project_dir: The Studio project directory.
+        variant_ids: The requested variant identities in order.
+        normalize_audio: The explicit audio setting.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If any variant cannot be enqueued.
+    """
+    try:
+        _ = _export_queue.enqueue_variants(
+            project_dir, variant_ids=variant_ids, normalize_audio=normalize_audio
+        )
+        queue, active = _export_queue.get_status(project_dir)
+    except _export_queue.ExportQueueError as error:
+        raise ProjectStoreError(error.code, error.message) from error
+    return _export_queue.queue_event_payload(queue, worker_active=active)
+
+
+def _studio_export_queue_run_event(*, project_dir: Path) -> dict[str, object]:
+    """Run pending jobs serially and return the final queue snapshot.
+
+    Args:
+        project_dir: The Studio project directory.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If a worker owns the project or state is invalid.
+    """
+    try:
+        queue, _ = _export_queue.run_pending(project_dir, renderer=_export_queue_renderer())
+        active = _export_queue.is_worker_active(project_dir)
+    except _export_queue.ExportQueueError as error:
+        raise ProjectStoreError(error.code, error.message) from error
+    return _export_queue.queue_event_payload(queue, worker_active=active)
+
+
+def _studio_export_queue_stop_event(*, project_dir: Path) -> dict[str, object]:
+    """Persist stop-after-current and return the fresh queue snapshot.
+
+    Args:
+        project_dir: The Studio project directory.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If the queue cannot be updated.
+    """
+    try:
+        _ = _export_queue.request_stop(project_dir)
+        queue, active = _export_queue.get_status(project_dir)
+    except _export_queue.ExportQueueError as error:
+        raise ProjectStoreError(error.code, error.message) from error
+    return _export_queue.queue_event_payload(queue, worker_active=active)
+
+
+def _studio_export_queue_retry_event(
+    *, project_dir: Path, job_id: uuid.UUID | None
+) -> dict[str, object]:
+    """Retry one failed job and return the fresh queue snapshot.
+
+    Args:
+        project_dir: The Studio project directory.
+        job_id: The job identity to retry.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If the job is missing, ineligible, or stale.
+    """
+    if job_id is None:
+        msg = "Retry requires --job-id."
+        raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+    try:
+        _ = _export_queue.retry_job(project_dir, job_id=job_id)
+        queue, active = _export_queue.get_status(project_dir)
+    except _export_queue.ExportQueueError as error:
+        raise ProjectStoreError(error.code, error.message) from error
+    return _export_queue.queue_event_payload(queue, worker_active=active)
+
+
+def _studio_export_queue_event(*, args: argparse.Namespace, project_dir: Path) -> dict[str, object]:
+    """Run one export-queue operation for the desktop shell.
+
+    Args:
+        args: The parsed CLI namespace.
+        project_dir: The Studio project directory.
+
+    Returns:
+        The export_queue success event.
+
+    Raises:
+        ProjectStoreError: If the action or identifiers are invalid.
+    """
+    action = cast("str", getattr(args, "action", ""))
+    variant_ids = _parse_export_variant_ids(getattr(args, "variant_id", None))
+    job_id = _parse_export_job_id(getattr(args, "job_id", None))
+    normalize_audio = not bool(getattr(args, "no_normalize_audio", False))
+    if action == "status":
+        return _studio_export_queue_status_event(project_dir=project_dir)
+    if action == "enqueue":
+        if not variant_ids:
+            msg = "Enqueue requires at least one --variant-id."
+            raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
+        return _studio_export_queue_enqueue_event(
+            project_dir=project_dir, variant_ids=variant_ids, normalize_audio=normalize_audio
+        )
+    if action == "run":
+        return _studio_export_queue_run_event(project_dir=project_dir)
+    if action == "stop":
+        return _studio_export_queue_stop_event(project_dir=project_dir)
+    if action == "retry":
+        return _studio_export_queue_retry_event(project_dir=project_dir, job_id=job_id)
+    msg = f"Unknown export-queue action: {action}"
+    raise ProjectStoreError(_STUDIO_COMMAND_INVALID, msg)
 
 
 class _SubprocessMotionRunner:

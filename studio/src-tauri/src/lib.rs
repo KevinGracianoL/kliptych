@@ -9,6 +9,76 @@ use serde_json::Value;
 
 struct BackendPath(Mutex<String>);
 struct ActiveAnalysis(Arc<Mutex<Option<u32>>>);
+struct HeavyWork(Arc<Mutex<()>>);
+
+fn acquire_heavy_work(lane: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    lane.try_lock().map_err(|_| {
+        "Ya hay un análisis, preview o exportación en curso. Espera a que termine.".to_owned()
+    })
+}
+
+fn queue_arguments(
+    project_dir: String,
+    action: &str,
+    variant_ids: Vec<String>,
+    job_id: Option<String>,
+    normalize_audio: bool,
+) -> Result<Vec<String>, String> {
+    if !["status", "enqueue", "run", "stop", "retry"].contains(&action) {
+        return Err("Acción de cola no admitida.".to_owned());
+    }
+    let mut args = vec![
+        "--quiet".to_owned(),
+        "studio".to_owned(),
+        "export-queue".to_owned(),
+        "--project-dir".to_owned(),
+        project_dir,
+        "--action".to_owned(),
+        action.to_owned(),
+    ];
+    for id in variant_ids {
+        args.extend(["--variant-id".to_owned(), id]);
+    }
+    if let Some(id) = job_id {
+        args.extend(["--job-id".to_owned(), id]);
+    }
+    if !normalize_audio {
+        args.push("--no-normalize-audio".to_owned());
+    }
+    Ok(args)
+}
+
+#[tauri::command]
+async fn export_queue(
+    state: tauri::State<'_, BackendPath>,
+    heavy_work: tauri::State<'_, HeavyWork>,
+    project_dir: String,
+    action: String,
+    variant_ids: Vec<String>,
+    job_id: Option<String>,
+    normalize_audio: bool,
+) -> Result<Value, String> {
+    if !Path::new(&project_dir).is_dir() {
+        return Err("Selecciona una carpeta de proyecto válida.".to_owned());
+    }
+    let args = queue_arguments(project_dir, &action, variant_ids, job_id, normalize_audio)?;
+    let executable = state
+        .0
+        .lock()
+        .map_err(|_| "Backend no disponible.")?
+        .clone();
+    let lane = heavy_work.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = if action == "run" {
+            Some(acquire_heavy_work(&lane)?)
+        } else {
+            None
+        };
+        run_backend(&executable, &args)
+    })
+    .await
+    .map_err(|error| format!("No se pudo completar la operación de cola: {error}"))?
+}
 
 fn validate_analyze_inputs(url: &str, project_dir: &str) -> Result<(), String> {
     if url.trim().is_empty() {
@@ -161,8 +231,9 @@ fn backend_status(state: tauri::State<'_, BackendPath>) -> Result<String, String
 }
 
 #[tauri::command]
-fn studio_project(
+async fn studio_project(
     state: tauri::State<'_, BackendPath>,
+    heavy_work: tauri::State<'_, HeavyWork>,
     project_dir: String,
     operation: String,
     candidate_id: Option<String>,
@@ -193,6 +264,7 @@ fn studio_project(
     duration_ms: Option<i64>,
     out_path: Option<String>,
     normalize_audio: Option<bool>,
+    output_aspect: Option<String>,
 ) -> Result<Value, String> {
     if !Path::new(&project_dir).is_dir() {
         return Err("Selecciona una carpeta de proyecto válida.".to_owned());
@@ -306,6 +378,12 @@ fn studio_project(
         );
         args.push("--name".to_owned());
         args.push(name.ok_or_else(|| "Falta nombre de variante.".to_owned())?);
+        if let Some(aspect) = output_aspect {
+            if !["9:16", "16:9"].contains(&aspect.as_str()) {
+                return Err("Formato de salida no admitido.".to_owned());
+            }
+            args.extend(["--output-aspect".to_owned(), aspect]);
+        }
     }
     if operation == "import-watermark" {
         args.push("--variant-id".to_owned());
@@ -463,17 +541,29 @@ fn studio_project(
             args.push("--no-normalize-audio".to_owned());
         }
     }
-    run_backend(&executable, &args)
+    let lane = heavy_work.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = if ["render-final", "preview-motion"].contains(&operation.as_str()) {
+            Some(acquire_heavy_work(&lane)?)
+        } else {
+            None
+        };
+        run_backend(&executable, &args)
+    })
+    .await
+    .map_err(|error| format!("No se pudo completar la operación Studio: {error}"))?
 }
 
 #[tauri::command]
 fn preview_position(
     state: tauri::State<'_, BackendPath>,
+    heavy_work: tauri::State<'_, HeavyWork>,
     project_dir: String,
     variant_id: String,
     position_id: String,
     at_ms: i64,
 ) -> Result<Value, String> {
+    let _guard = acquire_heavy_work(&heavy_work.0)?;
     if !Path::new(&project_dir).is_dir() || at_ms < 0 {
         return Err("Solicitud de preview inválida.".to_owned());
     }
@@ -598,6 +688,7 @@ fn cancel_analysis(state: tauri::State<'_, ActiveAnalysis>) -> Result<(), String
 async fn analyze_url(
     backend_state: tauri::State<'_, BackendPath>,
     analysis_state: tauri::State<'_, ActiveAnalysis>,
+    heavy_work: tauri::State<'_, HeavyWork>,
     on_event: tauri::ipc::Channel<Value>,
     url: String,
     project_dir: String,
@@ -610,9 +701,12 @@ async fn analyze_url(
         .map_err(|_| "No se pudo leer el backend.".to_owned())?
         .clone();
     let pid_holder = analysis_state.0.clone();
+    let lane = heavy_work.0.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, Read};
+
+        let _guard = acquire_heavy_work(&lane)?;
 
         let mut child = Command::new(&executable)
             .args([
@@ -706,6 +800,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(BackendPath(Mutex::new(default_backend)))
         .manage(ActiveAnalysis(Arc::new(Mutex::new(None))))
+        .manage(HeavyWork(Arc::new(Mutex::new(()))))
         .invoke_handler(tauri::generate_handler![
             get_backend_path,
             set_backend_path,
@@ -713,6 +808,7 @@ pub fn run() {
             analyze_url,
             cancel_analysis,
             studio_project,
+            export_queue,
             preview_position,
             preview_image_data,
             preview_video_data
@@ -726,6 +822,55 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{preview_image_path, validate_analyze_inputs};
+
+    #[test]
+    fn heavy_work_rejects_concurrency_and_releases_after_failure() {
+        let lane = std::sync::Mutex::new(());
+        {
+            let _guard = super::acquire_heavy_work(&lane).expect("first operation owns lane");
+            assert!(super::acquire_heavy_work(&lane).is_err());
+        }
+        assert!(super::acquire_heavy_work(&lane).is_ok());
+    }
+
+    #[test]
+    fn queue_arguments_keep_paths_and_ids_as_separate_values() {
+        let args = super::queue_arguments(
+            "project with spaces".to_owned(),
+            "enqueue",
+            vec!["first".to_owned(), "second".to_owned()],
+            None,
+            false,
+        )
+        .expect("supported operation");
+        assert_eq!(
+            args,
+            [
+                "--quiet",
+                "studio",
+                "export-queue",
+                "--project-dir",
+                "project with spaces",
+                "--action",
+                "enqueue",
+                "--variant-id",
+                "first",
+                "--variant-id",
+                "second",
+                "--no-normalize-audio"
+            ]
+        );
+        assert!(super::queue_arguments("p".to_owned(), "unknown", vec![], None, true).is_err());
+        let retry = super::queue_arguments(
+            "p".to_owned(),
+            "retry",
+            vec![],
+            Some("job".to_owned()),
+            true,
+        )
+        .expect("retry operation");
+        assert_eq!(&retry[retry.len() - 2..], ["--job-id", "job"]);
+    }
 
     fn write_preview(project: &Path) -> String {
         let preview_dir = project.join("previews").join("variant");

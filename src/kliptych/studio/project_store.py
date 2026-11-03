@@ -19,12 +19,13 @@ from typing import Literal, Self, override
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
-from kliptych.contract.enums import CaptionCapitalization, WatermarkPosition
+from kliptych.contract.enums import Aspect, CaptionCapitalization, WatermarkPosition
 from kliptych.contract.schema import LayoutSpec
 from kliptych.gate.probe import MediaProbe
 from kliptych.hashing import sha256_file
 from kliptych.studio.models import AnalysisDocument
 from kliptych.studio.project_models import (
+    PROJECT_SCHEMA_VERSION,
     AbsorbNeighbor,
     CaptionStyle,
     ProjectDocument,
@@ -57,7 +58,7 @@ _PROJECT_DIRECTORY_INVALID = "project_directory_invalid"
 _ARTIFACT_NAME_INVALID = "artifact_name_invalid"
 _ANALYSIS_PUBLISH_FAILED = "analysis_publish_failed"
 _ANALYSIS_STAGE_INVALID = "analysis_stage_invalid"
-_EDITABLE_STATE_NAMES = ("project.json", "assets", "previews")
+_EDITABLE_STATE_NAMES = ("project.json", "export_queue.json", "assets", "previews", "delivery")
 _MIN_CROP_SIZE = 0.05
 
 
@@ -149,17 +150,22 @@ class ProjectStore:
         except (AttributeError, PydanticSerializationError, ValidationError, ValueError) as error:
             msg = "Editable project document is invalid."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
-        self._validate_project_binding(validated)
+        to_persist = (
+            validated
+            if validated.schema_version == PROJECT_SCHEMA_VERSION
+            else validated.model_copy(update={"schema_version": PROJECT_SCHEMA_VERSION})
+        )
+        self._validate_project_binding(to_persist)
         previous = self.read_project()
         if previous is None:
             msg = "Editable project state must be initialized from measured evidence."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
-        if not _has_same_evidence(previous, validated):
+        if not _has_same_evidence(previous, to_persist):
             msg = "Normal project writes cannot change measured evidence fields."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         try:
             _atomic_write_text(
-                self.project_dir / _PROJECT_NAME, validated.model_dump_json(indent=2)
+                self.project_dir / _PROJECT_NAME, to_persist.model_dump_json(indent=2)
             )
         except OSError as error:
             msg = "Editable project document could not be written."
@@ -225,7 +231,11 @@ class ProjectStore:
             for variant in rebound.variants
         )
         rebound = rebound.model_copy(
-            update={"source_duration_ms": current.source_duration_ms, "variants": variants}
+            update={
+                "source_duration_ms": current.source_duration_ms,
+                "variants": variants,
+                "schema_version": PROJECT_SCHEMA_VERSION,
+            }
         )
         self._write_rebound_project(rebound)
         return rebound
@@ -271,6 +281,7 @@ class ProjectStore:
             msg = "Candidate range does not fit measured source duration."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
         updated = project.model_copy(update={"variants": (*project.variants, variant)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -333,6 +344,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -368,6 +380,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -409,10 +422,13 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
-    def duplicate_variant(self, *, variant_id: uuid.UUID, name: str) -> ProjectDocument:
+    def duplicate_variant(
+        self, *, variant_id: uuid.UUID, name: str, output_aspect: Aspect | None = None
+    ) -> ProjectDocument:
         """Duplicate a variant with fresh IDs.
 
         Returns:
@@ -430,8 +446,14 @@ class ProjectStore:
         if source is None:
             msg = "Variant is not part of the editable project."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
-        new_variant = _duplicate_variant(source, name=name)
-        updated = project.model_copy(update={"variants": (*project.variants, new_variant)})
+        try:
+            new_variant = _duplicate_variant(source, name=name, output_aspect=output_aspect)
+        except ValueError as error:
+            msg = str(error)
+            raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
+        updated = _ensure_current_schema(
+            project.model_copy(update={"variants": (*project.variants, new_variant)})
+        )
         self.write_project(updated)
         return updated
 
@@ -502,6 +524,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -542,6 +565,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -589,6 +613,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -680,6 +705,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -714,6 +740,7 @@ class ProjectStore:
         variants = list(project.variants)
         variants[variant_index] = updated_variant
         updated = project.model_copy(update={"variants": tuple(variants)})
+        updated = _ensure_current_schema(updated)
         self.write_project(updated)
         return updated
 
@@ -723,8 +750,15 @@ class ProjectStore:
         Raises:
             ProjectStoreError: If the rebound document cannot be written.
         """
+        to_persist = (
+            document
+            if document.schema_version == PROJECT_SCHEMA_VERSION
+            else document.model_copy(update={"schema_version": PROJECT_SCHEMA_VERSION})
+        )
         try:
-            _atomic_write_text(self.project_dir / _PROJECT_NAME, document.model_dump_json(indent=2))
+            _atomic_write_text(
+                self.project_dir / _PROJECT_NAME, to_persist.model_dump_json(indent=2)
+            )
         except OSError as error:
             msg = "Rebound editable project document could not be written."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg) from error
@@ -829,7 +863,7 @@ class ProjectStore:
             msg = "Analysis source hash does not match source artifact."
             raise ProjectStoreError(_PROJECT_DIRECTORY_INVALID, msg)
         return ProjectDocument(
-            schema_version="1",
+            schema_version=PROJECT_SCHEMA_VERSION,
             project_id=analysis.project_id,
             analysis_sha256=sha256_file(self.project_dir / _ANALYSIS_NAME),
             transcript_sha256=sha256_file(transcript_path),
@@ -1133,9 +1167,10 @@ def _mark_migrated_project_requires_review(*, destination: Path) -> None:
         or project.source_sha256 != source_sha256
         or analysis.source.sha256 != source_sha256
     ):
-        _atomic_write_text(
-            project_path, project.mark_variants_requires_review().model_dump_json(indent=2)
-        )
+        migrated = project.mark_variants_requires_review()
+        if migrated.schema_version != PROJECT_SCHEMA_VERSION:
+            migrated = migrated.model_copy(update={"schema_version": PROJECT_SCHEMA_VERSION})
+        _atomic_write_text(project_path, migrated.model_dump_json(indent=2))
 
 
 def _reject_symlinks(path: Path) -> None:
@@ -1258,3 +1293,10 @@ def _has_same_evidence(previous: ProjectDocument, current: ProjectDocument) -> b
         and previous.source_sha256 == current.source_sha256
         and previous.source_duration_ms == current.source_duration_ms
     )
+
+
+def _ensure_current_schema(document: ProjectDocument) -> ProjectDocument:
+    """Return a document upgraded to the current schema version when needed."""
+    if document.schema_version == PROJECT_SCHEMA_VERSION:
+        return document
+    return document.model_copy(update={"schema_version": PROJECT_SCHEMA_VERSION})

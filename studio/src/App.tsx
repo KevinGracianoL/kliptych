@@ -1,6 +1,6 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 type AnalysisStreamEvent = {
@@ -58,6 +58,7 @@ type CaptionStyle = {
 
 type Variant = {
   variant_id: string;
+  output_aspect: "9:16" | "16:9";
   name: string;
   status: "active" | "requires_review";
   layout_timeline: Position[];
@@ -91,6 +92,164 @@ const formatTime = (milliseconds: number) => {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 };
+
+type ExportJob = {
+  job_id: string;
+  variant_id: string;
+  variant_name: string;
+  output_path: string;
+  normalize_audio: boolean;
+  state: "pending" | "running" | "completed" | "failed" | "interrupted";
+  error: string | null;
+};
+
+type QueueEvent = {
+  type: "export_queue";
+  worker_active: boolean;
+  queue: { stop_requested: boolean; jobs: ExportJob[] };
+};
+
+const jobLabels: Record<ExportJob["state"], string> = {
+  pending: "Pendiente", running: "Renderizando", completed: "Completada",
+  failed: "Fallida", interrupted: "Interrumpida",
+};
+
+function ExportQueuePanel({ projectDir, variants, normalizeAudio, blocked, onWorkerChange }: {
+  projectDir: string;
+  variants: Variant[];
+  normalizeAudio: boolean;
+  blocked: boolean;
+  onWorkerChange: (active: boolean) => void;
+}) {
+  const [status, setStatus] = useState<QueueEvent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<string[]>([]);
+  const [mutation, setMutation] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const mounted = useRef(true);
+  const mutationInFlight = useRef(false);
+  const runInFlight = useRef(false);
+  const statusRequest = useRef(0);
+
+  const refresh = useCallback(async () => {
+    const request = ++statusRequest.current;
+    try {
+      const next = await invoke<QueueEvent>("export_queue", {
+        projectDir, action: "status", variantIds: [], normalizeAudio: true,
+      });
+      if (mounted.current && request === statusRequest.current) {
+        setStatus(next);
+        setError(null);
+      }
+    } catch (cause) {
+      if (mounted.current && request === statusRequest.current) setError(`No se pudo leer la cola: ${String(cause)}. Actualiza el estado para reintentar.`);
+    }
+  }, [projectDir]);
+
+  useEffect(() => {
+    mounted.current = true;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      await refresh();
+      if (active) timer = setTimeout(() => { void tick(); }, 1500);
+    };
+    void tick();
+    return () => { active = false; mounted.current = false; clearTimeout(timer); ++statusRequest.current; };
+  }, [refresh]);
+
+  const workerActive = starting || Boolean(status?.worker_active);
+  useEffect(() => {
+    onWorkerChange(workerActive);
+  }, [workerActive, onWorkerChange]);
+
+  async function mutate(action: "enqueue" | "stop" | "retry", jobId?: string) {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    setMutation(true);
+    setActionError(null);
+    try {
+      ++statusRequest.current;
+      await invoke<QueueEvent>("export_queue", {
+        projectDir, action, variantIds: action === "enqueue" ? selection : [], jobId, normalizeAudio,
+      });
+      if (mounted.current && action === "enqueue") setSelection([]);
+      await refresh();
+    } catch (cause) {
+      if (mounted.current) setActionError(`No se pudo ${action === "enqueue" ? "añadir las variantes" : action === "retry" ? "reintentar el trabajo" : "detener la cola"}: ${String(cause)}. Revisa el error y vuelve a intentarlo.`);
+    } finally {
+      mutationInFlight.current = false;
+      if (mounted.current) setMutation(false);
+    }
+  }
+
+  async function run() {
+    if (runInFlight.current || workerActive) return;
+    runInFlight.current = true;
+    setStarting(true);
+    setActionError(null);
+    try {
+      await invoke<QueueEvent>("export_queue", {
+        projectDir, action: "run", variantIds: [], normalizeAudio,
+      });
+      await refresh();
+    } catch (cause) {
+      if (mounted.current) setActionError(`La cola no terminó normalmente: ${String(cause)}. Actualiza el estado antes de reintentar.`);
+    } finally {
+      runInFlight.current = false;
+      if (mounted.current) setStarting(false);
+    }
+  }
+
+  const jobs = status?.queue.jobs ?? [];
+  const completed = jobs.filter((job) => job.state === "completed").length;
+  const failed = jobs.filter((job) => job.state === "failed" || job.state === "interrupted").length;
+  const pending = jobs.filter((job) => job.state === "pending").length;
+  return (
+    <section className="queue-panel" aria-labelledby="queue-heading">
+      <h3 id="queue-heading">Cola de exportación</h3>
+      <p>Exporta las variantes seleccionadas, una a la vez. Cada archivo debe superar el Gate. La cola se guarda en este proyecto.</p>
+      <fieldset className="queue-selection" disabled={mutation || status === null}>
+        <legend>Variantes para añadir</legend>
+        {variants.length === 0 && <p>Crea una variante desde un candidato para poder añadirla.</p>}
+        {variants.map((variant) => (
+          <label key={variant.variant_id} title={variant.name}>
+            <input type="checkbox" disabled={variant.status !== "active"} checked={selection.includes(variant.variant_id)} onChange={(event) => {
+              setSelection((current) => event.target.checked ? [...current, variant.variant_id] : current.filter((id) => id !== variant.variant_id));
+            }} />
+            <span>{variant.name}</span><small>{variant.status === "active" ? variant.output_aspect : "Requiere revisión"}</small>
+          </label>
+        ))}
+      </fieldset>
+      <div className="queue-actions">
+        <button type="button" className="ghost" onClick={() => setSelection(variants.filter((variant) => variant.status === "active").map((variant) => variant.variant_id))} disabled={mutation || variants.length === 0}>Seleccionar todas</button>
+        <button type="button" className="ghost" onClick={() => void mutate("enqueue")} disabled={blocked || mutation || selection.length === 0 || status === null}>Añadir seleccionadas</button>
+        <button type="button" className="primary" onClick={() => void run()} disabled={blocked || workerActive || mutation || pending === 0 || error !== null}>Iniciar / continuar cola</button>
+        <button type="button" className="ghost" onClick={() => void mutate("stop")} disabled={!status?.worker_active || mutation || status.queue.stop_requested}>Detener tras el actual</button>
+        <button type="button" className="ghost" onClick={() => void refresh()}>Actualizar estado</button>
+      </div>
+      {error && <p role="alert" className="queue-error">{error}</p>}
+      {actionError && <p role="alert" className="queue-error">{actionError}</p>}
+      {status === null && !error && <p role="status">Cargando la cola guardada…</p>}
+      {status && jobs.length === 0 && <p>No hay exportaciones en cola. Selecciona variantes y añádelas para empezar.</p>}
+      {status && jobs.length > 0 && <>
+        <p className="tabular-nums" role="status">{completed} de {jobs.length} completadas · {failed} con error o interrupción · {pending} pendientes{workerActive ? " · Cola activa" : " · Cola detenida"}</p>
+        {status.queue.stop_requested && <p>Parada solicitada: el trabajo actual terminará antes de detener la cola.</p>}
+        <progress aria-label="Trabajos de exportación terminados" max={jobs.length} value={completed + failed} />
+        <ol className="queue-jobs">
+          {jobs.map((job) => <li key={job.job_id}>
+            <div className="queue-job-heading"><strong title={job.variant_name}>{job.variant_name}</strong><span>{jobLabels[job.state]}</span></div>
+            <small>{job.normalize_audio ? "Audio normalizado" : "Audio original"}</small>
+            {job.state === "completed" && <p className="queue-output">{job.output_path}</p>}
+            {job.error && <p className="queue-error">{job.error}</p>}
+            {(job.state === "failed" || job.state === "interrupted") && <button type="button" className="ghost" onClick={() => void mutate("retry", job.job_id)} disabled={mutation || workerActive}>Reintentar este trabajo</button>}
+          </li>)}
+        </ol>
+      </>}
+    </section>
+  );
+}
 
 function App() {
   const [backendPath, setBackendPath] = useState("kliptych");
@@ -126,6 +285,7 @@ function App() {
   const [isRenderingFinal, setIsRenderingFinal] = useState(false);
   const [lastExport, setLastExport] = useState<RenderFinalResult | null>(null);
   const [normalizeAudio, setNormalizeAudio] = useState(true);
+  const [queueRunning, setQueueRunning] = useState(false);
   const [welcomeMode, setWelcomeMode] = useState<"new" | "existing">("new");
   const [newUrl, setNewUrl] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
@@ -236,6 +396,7 @@ function App() {
   }
 
   async function startAnalysis() {
+    if (queueRunning) return;
     if (!newUrl.trim() || !newProjectDir || isAnalyzing || isBusy) return;
     setIsAnalyzing(true);
     setAnalysisError(null);
@@ -368,6 +529,7 @@ function App() {
   }, [sourceVideoUrl, isPlaying, playheadMs, selectedPosition]);
 
   async function openProject() {
+    if (queueRunning) return;
     const selected = await open({ multiple: false, directory: true, title: "Abrir proyecto Kliptych" });
     if (typeof selected !== "string") return;
     setBusy(true);
@@ -428,7 +590,7 @@ function App() {
   }
 
   async function requestPreview() {
-    if (!projectDir || !selectedVariant || !selectedPosition) return;
+    if (!projectDir || !selectedVariant || !selectedPosition || queueRunning) return;
     setBusy(true);
     try {
       const event = await invoke<PreviewEvent>("preview_position", {
@@ -554,21 +716,25 @@ function App() {
     }
   }
 
-  async function duplicateVariant() {
-    if (!projectDir || !selectedVariant || isBusy) return;
+  async function duplicateVariant(outputAspect?: Variant["output_aspect"]) {
+    if (!projectDir || !project || !selectedVariant || isBusy || pending) return;
     setBusy(true);
     try {
       const event = await invoke<{ variant: Variant }>("studio_project", {
         projectDir,
         operation: "duplicate-variant",
         variantId: selectedVariant.variant_id,
-        name: `${selectedVariant.name} copia`,
+        name: `${selectedVariant.name} ${outputAspect ?? "copia"}`,
+        outputAspect,
       });
-      const next = { ...project!, variants: [...project!.variants, event.variant] };
+      const next = { ...project, variants: [...project.variants, event.variant] };
       setProject(next);
       setSelectedVariant(event.variant);
       setSelectedPosition(event.variant.layout_timeline[0]);
-      setMessage("Variante duplicada.");
+      setComposedUrl(null);
+      setMotionPreviewUrl(null);
+      setLastExport(null);
+      setMessage(outputAspect ? `Copia ${outputAspect} creada. Revisa los encuadres y genera un preview.` : "Variante duplicada.");
     } catch (error) {
       setMessage(`No se pudo duplicar: ${String(error)}`);
     } finally {
@@ -719,7 +885,7 @@ function App() {
   }
 
   async function generateMotionPreview() {
-    if (!projectDir || !selectedVariant || !selectedPosition) return;
+    if (!projectDir || !selectedVariant || !selectedPosition || queueRunning) return;
     setBusy(true);
     try {
       const event = await invoke<{ preview_path: string }>("studio_project", {
@@ -741,7 +907,7 @@ function App() {
   }
 
   async function renderFinal(promptForPath = false) {
-    if (!projectDir || !selectedVariant || isBusy || isRenderingFinal) return;
+    if (!projectDir || !selectedVariant || isBusy || isRenderingFinal || queueRunning) return;
     let targetPath: string | null = null;
     if (promptForPath) {
       const suggested = `${selectedVariant.name.trim() || "Variante"}.mp4`;
@@ -813,7 +979,7 @@ function App() {
         <div className="project-status">{project?.project_name ?? "Sin proyecto"}</div>
         <div className="topbar-actions">
           <button type="button" className="ghost" onClick={selectBackend}>Backend</button>
-          <button type="button" className="primary" onClick={openProject} disabled={isBusy}>Abrir proyecto</button>
+          <button type="button" className="ghost" onClick={openProject} disabled={isBusy || queueRunning}>Abrir proyecto</button>
         </div>
       </header>
 
@@ -992,7 +1158,7 @@ function App() {
                 <h2>{selectedVariant?.name ?? "Sin variante activa"}</h2>
               </div>
               <div className="toolbar-actions">
-                <button type="button" className="primary" onClick={requestPreview} disabled={!selectedPosition || isBusy}>
+                <button type="button" className="ghost" onClick={requestPreview} disabled={!selectedPosition || isBusy || queueRunning}>
                   Generar preview
                 </button>
                 <button type="button" className="ghost" onClick={applyLayout} disabled={!pending || isBusy}>
@@ -1031,14 +1197,29 @@ function App() {
                   <option value="previous">Absorber anterior</option>
                   <option value="next">Absorber siguiente</option>
                 </select>
-                <button type="button" className="ghost" onClick={duplicateVariant} disabled={!selectedVariant || isBusy}>
+                <button type="button" className="ghost" onClick={() => duplicateVariant()} disabled={!selectedVariant || isBusy || pending}>
                   Duplicar variante
                 </button>
+                <label className="output-aspect-control">
+                  Formato de salida
+                  <select
+                    value={selectedVariant?.output_aspect ?? "9:16"}
+                    disabled={!selectedVariant || isBusy || pending}
+                    onChange={(event) => {
+                      const aspect = event.target.value;
+                      if (aspect === "9:16" || aspect === "16:9") void duplicateVariant(aspect);
+                    }}
+                    aria-describedby="output-aspect-help"
+                  >
+                    <option value="9:16">Vertical · 9:16</option>
+                    <option value="16:9">Horizontal · 16:9</option>
+                  </select>
+                </label>
                 <button
                   type="button"
-                  className="primary"
+                  className="ghost"
                   onClick={generateMotionPreview}
-                  disabled={!selectedPosition || isBusy}
+                  disabled={!selectedPosition || isBusy || queueRunning}
                 >
                   Preview temporal
                 </button>
@@ -1046,7 +1227,7 @@ function App() {
                   type="button"
                   className="primary export-btn"
                   onClick={() => renderFinal(false)}
-                  disabled={!selectedVariant || isBusy || isRenderingFinal}
+                  disabled={!selectedVariant || isBusy || isRenderingFinal || queueRunning}
                 >
                   {isRenderingFinal ? "Renderizando…" : "Exportar final"}
                 </button>
@@ -1054,7 +1235,7 @@ function App() {
                   type="button"
                   className="ghost"
                   onClick={() => renderFinal(true)}
-                  disabled={!selectedVariant || isBusy || isRenderingFinal}
+                  disabled={!selectedVariant || isBusy || isRenderingFinal || queueRunning}
                   title="Elegir ruta de destino personalizada"
                 >
                   Exportar como…
@@ -1159,10 +1340,11 @@ function App() {
                   Arrastra o redimensiona bandas sobre el video en vivo. Ajusta el playhead con la barra para revisar encuadres.
                 </p>
               </article>
-              <article className="composed-panel">
-                <div className="panel-heading"><span>Composición</span>{pending ? <small className="pending">Cambios sin aplicar</small> : <small>720 × 1280</small>}</div>
+              <article className="composed-panel" data-output-aspect={selectedVariant?.output_aspect ?? "9:16"}>
+                <div className="panel-heading"><span>Composición</span>{pending ? <small className="pending">Cambios sin aplicar</small> : <small className="tabular-nums">{selectedVariant?.output_aspect === "16:9" ? "1280 × 720" : "720 × 1280"}</small>}</div>
                 <div className="phone-frame">{composedUrl ? <img src={composedUrl} alt="Preview compuesto" /> : <div className="canvas-empty">El preview compuesto aparecerá aquí.</div>}</div>
                 {motionPreviewUrl && <video className="motion-preview" src={motionPreviewUrl} controls autoPlay loop />}
+                <p className="canvas-note" id="output-aspect-help">Cambiar el formato crea una copia y conserva el original. Aplica primero los cambios de recorte pendientes.</p>
               </article>
             </div>
             <div className="timeline"><div className="timeline-label">Timeline de composición</div><div className="timeline-track">{selectedPosition && <button type="button" className="timeline-segment">{selectedPosition.layout_spec.layout}</button>}</div></div>
@@ -1366,10 +1548,18 @@ function App() {
               )}
               {!isRenderingFinal && (!lastExport || lastExport.variant_id !== selectedVariant?.variant_id) && (
                 <p className="canvas-note">
-                  Genera el MP4 definitivo de 1080×1920 con timeline continuo, audio nativo, watermark y subtítulos validados por el Gate.
+                  Genera el MP4 definitivo de {selectedVariant?.output_aspect === "16:9" ? "1920×1080" : "1080×1920"} con timeline continuo, audio nativo, watermark y subtítulos validados por el Gate.
                 </p>
               )}
             </div>
+            {projectDir && project.editable_state === "ready" && <ExportQueuePanel
+              key={projectDir}
+              projectDir={projectDir}
+              variants={project.variants}
+              normalizeAudio={normalizeAudio}
+              blocked={isBusy || pending}
+              onWorkerChange={setQueueRunning}
+            />}
           </section>
         </div>
       )}

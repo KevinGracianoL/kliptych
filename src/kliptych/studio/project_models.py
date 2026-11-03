@@ -2,17 +2,64 @@
 
 import uuid
 from enum import StrEnum
-from typing import ClassVar, Self
+from typing import ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from kliptych.contract.enums import CaptionCapitalization, Layout, WatermarkPosition
+from kliptych.contract.enums import (
+    Aspect,
+    CaptionCapitalization,
+    Layout,
+    WatermarkPosition,
+)
 from kliptych.contract.schema import Band, LayoutSpec, NormalizedRect
+from kliptych.hashing import sha256_canonical_json
 
-PROJECT_SCHEMA_VERSION = "1"
+PROJECT_SCHEMA_VERSION = "2"
+_SUPPORTED_OUTPUT_ASPECTS: tuple[Aspect, Aspect] = (Aspect.VERTICAL, Aspect.HORIZONTAL)
+_PREVIEW_CANVAS: dict[Aspect, tuple[int, int]] = {
+    Aspect.VERTICAL: (720, 1280),
+    Aspect.HORIZONTAL: (1280, 720),
+}
+_FINAL_CANVAS: dict[Aspect, tuple[int, int]] = {
+    Aspect.VERTICAL: (1080, 1920),
+    Aspect.HORIZONTAL: (1920, 1080),
+}
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _VERTICAL_LAYOUT = Layout.VERTICAL
 _SOURCE_NAME = "source.mp4"
+
+
+def preview_dimensions(output_aspect: Aspect) -> tuple[int, int]:
+    """Return the JPEG/motion preview canvas for one output aspect.
+
+    Returns:
+        The preview width and height in pixels.
+
+    Raises:
+        ValueError: If the aspect is not a supported Studio output aspect.
+    """
+    try:
+        return _PREVIEW_CANVAS[output_aspect]
+    except KeyError as error:
+        msg = f"unsupported Studio output aspect: {output_aspect!r}"
+        raise ValueError(msg) from error
+
+
+def final_dimensions(output_aspect: Aspect) -> tuple[int, int]:
+    """Return the final assembly canvas for one output aspect.
+
+    Returns:
+        The final width and height in pixels.
+
+    Raises:
+        ValueError: If the aspect is not a supported Studio output aspect.
+    """
+    try:
+        return _FINAL_CANVAS[output_aspect]
+    except KeyError as error:
+        msg = f"unsupported Studio output aspect: {output_aspect!r}"
+        raise ValueError(msg) from error
 
 
 class ProjectStatus(StrEnum):
@@ -217,6 +264,7 @@ class Variant(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
     status: ProjectStatus = ProjectStatus.ACTIVE
+    output_aspect: Aspect = Aspect.VERTICAL
     watermark: VariantWatermark = Field(default_factory=VariantWatermark)
     captions_enabled: bool = False
     caption_highlight_color: str = "&H000000FF"
@@ -224,6 +272,14 @@ class Variant(BaseModel):
     caption_style: CaptionStyle | None = Field(default=None, exclude_if=_caption_style_absent)
     caption_corrections: tuple[VariantCaptionCorrection, ...] = ()
     layout_timeline: tuple[LayoutPosition, ...]
+
+    @field_validator("output_aspect")
+    @classmethod
+    def _output_aspect_is_supported(cls, value: Aspect) -> Aspect:
+        if value not in _SUPPORTED_OUTPUT_ASPECTS:
+            msg = f"unsupported Studio output aspect: {value!r}"
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
     def _timeline_covers_variant_exactly(self) -> Self:
@@ -256,7 +312,7 @@ class ProjectDocument(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = Field(pattern=r"^1$")
+    schema_version: Literal["1", "2"] = PROJECT_SCHEMA_VERSION
     project_id: str = Field(min_length=1)
     analysis_sha256: str = Field(pattern=_SHA256_PATTERN)
     transcript_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -274,6 +330,11 @@ class ProjectDocument(BaseModel):
             for variant in self.variants
         ):
             msg = "active variant range exceeds source_duration_ms"
+            raise ValueError(msg)
+        if self.schema_version == "1" and any(
+            variant.output_aspect is not Aspect.VERTICAL for variant in self.variants
+        ):
+            msg = "schema 1 variants must use the vertical output aspect"
             raise ValueError(msg)
         return self
 
@@ -384,12 +445,20 @@ def split_position(variant: Variant, *, position_id: uuid.UUID, at_ms: int) -> V
     return variant.model_copy(update={"layout_timeline": tuple(positions)})
 
 
-def duplicate_variant(variant: Variant, *, name: str) -> Variant:
+def duplicate_variant(
+    variant: Variant, *, name: str, output_aspect: Aspect | None = None
+) -> Variant:
     """Copy a variant's human decisions with fresh variant and position IDs.
 
     Returns:
         The independent duplicate with the requested name.
+
+    Raises:
+        ValueError: If the requested output aspect is not supported.
     """
+    if output_aspect is not None and output_aspect not in _SUPPORTED_OUTPUT_ASPECTS:
+        msg = f"unsupported Studio output aspect: {output_aspect!r}"
+        raise ValueError(msg)
     positions = tuple(
         LayoutPosition(
             position_id=uuid.uuid4(),
@@ -406,6 +475,7 @@ def duplicate_variant(variant: Variant, *, name: str) -> Variant:
         start_ms=variant.start_ms,
         end_ms=variant.end_ms,
         status=variant.status,
+        output_aspect=output_aspect if output_aspect is not None else variant.output_aspect,
         watermark=variant.watermark,
         captions_enabled=variant.captions_enabled,
         caption_highlight_color=variant.caption_highlight_color,
@@ -455,3 +525,26 @@ def delete_position(
         raise ValueError(msg)
     del positions[index]
     return variant.model_copy(update={"layout_timeline": tuple(positions)})
+
+
+def variant_revision(variant: Variant, *, project: ProjectDocument) -> str:
+    """Compute the canonical revision digest for one export job.
+
+    Returns:
+        The stable digest of the complete variant and current project evidence.
+
+    The digest covers the entire variant document and the measured evidence
+    snapshot it binds to: project identity, analysis, transcript and source
+    digests plus measured source duration. It is not a snapshot that
+    authorizes rendering changed or missing source files.
+    """
+    return sha256_canonical_json(
+        {
+            "variant": variant.model_dump(mode="json"),
+            "project_id": project.project_id,
+            "analysis_sha256": project.analysis_sha256,
+            "transcript_sha256": project.transcript_sha256,
+            "source_sha256": project.source_sha256,
+            "source_duration_ms": project.source_duration_ms,
+        }
+    )
