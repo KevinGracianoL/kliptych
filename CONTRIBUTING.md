@@ -24,6 +24,11 @@ the enforceable workflow.
 
 ## Local gates
 
+The full test suite requires Node.js 22+ on PATH in addition to Python/`uv` and
+FFmpeg: Linux-packaging policy tests execute the built-in Node installer script
+with its subprocess boundary mocked. The headless Python application itself does
+not require Node. CI explicitly installs Node 26 for both Python matrix jobs.
+
 ```sh
 uv run ruff format --check .
 uv run ruff check .

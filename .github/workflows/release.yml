@@ -44,18 +44,7 @@ jobs:
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y -o Acquire::Retries=3 \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+        uses: ./.github/actions/studio-linux-deps
 
       - name: Install Studio dependencies
         working-directory: studio

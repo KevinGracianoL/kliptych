@@ -23,10 +23,13 @@ from kliptych.studio.project_models import (
     ProjectDocument,
     Variant,
     VariantCaptionCorrection,
+    final_dimensions,
+    preview_dimensions,
 )
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
 from kliptych.subtitles import (
     SubtitleError,
+    SubtitleLayout,
     SubtitleRenderer,
     SubtitleStyle,
     escape_filter_path,
@@ -35,8 +38,6 @@ from kliptych.transcribe import Transcript, Word
 
 _MOTION_PREVIEW_IMPLEMENTATION_VERSION = "1"
 _MOTION_PREVIEW_DIR = "previews"
-_MOTION_CANVAS_WIDTH = 720
-_MOTION_CANVAS_HEIGHT = 1280
 _DEFAULT_DURATION_MS = 3000
 _MIN_DURATION_MS = 500
 _MIN_SOURCE_DIMENSION = 2
@@ -113,6 +114,7 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
     source = request.project_dir / "source.mp4"
 
     dimensions = _probe_dimensions(probe, source)
+    canvas_width, canvas_height = preview_dimensions(variant.output_aspect)
     fingerprint = _motion_fingerprint(
         project.source_sha256, project.transcript_sha256, variant, position, start_ms, end_ms
     )
@@ -120,14 +122,14 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
     if destination.is_file() and not destination.is_symlink() and not destination.is_junction():
         try:
             info = probe.probe(destination)
-            if info.width == _MOTION_CANVAS_WIDTH and info.height == _MOTION_CANVAS_HEIGHT:
+            if info.width == canvas_width and info.height == canvas_height:
                 return MotionPreviewResult(
                     preview_path=destination,
                     fingerprint=fingerprint,
                     frame_start_ms=start_ms,
                     frame_end_ms=end_ms,
-                    width=_MOTION_CANVAS_WIDTH,
-                    height=_MOTION_CANVAS_HEIGHT,
+                    width=canvas_width,
+                    height=canvas_height,
                 )
         except (OSError, ValueError, ProbeError):
             _ = None
@@ -148,8 +150,8 @@ def generate_motion_preview(  # ruff: ignore[too-many-locals]
         fingerprint=fingerprint,
         frame_start_ms=start_ms,
         frame_end_ms=end_ms,
-        width=_MOTION_CANVAS_WIDTH,
-        height=_MOTION_CANVAS_HEIGHT,
+        width=canvas_width,
+        height=canvas_height,
     )
 
 
@@ -242,6 +244,7 @@ def _motion_fingerprint(  # ruff: ignore[too-many-arguments,too-many-positional-
     start_ms: int,
     end_ms: int,
 ) -> str:
+    canvas_width, canvas_height = preview_dimensions(variant.output_aspect)
     return sha256_canonical_json(
         {
             "implementation_version": _MOTION_PREVIEW_IMPLEMENTATION_VERSION,
@@ -262,8 +265,9 @@ def _motion_fingerprint(  # ruff: ignore[too-many-arguments,too-many-positional-
                 else None
             ),
             "caption_corrections": [c.model_dump(mode="json") for c in variant.caption_corrections],
-            "canvas_width": _MOTION_CANVAS_WIDTH,
-            "canvas_height": _MOTION_CANVAS_HEIGHT,
+            "canvas_width": canvas_width,
+            "canvas_height": canvas_height,
+            "output_aspect": variant.output_aspect.value,
         }
     )
 
@@ -381,7 +385,9 @@ def _build_ass_text(variant: Variant, words: list[Word]) -> tuple[str, Path | No
     """
     try:
         style, fonts_dir = _resolve_caption_style_and_fonts(variant)
-        return SubtitleRenderer(style=style).build(words), fonts_dir
+        final_width, final_height = final_dimensions(variant.output_aspect)
+        layout = SubtitleLayout(width=final_width, height=final_height)
+        return SubtitleRenderer(style=style, layout=layout).build(words), fonts_dir
     except (ValueError, SubtitleError, FontError):
         return None
 
@@ -467,6 +473,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
     layout_spec = position.layout_spec
     n_bands = len(layout_spec.bands)
     source_dimensions = tuple((dimensions[0], dimensions[1]) for _ in range(n_bands))
+    canvas_width, canvas_height = preview_dimensions(variant.output_aspect)
     start_s = start_ms / 1000.0
     dur_s = (end_ms - start_ms) / 1000.0
 
@@ -484,8 +491,8 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
         labels.append(f"[t{i}]")
     chains = build_layout_filter_chains(
         layout_spec=layout_spec,
-        canvas_width=_MOTION_CANVAS_WIDTH,
-        canvas_height=_MOTION_CANVAS_HEIGHT,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
         source_dimensions=source_dimensions,
         input_labels=labels,
     )
@@ -530,7 +537,7 @@ def _render_motion_preview(  # ruff: ignore[too-many-arguments,too-many-locals,t
     # Watermark overlay filter.
     if wm_asset_path is not None:
         x_expr, y_expr = _watermark_xy(variant.watermark.position)
-        target_w = int(720 * 0.15 / 2) * 2
+        target_w = int(canvas_width * 0.15 / 2) * 2
         filter_parts.append(
             f"[1:v]format=rgba,scale={target_w}:-2[wm];{final_label}[wm]overlay={x_expr}:{y_expr}[outv_wm]"
         )

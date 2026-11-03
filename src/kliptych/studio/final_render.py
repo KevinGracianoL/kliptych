@@ -15,7 +15,7 @@ from typing import Protocol, cast
 
 from kliptych.contract import CaptionStyleConfig
 from kliptych.contract.enums import CaptionCapitalization, Platform
-from kliptych.contract.schema import vanilla_contract
+from kliptych.contract.schema import OutputSpec, vanilla_contract
 from kliptych.encoding import (
     RenderConfig,
     audio_and_container_arguments,
@@ -34,18 +34,19 @@ from kliptych.studio.project_models import (
     ProjectDocument,
     Variant,
     VariantCaptionCorrection,
+    final_dimensions,
+    variant_revision,
 )
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
 from kliptych.subtitles import (
     SubtitleError,
+    SubtitleLayout,
     SubtitleRenderer,
     SubtitleStyle,
     escape_filter_path,
 )
 from kliptych.transcribe import Transcript, Word
 
-_CANVAS_WIDTH = 1080
-_CANVAS_HEIGHT = 1920
 _DELIVERY_DIR = "delivery"
 _MIN_SOURCE_DIMENSION = 2
 _DEFAULT_TIMEOUT_S = 600.0
@@ -84,6 +85,8 @@ class FinalRenderRequest:
     variant_id: uuid.UUID
     destination: Path | None = None
     normalize_audio: bool = True
+    expected_revision: str | None = None
+    overwrite: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,17 @@ class _RenderContext:
     output_dir: Path
     src_dimensions: tuple[int, int]
     source_has_audio: bool
+    canvas_width: int
+    canvas_height: int
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoGeometry:
+    """Source and canvas dimensions for one timeline render."""
+
+    src_dimensions: tuple[int, int]
+    canvas_width: int
+    canvas_height: int
 
 
 def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderContext:
@@ -125,6 +139,11 @@ def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderC
     analysis_path = request.project_dir / "analysis.json"
     analysis = AnalysisDocument.model_validate_json(analysis_path.read_text(encoding="utf-8"))
     variant = _find_variant(project, analysis, request.variant_id)
+    if request.expected_revision is not None:
+        current_revision = variant_revision(variant, project=project)
+        if current_revision != request.expected_revision:
+            msg = "Variant revision does not match expected export revision."
+            raise FinalRenderError(msg, error_code="revision_mismatch")
     source = request.project_dir / "source.mp4"
 
     source_info = _probe_source(probe, source)
@@ -133,6 +152,7 @@ def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderC
     output_dir = destination.parent
     _require_regular_directory(output_dir)
     resolved_output_dir = output_dir.resolve()
+    canvas_width, canvas_height = final_dimensions(variant.output_aspect)
 
     return _RenderContext(
         project_dir=request.project_dir,
@@ -142,6 +162,8 @@ def _prepare_context(request: FinalRenderRequest, probe: MediaProbe) -> _RenderC
         output_dir=resolved_output_dir,
         src_dimensions=dimensions,
         source_has_audio=source_info.has_audio,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
     )
 
 
@@ -170,14 +192,16 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
         The validated final render result.
     """
     ctx = _prepare_context(request, probe)
-    temp_destination = ctx.destination.with_suffix(".tmp.mp4").resolve()
+    temp_destination = _temporary_destination(ctx.destination)
 
     ass_path, filter_complex, extra_inputs, final_v_label, has_audio = _build_render_plan(
         ctx,
         normalize_audio=request.normalize_audio,
     )
 
-    render_config = RenderConfig(target_aspect=9 / 16, nvenc_available=nvenc_available)
+    render_config = RenderConfig(
+        target_aspect=ctx.variant.output_aspect.ratio, nvenc_available=nvenc_available
+    )
     effective_gate = gate if gate is not None else Gate(probe=probe, render=render_config)
 
     previous_signals: dict[int, object] = {}
@@ -205,7 +229,7 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
             temp_destination=temp_destination,
         )
 
-        _publish_artifact(temp_destination, ctx.destination)
+        _publish_artifact(temp_destination, ctx.destination, overwrite=request.overwrite)
     except Exception:
         with contextlib.suppress(OSError):
             if temp_destination.exists():
@@ -234,6 +258,22 @@ def render_final_variant(  # ruff: ignore[too-many-arguments]
     )
 
 
+def _temporary_destination(destination: Path) -> Path:
+    """Resolve a regular sibling temporary output without following a linked file.
+
+    Returns:
+        The absolute temporary output path.
+
+    Raises:
+        FinalRenderError: If a preexisting temporary output is link-like.
+    """
+    temporary = destination.with_suffix(".tmp.mp4")
+    if temporary.is_symlink() or temporary.is_junction():
+        msg = "Temporary render destination must not be a symlink or junction."
+        raise FinalRenderError(msg, error_code="invalid_destination")
+    return temporary.resolve()
+
+
 def _measure_output(probe: MediaProbe, destination: Path, variant: Variant) -> tuple[int, int, int]:
     info = _probe_source(probe, destination)
     w, h = _require_dimensions(info)
@@ -253,6 +293,7 @@ def _sanitize_filename(name: str) -> str:
 
 def _resolve_destination(request: FinalRenderRequest, variant: Variant) -> Path:
     if request.destination is not None:
+        _validate_destination_parents(request.destination, project_dir=request.project_dir)
         if request.destination.is_symlink() or request.destination.is_junction():
             msg = "Custom destination must not be a symlink or junction."
             raise FinalRenderError(msg, error_code="invalid_destination")
@@ -264,6 +305,26 @@ def _resolve_destination(request: FinalRenderRequest, variant: Variant) -> Path:
     sanitized = _sanitize_filename(variant.name) or f"variant_{variant.variant_id}"
     delivery_dir = request.project_dir / _DELIVERY_DIR
     return delivery_dir / f"{sanitized}.mp4"
+
+
+def _validate_destination_parents(destination: Path, *, project_dir: Path) -> None:
+    """Reject links below the trusted project root, not aliases of its ancestors.
+
+    Raises:
+        FinalRenderError: If an output directory inside the project is link-like.
+    """
+    absolute = destination.absolute()
+    root = project_dir.absolute()
+    parents = (
+        tuple(
+            parent for parent in absolute.parents if parent != root and parent.is_relative_to(root)
+        )
+        if absolute.is_relative_to(root)
+        else (absolute.parent,)
+    )
+    if any(parent.is_symlink() or parent.is_junction() for parent in parents):
+        msg = "Custom destination directory must not contain a symlink or junction."
+        raise FinalRenderError(msg, error_code="invalid_destination")
 
 
 def _require_regular_directory(path: Path) -> None:
@@ -457,7 +518,11 @@ def _resolve_caption_style_and_fonts(
 def _build_ass_text(variant: Variant, words: list[Word]) -> tuple[str, Path | None] | None:
     try:
         style, fonts_dir = _resolve_caption_style_and_fonts(variant)
-        return SubtitleRenderer(style=style).build(words), fonts_dir
+        layout = SubtitleLayout(
+            width=final_dimensions(variant.output_aspect)[0],
+            height=final_dimensions(variant.output_aspect)[1],
+        )
+        return SubtitleRenderer(style=style, layout=layout).build(words), fonts_dir
     except (ValueError, SubtitleError, FontError):
         return None
 
@@ -509,7 +574,7 @@ def _try_render_ass(
 def _build_position_filter_chain(
     pos_idx: int,
     pos: LayoutPosition,
-    src_dimensions: tuple[int, int],
+    geometry: _VideoGeometry,
     branch_start: int,
     total_bands: int,
 ) -> tuple[list[str], str]:
@@ -517,7 +582,7 @@ def _build_position_filter_chain(
     dur_s = (pos.end_ms - pos.start_ms) / 1000.0
     start_s = pos.start_ms / 1000.0
     bands_count = len(pos.layout_spec.bands)
-    source_dims = tuple(src_dimensions for _ in range(bands_count))
+    source_dims = tuple(geometry.src_dimensions for _ in range(bands_count))
 
     band_labels: list[str] = []
     for band_idx in range(bands_count):
@@ -531,8 +596,8 @@ def _build_position_filter_chain(
     pos_band_labels: list[str] = [f"[p{pos_idx}_b{i}]" for i in range(bands_count)]
     raw_chains = build_layout_filter_chains(
         layout_spec=pos.layout_spec,
-        canvas_width=_CANVAS_WIDTH,
-        canvas_height=_CANVAS_HEIGHT,
+        canvas_width=geometry.canvas_width,
+        canvas_height=geometry.canvas_height,
         source_dimensions=source_dims,
         input_labels=band_labels,
     )
@@ -556,7 +621,7 @@ def _build_position_filter_chain(
 
 def _build_timeline_video_chains(
     positions: Sequence[LayoutPosition],
-    src_dimensions: tuple[int, int],
+    geometry: _VideoGeometry,
 ) -> tuple[list[str], str]:
     total_bands = sum(len(p.layout_spec.bands) for p in positions)
     filter_parts: list[str] = []
@@ -570,11 +635,11 @@ def _build_timeline_video_chains(
 
     for pos_idx, pos in enumerate(positions):
         pos_parts, pos_out = _build_position_filter_chain(
-            pos_idx=pos_idx,
-            pos=pos,
-            src_dimensions=src_dimensions,
-            branch_start=branch_idx,
-            total_bands=total_bands,
+            pos_idx,
+            pos,
+            geometry,
+            branch_idx,
+            total_bands,
         )
         filter_parts.extend(pos_parts)
         pos_labels.append(pos_out)
@@ -594,6 +659,7 @@ def _build_watermark_chain(
     project_dir: Path,
     variant: Variant,
     current_label: str,
+    canvas_width: int,
 ) -> tuple[list[str], list[str], str]:
     filter_parts: list[str] = []
     extra_inputs: list[str] = []
@@ -613,7 +679,7 @@ def _build_watermark_chain(
 
     extra_inputs.extend(["-i", str(candidate.resolve())])
     x_expr, y_expr = _watermark_xy(wm.position)
-    target_w = int(_CANVAS_WIDTH * 0.15 / 2) * 2
+    target_w = int(canvas_width * 0.15 / 2) * 2
     next_label = "[outv_wm]"
     filter_parts.append(
         f"[1:v]format=rgba,scale={target_w}:-2[wm];{current_label}[wm]overlay={x_expr}:{y_expr}{next_label}"
@@ -626,8 +692,14 @@ def _build_render_plan(
     *,
     normalize_audio: bool = True,
 ) -> tuple[Path | None, str, list[str], str, bool]:
+    geometry = _VideoGeometry(
+        src_dimensions=ctx.src_dimensions,
+        canvas_width=ctx.canvas_width,
+        canvas_height=ctx.canvas_height,
+    )
     filter_parts, current_label = _build_timeline_video_chains(
-        ctx.variant.layout_timeline, ctx.src_dimensions
+        ctx.variant.layout_timeline,
+        geometry,
     )
 
     if ctx.source_has_audio:
@@ -649,7 +721,7 @@ def _build_render_plan(
         )
 
     wm_parts, extra_inputs, current_label = _build_watermark_chain(
-        ctx.project_dir, ctx.variant, current_label
+        ctx.project_dir, ctx.variant, current_label, ctx.canvas_width
     )
     filter_parts.extend(wm_parts)
 
@@ -733,7 +805,10 @@ def _evaluate_gate(
         start_sec=variant.start_ms / 1000.0,
         end_sec=variant.end_ms / 1000.0,
     )
-    contract = vanilla_contract(campaign_id="studio", platform=Platform.TIKTOK)
+    base = vanilla_contract(campaign_id="studio", platform=Platform.TIKTOK)
+    contract = base.model_copy(
+        update={"outputs": (OutputSpec(aspect=variant.output_aspect, index=0),)}
+    )
     gate_result: GateResult = gate.evaluate_piece(piece, contract=contract)
 
     if not gate_result.passed:
@@ -747,12 +822,38 @@ def _evaluate_gate(
         raise FinalRenderError(msg, error_code="gate_rejected")
 
 
-def _publish_artifact(temp_destination: Path, destination: Path) -> None:
+def _publish_artifact(temp_destination: Path, destination: Path, *, overwrite: bool = True) -> None:
+    if overwrite:
+        try:
+            _ = temp_destination.replace(destination)
+        except OSError as error:
+            msg = f"Failed to publish final deliverable to {destination}: {error}"
+            raise FinalRenderError(msg, error_code="publish_failed") from error
+        if destination.is_symlink() or destination.is_junction():
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            msg = f"Final destination {destination} is a symlink or junction."
+            raise FinalRenderError(msg, error_code="invalid_destination")
+        return
     try:
-        _ = temp_destination.replace(destination)
+        _ = os.link(temp_destination, destination)
+    except FileExistsError as error:
+        with contextlib.suppress(OSError):
+            if temp_destination.exists():
+                temp_destination.unlink()
+        msg = (
+            f"Refusing to overwrite existing deliverable at {destination}: "
+            "explicit user review is required."
+        )
+        raise FinalRenderError(msg, error_code="destination_exists") from error
     except OSError as error:
+        with contextlib.suppress(OSError):
+            if temp_destination.exists():
+                temp_destination.unlink()
         msg = f"Failed to publish final deliverable to {destination}: {error}"
         raise FinalRenderError(msg, error_code="publish_failed") from error
+    with contextlib.suppress(OSError):
+        temp_destination.unlink()
     if destination.is_symlink() or destination.is_junction():
         with contextlib.suppress(OSError):
             destination.unlink()

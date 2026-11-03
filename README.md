@@ -46,8 +46,23 @@ Full programmatic pipeline for automated headless workflows, batch processing, a
 
 ### Prerequisites
 - Python 3.13+ and [`uv`](https://docs.astral.sh/uv/)
-- Node.js 22+ and Rust stable (if developing or running Studio from source)
+- Node.js 22+ (Studio development and the full test suite); Rust stable for Studio development
 - FFmpeg installed and available on PATH
+
+On Linux, Studio's WebKitGTK player also needs **GStreamer playback plugins**.
+FFmpeg can render an MP4 even when the desktop WebView cannot play it; missing
+native plugins can terminate the WebKit process and leave a grey window.
+
+```sh
+# Arch / EndeavourOS (Studio playback, in addition to the Tauri build prerequisites)
+sudo pacman -S --needed gst-plugins-good gst-plugins-bad gst-libav
+
+# Debian / Ubuntu
+sudo apt-get install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+```
+
+Restart Studio after installing the plugins. Debian installers declare these
+runtime dependencies; AppImage builds enable Tauri's bundled media framework.
 
 ### 1. Running Kliptych Studio (Desktop)
 

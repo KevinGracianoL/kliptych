@@ -16,11 +16,15 @@ from kliptych.gate.probe import MediaProbe, ProbeError
 from kliptych.hashing import sha256_canonical_json, sha256_file
 from kliptych.layout_geometry import build_layout_filter_chains
 from kliptych.studio.models import AnalysisDocument
-from kliptych.studio.project_models import LayoutPosition, ProjectDocument, ProjectStatus, Variant
+from kliptych.studio.project_models import (
+    LayoutPosition,
+    ProjectDocument,
+    ProjectStatus,
+    Variant,
+    preview_dimensions,
+)
 from kliptych.studio.project_store import ProjectStoreError, open_project_store
 
-_CANVAS_WIDTH = 720
-_CANVAS_HEIGHT = 1280
 _JPEG_QSCALE = 3
 _PREVIEW_IMPLEMENTATION_VERSION = "1"
 _PREVIEW_DIR = "previews"
@@ -78,6 +82,8 @@ class _RenderInput:
     source: Path
     position: LayoutPosition
     dimensions: tuple[int, int]
+    canvas_width: int
+    canvas_height: int
     at_ms: int
     destination: Path
     ffmpeg: str
@@ -140,6 +146,7 @@ def generate_preview(
         raise PreviewError(msg)
     source = _validated_source(request.project_dir, project.source_sha256, analysis=analysis)
     dimensions = _dimensions(probe, source)
+    canvas_width, canvas_height = preview_dimensions(variant.output_aspect)
     fingerprint = _fingerprint(project.source_sha256, variant, position, request.at_ms)
     destination = _preview_path(request.project_dir, request.variant_id, fingerprint)
     source_destination = _source_preview_path(destination)
@@ -147,7 +154,12 @@ def generate_preview(
     _require_regular_cache_path(source_destination)
     _require_regular_cache_path(source_hash_destination)
     if (
-        _is_valid_jpeg(destination, probe=probe)
+        _is_valid_jpeg(
+            destination,
+            probe=probe,
+            canvas_width=canvas_width,
+            canvas_height=canvas_height,
+        )
         and _is_valid_source_frame(source_destination, source_dimensions=dimensions, probe=probe)
         and _has_matching_source_hash(source_destination, source_hash_destination)
     ):
@@ -156,8 +168,8 @@ def generate_preview(
             source_frame_path=source_destination,
             preview_fingerprint=fingerprint,
             frame_time_ms=request.at_ms,
-            width=_CANVAS_WIDTH,
-            height=_CANVAS_HEIGHT,
+            width=canvas_width,
+            height=canvas_height,
             layout_position=position,
         )
     _invalidate_preview_pair(destination, source_destination, source_hash_destination)
@@ -172,6 +184,8 @@ def generate_preview(
                 source=source,
                 position=position,
                 dimensions=dimensions,
+                canvas_width=canvas_width,
+                canvas_height=canvas_height,
                 at_ms=request.at_ms,
                 destination=paths.composed_temp,
                 ffmpeg=ffmpeg,
@@ -200,8 +214,8 @@ def generate_preview(
         source_frame_path=source_destination,
         preview_fingerprint=fingerprint,
         frame_time_ms=request.at_ms,
-        width=_CANVAS_WIDTH,
-        height=_CANVAS_HEIGHT,
+        width=canvas_width,
+        height=canvas_height,
         layout_position=position,
     )
 
@@ -304,6 +318,7 @@ def _fingerprint(
     position: LayoutPosition,
     at_ms: int,
 ) -> str:
+    canvas_width, canvas_height = preview_dimensions(variant.output_aspect)
     return sha256_canonical_json(
         {
             "implementation_version": _PREVIEW_IMPLEMENTATION_VERSION,
@@ -322,8 +337,9 @@ def _fingerprint(
                 else None
             ),
             "caption_corrections": [c.model_dump(mode="json") for c in variant.caption_corrections],
-            "canvas_width": _CANVAS_WIDTH,
-            "canvas_height": _CANVAS_HEIGHT,
+            "canvas_width": canvas_width,
+            "canvas_height": canvas_height,
+            "output_aspect": variant.output_aspect.value,
             "jpeg_qscale": _JPEG_QSCALE,
         }
     )
@@ -465,8 +481,8 @@ def _render_preview(
     chains = list(
         build_layout_filter_chains(
             layout_spec=render_input.position.layout_spec,
-            canvas_width=_CANVAS_WIDTH,
-            canvas_height=_CANVAS_HEIGHT,
+            canvas_width=render_input.canvas_width,
+            canvas_height=render_input.canvas_height,
             source_dimensions=tuple(render_input.dimensions for _ in labels),
             input_labels=labels,
         )
@@ -493,7 +509,12 @@ def _render_preview(
     if not result.ok:
         msg = "Preview renderer failed."
         raise PreviewError(msg)
-    _require_jpeg(render_input.destination, probe=probe)
+    _require_jpeg(
+        render_input.destination,
+        probe=probe,
+        canvas_width=render_input.canvas_width,
+        canvas_height=render_input.canvas_height,
+    )
 
 
 def _preview_argv(
@@ -522,8 +543,10 @@ def _preview_argv(
     )
 
 
-def _require_jpeg(path: Path, *, probe: MediaProbe) -> None:
-    if not _is_valid_jpeg(path, probe=probe):
+def _require_jpeg(path: Path, *, probe: MediaProbe, canvas_width: int, canvas_height: int) -> None:
+    if not _is_valid_jpeg(
+        path, probe=probe, canvas_width=canvas_width, canvas_height=canvas_height
+    ):
         msg = "Preview renderer did not produce a JPEG."
         raise PreviewError(msg)
 
@@ -572,7 +595,7 @@ def _render_source_frame(
     )
 
 
-def _is_valid_jpeg(path: Path, *, probe: MediaProbe) -> bool:
+def _is_valid_jpeg(path: Path, *, probe: MediaProbe, canvas_width: int, canvas_height: int) -> bool:
     if not path.is_file() or path.is_symlink() or path.is_junction():
         return False
     try:
@@ -590,8 +613,8 @@ def _is_valid_jpeg(path: Path, *, probe: MediaProbe) -> bool:
         path.stat().st_size >= _JPEG_MARKER_BYTES
         and start == b"\xff\xd8"
         and end == b"\xff\xd9"
-        and media.width == _CANVAS_WIDTH
-        and media.height == _CANVAS_HEIGHT
+        and media.width == canvas_width
+        and media.height == canvas_height
     )
 
 
